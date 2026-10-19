@@ -1,4 +1,4 @@
-package com.example.addon.commands
+package com.liquidaddon.commands
 
 import com.mojang.brigadier.CommandDispatcher
 import net.ccbluex.liquidbounce.features.command.CommandRegistrar
@@ -7,14 +7,14 @@ import net.ccbluex.liquidbounce.features.command.brigadier.register
 import net.ccbluex.liquidbounce.utils.client.chat
 
 /**
- * Adds `.example` to the client's command tree.
+ * Aggiunge `.example` all'albero dei comandi del client.
  */
 object CommandExample : CommandRegistrar {
 
     override fun register(dispatcher: CommandDispatcher<ClientCommandSource>) {
         dispatcher.register("example") {
             exec {
-                chat("The example add-on is loaded.")
+                chat("LiquidAddon is loaded!")
                 1
             }
         }

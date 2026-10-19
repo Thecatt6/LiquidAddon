@@ -1,11 +1,11 @@
-package com.example.addon
+package com.liquidaddon
 
 import net.ccbluex.liquidbounce.features.module.ModuleCategory
 
 /**
- * Registered through [ExampleAddon.categories].
+ * Registrata tramite Addon.categories.
  */
-object ExampleCategories {
+object Categories {
 
     val EXAMPLE = ModuleCategory("Example")
 

@@ -1,4 +1,4 @@
-package com.example.addon.mixin;
+package com.liquidaddon.mixin;
 
 import net.minecraft.client.gui.screens.TitleScreen;
 import org.spongepowered.asm.mixin.Mixin;
@@ -7,10 +7,9 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Proves an add-on can ship Mixins - the main thing the Script API could never do.
- *
- * Targets a vanilla class. Mixing into LiquidBounce itself also works, but needs a priority above
- * the client's own config (1337) and no remapping, since its classes are already in the target
+ * Prova che un add-on può fornire Mixin - la cosa principale che la Script API non poteva mai fare.
+ * Mira a una classe vanilla. Mischiare in LiquidBounce stesso funziona anche, ma ha bisogno di una priorità sopra
+ * la config del client (1337) e nessuna rimappatura, poiché le sue classi sono già nel target
  * namespace.
  */
 @Mixin(TitleScreen.class)
@@ -18,7 +17,7 @@ public class MixinExampleTitleScreen {
 
     @Inject(method = "init", at = @At("RETURN"))
     private void onInit(CallbackInfo info) {
-        System.out.println("[ExampleAddon] Title screen initialised");
+        System.out.println("[LiquidAddon] Title screen initialised");
     }
 
 }

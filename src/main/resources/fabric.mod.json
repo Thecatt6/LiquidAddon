@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "LiquidAddon",
+  "id": "liquidaddon",
   "version": "${version}",
   "name": "LiquidAddon",
   "description": "LiquidBounce Addon",
@@ -14,7 +14,7 @@
     "issues": "https://github.com/Thecatt6/LiquidAddon/issues"
   },
   "license": "GPL-3.0-or-later",
-  "icon": "resources/LiquidAddon/icon.png",
+  "icon": "resources/liquidaddon/icon.png",
   "environment": "client",
   "entrypoints": {
     "liquidbounce": [
