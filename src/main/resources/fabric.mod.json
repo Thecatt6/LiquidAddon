@@ -1,29 +1,30 @@
 {
   "schemaVersion": 1,
-  "id": "example-addon",
+  "id": "LiquidAddon",
   "version": "${version}",
-  "name": "Example Addon",
-  "description": "An add-on template for LiquidBounce add-ons.",
+  "name": "LiquidAddon",
+  "description": "LiquidBounce Addon",
   "authors": [
-    "You"
+    "razzo715",
+    "Thecatt6"
   ],
   "contact": {
     "homepage": "https://liquidbounce.net/",
-    "sources": "https://github.com/CCBlueX/LiquidBounce-Addon-Template",
-    "issues": "https://github.com/CCBlueX/LiquidBounce-Addon-Template/issues"
+    "sources": "https://github.com/Thecatt6/LiquidAddon",
+    "issues": "https://github.com/Thecatt6/LiquidAddon/issues"
   },
   "license": "GPL-3.0-or-later",
-  "icon": "resources/example-addon/icon.png",
+  "icon": "resources/LiquidAddon/icon.png",
   "environment": "client",
   "entrypoints": {
     "liquidbounce": [
-      "com.example.addon.ExampleAddon"
+      "com.liquidaddon.Addon"
     ]
   },
   "mixins": [
-    "example-addon.mixins.json"
+    "liquidaddon.mixins.json"
   ],
-  "accessWidener": "example-addon.accesswidener",
+  "accessWidener": "liquidaddon.accesswidener",
   "depends": {
     "minecraft": "~${minecraft_version}",
     "fabricloader": ">=${loader_version}",
