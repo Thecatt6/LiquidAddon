@@ -29,7 +29,7 @@ repositories {
 }
 
 loom {
-    accessWidenerPath = file("src/main/resources/example-addon.accesswidener")
+    accessWidenerPath = file("src/main/resources/liquidaddon.accesswidener")
 }
 
 // Two things to leave alone here:
