@@ -2,6 +2,7 @@ package com.liquidaddon
 
 import com.liquidaddon.commands.CommandExample
 import com.liquidaddon.modules.ModuleExample
+import com.liquidaddon.modules.ModuleHitSelect
 import net.ccbluex.liquidbounce.features.addon.LiquidBounceAddon
 
 /**
@@ -14,7 +15,7 @@ class Addon : LiquidBounceAddon() {
     override fun onInitialize() {
         logger.info("LiquidAddon starting up")
 
-        registerModules(ModuleExample)
+        registerModules(ModuleExample, ModuleHitSelect)
         registerCommand(CommandExample)
     }
 

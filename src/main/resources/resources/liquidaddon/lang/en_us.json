@@ -1,5 +1,18 @@
 {
   "liquidbounce.module.example.description": "Greets you at a configurable interval.",
   "liquidbounce.module.example.value.interval.description": "Ticks between greetings.",
-  "liquidbounce.module.example.value.greeting.description": "The message to send."
+  "liquidbounce.module.example.value.greeting.description": "The message to send.",
+
+  "liquidbounce.module.hitSelect.description": "Drops hits like HitSelect (attack cancelled, swing still sent). Improves movement, reduces KB and increases crits.",
+  "liquidbounce.module.hitSelect.value.chance.description": "Chance that an attack will be considered for dropping.",
+  "liquidbounce.module.hitSelect.value.mode.description": "Pause: static - pauses N ticks after a hit. Active: dynamic - only pauses when advantageous.",
+  "liquidbounce.module.hitSelect.value.mode.modes.pause.description": "Static hit selection.",
+  "liquidbounce.module.hitSelect.value.mode.modes.pause.value.pauseTicks.description": "Ticks to pause after a hit (static).",
+  "liquidbounce.module.hitSelect.value.mode.modes.active.description": "Dynamic hit selection - only pauses when beneficial.",
+  "liquidbounce.module.hitSelect.value.preference.description": "Which benefit to prioritize. Both still give some of the other.",
+  "liquidbounce.module.hitSelect.value.onlyWhenTargetVulnerable.description": "Drop the hit if target still has hurtTime > MaxTargetHurtTime (invulnerable, would do no damage).",
+  "liquidbounce.module.hitSelect.value.maxTargetHurtTime.description": "Max target hurtTime allowed before dropping.",
+  "liquidbounce.module.hitSelect.value.alwaysWhenHurt.description": "If you were just hit (hurtTime>0) always pass the hit (counter-hit = less KB).",
+  "liquidbounce.module.hitSelect.value.onlyWhenHurt.description": "Only pass hits while you are hurt (extreme).",
+  "liquidbounce.module.hitSelect.value.chatLog.description": "Log every 10 hits how many were dropped/passed."
 }
