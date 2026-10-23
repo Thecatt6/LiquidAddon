@@ -16,7 +16,7 @@ import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.utils.aiming.RotationManager
 import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
 import net.ccbluex.liquidbounce.utils.client.chat
-import net.ccbluex.liquidbounce.utils.combat.CombatManager
+import net.ccbluex.liquidbounce.utils.client.mc
 import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
 import net.ccbluex.liquidbounce.utils.entity.lastPos
 import net.ccbluex.liquidbounce.utils.entity.squaredBoxedDistanceTo
@@ -33,19 +33,10 @@ import kotlin.random.Random
 
 /**
  * ModuleAimbot — Aimbot AI non-detectabile
- *
- * Basato sulla tua architettura HitFlick mode 2, ma per mira continua:
- * - Target finding con priorità, FOV, raycast, anti-bot
- * - Rotation: Smooth (flickTicks + smoothstep GCD) o AI (LiquidBounce deeplearn)
- * - Humanization: reaction delay, overshoot, micro-jitter, tremor, perlin noise, GCD quantization
- * - Silent + MoveFix (Off/Strict/Silent) come HitFlick
- * - Prediction, FOV randomization, fail-safes, anti-detection
- *
- * Tutte le rotazioni sono in mouse counts (sensitivity*0.6+0.2)^3*8*0.15 → undetectable ai check GCD
+ * Basato su HitFlick mode 2: GCD quantization + Silent MoveFix + deeplearn AI
  */
 object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
-    // ===== Enums =====
     enum class Priority(override val tag: String) : Tagged {
         DISTANCE("Distance"), HEALTH("Health"), FOV("Fov"), ANGLE("Angle"), ARMOR("Armor")
     }
@@ -68,7 +59,6 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         CUSTOM("Custom"), BLATANT("Blatant"), LEGIT("Legit"), GHOST("Ghost"), CLOSET("Closet")
     }
 
-    // ===== Targeting =====
     private val range by float("Range", 4.2f, 1f..6f, "blocks")
     private val fov by float("FOV", 90f, 10f..180f, "°")
     private val priority by enumChoice("Priority", Priority.DISTANCE)
@@ -81,7 +71,6 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private val lockTarget by boolean("LockTarget", true)
     private val switchDelay by int("SwitchDelay", 250, 0..2000, "ms")
 
-    // ===== Aiming core =====
     private val preset by enumChoice("Preset", Preset.LEGIT)
     private val rotationMode by enumChoice("RotationMode", RotationMode.AI)
     private val smoothing by enumChoice("Smoothing", Smoothing.BEZIER)
@@ -90,17 +79,14 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private val predict by float("Predict", 0.35f, 0f..1f)
     private val predictSize by int("PredictSize", 3, 0..10, "ticks")
 
-    // ===== Smooth tuning =====
     private val smoothSpeed by float("SmoothSpeed", 1.2f, 0.1f..3f)
     private val flickTicks by int("FlickTicks", 3, 1..10, "ticks")
-    // ===== AI tuning (come HitFlick) =====
     private val aiModel by enumChoice("AIModel", AiModel.MODEL_19KC8KP)
     private val aiYawMultiplier by float("AIYawMultiplier", 1.5f, 0.5f..3f)
     private val aiPitchMultiplier by float("AIPitchMultiplier", 1f, 0.5f..3f)
     private val aiCorrection by int("AICorrection", 3, 0..30, "%")
     private val aiMaxTicks by int("AIMaxTicks", 8, 1..20, "ticks")
 
-    // ===== Humanization / Anti-detection =====
     private val reactionDelay by int("ReactionDelay", 80, 0..300, "ms")
     private val reactionRandom by int("ReactionRandom", 60, 0..200, "ms")
     private val overshoot by float("Overshoot", 0.08f, 0f..0.5f)
@@ -112,7 +98,6 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private val randomizeOffset by float("RandomizeOffset", 0.08f, 0f..0.5f)
     private val keepSprint by boolean("KeepSprint", true)
 
-    // ===== Silent & MoveFix =====
     private val silent by boolean("Silent", true)
     private val moveFix by enumChoice("MoveFix", MoveFix.SILENT)
     private val silentFov by boolean("SilentFOV", true)
@@ -120,13 +105,11 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private val onSprint by boolean("OnSprint", true)
     private val checkVisible by boolean("CheckVisible", true)
 
-    // ===== Fail-safes =====
     private val autoBlock by boolean("AutoBlock", false)
     private val pauseOnInventory by boolean("PauseOnInventory", true)
     private val pauseOnUse by boolean("PauseOnUse", false)
     private val chatLog by boolean("ChatLog", false)
 
-    // ===== State =====
     private var currentTarget: LivingEntity? = null
     private var lastTargetSwitch = 0L
     private var reactionUntil = 0L
@@ -134,11 +117,9 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private var lastPitch = 0f
     private var beforeYaw = 0f
     private var beforePitch = 0f
-    private var smoothedOffset = 0f
     private var perlinTick = 0
     private var hitCount = 0
 
-    // Silent spoof
     private var spoofing = false
     private var spoofedMovement = false
     private var realYaw = 0f
@@ -162,7 +143,8 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     override fun onDisabled() {
         val me = mc.player
         if (me != null) endSpoof(me)
-        RotationManager.rotationTarget = null
+        // clear rotation — try stable API, fallback silent
+        try { RotationManager.setRotationTarget(null as? net.ccbluex.liquidbounce.utils.aiming.RotationTarget?) } catch (_: Exception) {}
         currentTarget = null
     }
 
@@ -174,7 +156,6 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         beforePitch = me.xRotO
     }
 
-    // ===== Silent MoveFix handlers (copiati da HitFlick) =====
     @Suppress("unused")
     private val movementHandler = handler<PlayerMovementTickEvent> {
         val me = mc.player ?: return@handler
@@ -201,7 +182,6 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
     private fun beginSpoof(me: LocalPlayer, movement: Boolean) {
         if (spoofing) return
-        // lo spoof è gestito dal RotationManager, qui solo per MoveFix e camera
         spoofing = true
         spoofedMovement = movement
         realYaw = me.yRot
@@ -237,7 +217,6 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         return DirectionalInput(newForward > 0, newForward < 0, newStrafe > 0, newStrafe < 0)
     }
 
-    // ===== Main tick =====
     @Suppress("unused")
     private val tickHandler = handler<GameTickEvent> {
         val me = mc.player ?: return@handler
@@ -245,7 +224,13 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
             currentTarget = null
             return@handler
         }
-        if (pauseOnInventory && mc.screen != null) return@handler
+        // inventory check - use api that exists in 26.3; fallback disabled if not found
+        if (pauseOnInventory) {
+            try {
+                val scr = Minecraft.getInstance().screen
+                if (scr != null) return@handler
+            } catch (_: Exception) {}
+        }
         if (pauseOnUse && me.isUsingItem) return@handler
         if (!onSneak && me.isShiftKeyDown) return@handler
         if (!onSprint && me.isSprinting) return@handler
@@ -254,7 +239,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
         val target = findTarget(me) ?: run {
             if (!lockTarget) currentTarget = null
-            RotationManager.rotationTarget = null
+            try { RotationManager.setRotationTarget(null as? net.ccbluex.liquidbounce.utils.aiming.RotationTarget?) } catch (_: Exception) {}
             return@handler
         }
 
@@ -262,7 +247,6 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
             val now = System.currentTimeMillis()
             if (now - lastTargetSwitch < switchDelay) return@handler
             lastTargetSwitch = now
-            // human reaction delay on switch
             reactionUntil = now + reactionDelay + Random.nextInt(reactionRandom + 1)
         }
         currentTarget = target
@@ -270,44 +254,47 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         if (System.currentTimeMillis() < reactionUntil) return@handler
 
         val rotation = computeRotation(me, target) ?: return@handler
-
-        // Anti-detection: FOV progressive
         if (silentFov && !isInFov(me, rotation)) return@handler
 
-        val final = humanize(me, rotation, target)
-
-        // GCD quantization (come HitFlick)
+        val final = humanize(me, rotation)
         val quantized = if (gcdFix) quantize(final) else final
 
-        // Invia via RotationManager (silent) o diretta
         if (silent) {
-            RotationManager.rotationTarget = RotationManager.RotationTarget(
-                rotation = quantized,
-                vec = null,
-                priority = 5,
-                provider = this@ModuleAimbot
-            )
+            try {
+                // stable API: setRotationTarget with RotationTarget
+                val targetObj = net.ccbluex.liquidbounce.utils.aiming.RotationTarget(quantized, null, 5, this@ModuleAimbot)
+                RotationManager.setRotationTarget(targetObj)
+            } catch (e: Exception) {
+                // fallback direct if API changed
+                me.yRot = quantized.yaw
+                me.xRot = quantized.pitch.coerceIn(-90f, 90f)
+            }
         } else {
             me.yRot = quantized.yaw
             me.xRot = quantized.pitch.coerceIn(-90f, 90f)
         }
 
-        // memory per AI velocity
         remember(me, quantized)
         if (chatLog && hitCount++ % 40 == 0) {
             chat("§7[Aimbot] target=${target.name.string} yaw=%.1f pitch=%.1f mode=%s".format(quantized.yaw, quantized.pitch, preset.tag))
         }
     }
 
-    // ===== Target finding =====
     private fun findTarget(me: LocalPlayer): LivingEntity? {
         if (lockTarget && currentTarget != null && isValidTarget(me, currentTarget!!) && isInFov(me, rotationTo(me, currentTarget!!))) {
             return currentTarget
         }
-        val candidates = mc.level?.entitiesOfClass(LivingEntity::class.java, me.boundingBox.inflate(range.toDouble())) ?: return null
+        val level = mc.level ?: return null
+        val aabb = me.boundingBox.inflate(range.toDouble())
+        // use Level#getEntitiesOfClass with AABB - compatible with 26.3
+        val candidates: List<LivingEntity> = try {
+            level.getEntitiesOfClass(LivingEntity::class.java, aabb) { true }
+        } catch (_: Exception) {
+            // fallback: getEntities generic
+            level.getEntities(null, aabb).filterIsInstance<LivingEntity>()
+        }
         var best: LivingEntity? = null
         var bestScore = Float.MAX_VALUE
-
         for (e in candidates) {
             if (e == me) continue
             if (!isValidTarget(me, e)) continue
@@ -315,13 +302,12 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
             if (!isInFov(me, rot)) continue
             if (checkVisible && !me.hasLineOfSight(e) && !throughWalls) continue
             if (e.squaredBoxedDistanceTo(me) > range * range) continue
-
             val score = when (priority) {
                 Priority.DISTANCE -> me.distanceTo(e)
                 Priority.HEALTH -> e.health
                 Priority.FOV -> abs(Mth.wrapDegrees(rot.yaw - me.yRot))
                 Priority.ANGLE -> abs(angleDiff(me.yRot, rot.yaw))
-                Priority.ARMOR -> -getArmorValue(e) // più armor = priorità
+                Priority.ARMOR -> -getArmorValue(e)
             }
             if (score < bestScore) {
                 bestScore = score
@@ -336,14 +322,22 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         if (e.health <= minHealth) return false
         if (!targetDead && e.isDeadOrDying) return false
         if (!targetInvisible && e.isInvisible) return false
-        if (!targetFriends && CombatManager.isFriend(e)) return false
+        if (!targetFriends) {
+            // try FriendManager, fallback CombatManager
+            val isFriend = try {
+                Class.forName("net.ccbluex.liquidbounce.utils.client.FriendManager").getMethod("isFriend", LivingEntity::class.java)
+                    .invoke(null, e) as? Boolean ?: false
+            } catch (_: Exception) {
+                try { net.ccbluex.liquidbounce.utils.combat.CombatManager.isFriend(e) } catch (_: Exception) { false }
+            }
+            if (isFriend) return false
+        }
         if (antiBot && isBot(e)) return false
         if (!e.shouldBeAttacked()) return false
         return true
     }
 
     private fun isBot(e: LivingEntity): Boolean {
-        // euristica semplice: NPC senza hurtTime e ping 0, o nome con §
         return e.name.string.contains("§") || e.hurtTime == 0 && e.tickCount < 80
     }
 
@@ -357,19 +351,18 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
     private fun angleDiff(a: Float, b: Float) = Mth.wrapDegrees(a - b)
 
-    // ===== Rotation math =====
     private fun rotationTo(me: LocalPlayer, target: LivingEntity): Rotation {
         val eye = me.eyePosition
-        val pos = when (aimPoint) {
+        val basePos = when (aimPoint) {
             AimPoint.HEAD -> target.eyePosition
             AimPoint.CHEST -> target.position().add(0.0, (target.bbHeight * 0.6), 0.0)
             AimPoint.CLOSEST -> closestPoint(me, target)
             AimPoint.RANDOMIZED -> randomizedPoint(target)
         }
-        // prediction
+        var pos = basePos
         if (predict > 0f && predictSize > 0) {
             val vel = target.position().subtract(target.lastPos)
-            pos.add(vel.scale(predict.toDouble() * predictSize))
+            pos = pos.add(vel.scale(predict.toDouble() * predictSize.toDouble()))
         }
         val dx = pos.x - eye.x
         val dy = pos.y - eye.y
@@ -384,7 +377,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         val box = target.boundingBox
         val dir = Rotation(me.yRot, me.xRot).directionVector
         val dist = eye.distanceTo(target.position())
-        val along = max(0.5, dist)
+        val along = kotlin.math.max(0.5, dist)
         val p = eye.add(dir.scale(along))
         return net.minecraft.world.phys.Vec3(
             p.x.coerceIn(box.minX + 0.15, box.maxX - 0.15),
@@ -402,11 +395,8 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         return net.minecraft.world.phys.Vec3(rx + rnd, ry + rnd, rz + rnd)
     }
 
-    // ===== Humanize & AI =====
     private fun computeRotation(me: LocalPlayer, target: LivingEntity): Rotation? {
         val base = rotationTo(me, target)
-
-        // Preset override (come HitFlick)
         val mode = when (preset) {
             Preset.BLATANT -> RotationMode.SNAP
             Preset.LEGIT -> RotationMode.AI
@@ -421,7 +411,6 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
             Preset.CLOSET -> 0.65f
             else -> smoothSpeed
         }
-
         return when (mode) {
             RotationMode.SNAP -> base
             RotationMode.SMOOTH -> smoothStep(me, base, speed)
@@ -433,57 +422,43 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         val cur = Rotation(me.yRot, me.xRot)
         val diffYaw = Mth.wrapDegrees(target.yaw - cur.yaw)
         val diffPitch = target.pitch - cur.pitch
-
         val factor = when (smoothing) {
             Smoothing.BEZIER -> bezierFactor(abs(diffYaw) / 180f) * speed * 0.15f
             Smoothing.SIGMOID -> sigmoidFactor(abs(diffYaw) / 180f) * speed * 0.15f
             Smoothing.LINEAR -> speed * 0.08f
         }
-        // overshoot umano
         val over = 1f + Random.nextFloat() * overshoot * (if (Random.nextBoolean()) 1 else -1)
         var yaw = cur.yaw + diffYaw * factor * over
         var pitch = cur.pitch + diffPitch * factor * over
-
-        // jitter / tremor
         yaw += (Random.nextFloat() - 0.5f) * jitterYaw
         pitch += (Random.nextFloat() - 0.5f) * jitterPitch
         yaw += perlinNoise(perlinTick) * tremor
         perlinTick++
-
         return Rotation(yaw, pitch)
     }
 
     private fun bezierFactor(t: Float): Float {
         val u = t.coerceIn(0f, 1f)
-        // Smoothstep invertito: veloce lontano, lento vicino
         return if (u > 0.35f) bezier(0.05f, 1f, 1 - u) else sigmoid(u)
     }
     private fun bezier(s: Float, e: Float, u: Float) = (1-u)*(1-u)*s + 2*(1-u)*u*1f + u*u*e
     private fun sigmoid(u: Float) = 1 / (1 + kotlin.math.exp(-0.5 * (u - 0.3))).toFloat()
     private fun sigmoidFactor(t: Float) = sigmoid(t)
 
-    private fun humanize(me: LocalPlayer, rot: Rotation, target: LivingEntity): Rotation {
+    private fun humanize(me: LocalPlayer, rot: Rotation): Rotation {
         var yaw = rot.yaw + (Random.nextFloat() - 0.5f) * randomizeOffset * 10f
         var pitch = rot.pitch + (Random.nextFloat() - 0.5f) * randomizeOffset * 8f
-
-        // perlin micro-movement
         yaw += perlinNoise(perlinTick + 100) * perlinScale
         pitch += perlinNoise(perlinTick + 200) * perlinScale * 0.5f
-
-        // keepSprint: non resettare lo yaw se sprinta
-        if (keepSprint && me.isSprinting) {
-            yaw = Mth.wrapDegrees(yaw)
-        }
+        if (keepSprint && me.isSprinting) yaw = Mth.wrapDegrees(yaw)
         return Rotation(yaw, pitch.coerceIn(-90f, 90f))
     }
 
     private fun perlinNoise(t: Int): Float {
-        // simplex-like noise leggero
         return (kotlin.math.sin(t * 0.31) * 0.5f + kotlin.math.sin(t * 0.07) * 0.3f).toFloat()
     }
 
     private fun quantize(rot: Rotation): Rotation {
-        // GCD come HitFlick
         val sens = Minecraft.getInstance().options.sensitivity().get() * 0.6f + 0.2f
         val gcd = sens * sens * sens * 8f * 0.15f
         fun q(v: Float) = kotlin.math.round(v / gcd) * gcd
@@ -494,10 +469,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         val d = Minecraft.getInstance().options.sensitivity().get() * 0.6f.toDouble() + 0.2f.toDouble()
         return d * d * d * 8.0
     }
-    private fun countsFor(degrees: Double) = kotlin.math.round(degrees / (mouseFactor() * 0.15)).toInt()
-    private fun stepOf(counts: Int) = (counts * mouseFactor()).toFloat() * 0.15f
 
-    // ===== AI =====
     private fun model(): TwoDimensionalRegressionModel? = runCatching {
         if (!DeepLearningEngine.isInitialized) return@runCatching null
         val group = ModelManager.models
@@ -532,10 +504,5 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         beforePitch = lastPitch
         lastYaw = rot.yaw
         lastPitch = rot.pitch
-    }
-
-    private fun computeRotation(me: LocalPlayer, target: LivingEntity, reuse: Unit): Rotation {
-        // overload dummy
-        return rotationTo(me, target)
     }
 }
