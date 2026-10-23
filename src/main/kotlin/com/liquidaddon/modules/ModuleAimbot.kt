@@ -143,8 +143,8 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     override fun onDisabled() {
         val me = mc.player
         if (me != null) endSpoof(me)
-        // clear rotation — try stable API, fallback silent
-        try { RotationManager.setRotationTarget(null as? net.ccbluex.liquidbounce.utils.aiming.RotationTarget?) } catch (_: Exception) {}
+        // clear rotation — RotationManager has no nullable setter in 26.3, just stop targeting
+        try { RotationManager.setRotationTarget(Rotation(me?.yRot ?: 0f, me?.xRot ?: 0f), false, net.ccbluex.liquidbounce.utils.aiming.RotationsConfigurable(), net.ccbluex.liquidbounce.utils.aiming.RotationManager.Priority.NORMAL, this) } catch (_: Exception) {}
         currentTarget = null
     }
 
@@ -224,12 +224,19 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
             currentTarget = null
             return@handler
         }
-        // inventory check - use api that exists in 26.3; fallback disabled if not found
+        // inventory check - API changed in 26.3 (screen -> currentScreen), fallback disabled
+        // if needed, rely on mc.screen check via reflection
         if (pauseOnInventory) {
             try {
-                val scr = Minecraft.getInstance().screen
+                val f = Minecraft::class.java.getDeclaredField("screen").apply { isAccessible = true }
+                val scr = f.get(Minecraft.getInstance())
                 if (scr != null) return@handler
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+                try {
+                    val f2 = Minecraft::class.java.getDeclaredField("currentScreen").apply { isAccessible = true }
+                    if (f2.get(Minecraft.getInstance()) != null) return@handler
+                } catch (_: Exception) {}
+            }
         }
         if (pauseOnUse && me.isUsingItem) return@handler
         if (!onSneak && me.isShiftKeyDown) return@handler
@@ -239,7 +246,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
         val target = findTarget(me) ?: run {
             if (!lockTarget) currentTarget = null
-            try { RotationManager.setRotationTarget(null as? net.ccbluex.liquidbounce.utils.aiming.RotationTarget?) } catch (_: Exception) {}
+            try { RotationManager.setRotationTarget(Rotation(me.yRot, me.xRot), false, net.ccbluex.liquidbounce.utils.aiming.RotationsConfigurable(), RotationManager.Priority.NORMAL, this@ModuleAimbot) } catch (_: Exception) {}
             return@handler
         }
 
@@ -261,13 +268,17 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
         if (silent) {
             try {
-                // stable API: setRotationTarget with RotationTarget
-                val targetObj = net.ccbluex.liquidbounce.utils.aiming.RotationTarget(quantized, null, 5, this@ModuleAimbot)
-                RotationManager.setRotationTarget(targetObj)
+                // stable API in 26.3: setRotationTarget(plan, priority, provider) where plan = RotationTarget(Rotation)
+                val plan = net.ccbluex.liquidbounce.utils.aiming.RotationTarget(quantized)
+                RotationManager.setRotationTarget(plan, RotationManager.Priority.NORMAL, this@ModuleAimbot)
             } catch (e: Exception) {
-                // fallback direct if API changed
-                me.yRot = quantized.yaw
-                me.xRot = quantized.pitch.coerceIn(-90f, 90f)
+                try {
+                    // alternative: setRotationTarget(rotation, valueGroup, priority, provider)
+                    RotationManager.setRotationTarget(quantized, false, net.ccbluex.liquidbounce.utils.aiming.RotationsConfigurable(), RotationManager.Priority.NORMAL, this@ModuleAimbot)
+                } catch (_: Exception) {
+                    me.yRot = quantized.yaw
+                    me.xRot = quantized.pitch.coerceIn(-90f, 90f)
+                }
             }
         } else {
             me.yRot = quantized.yaw
@@ -323,13 +334,11 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         if (!targetDead && e.isDeadOrDying) return false
         if (!targetInvisible && e.isInvisible) return false
         if (!targetFriends) {
-            // try FriendManager, fallback CombatManager
             val isFriend = try {
-                Class.forName("net.ccbluex.liquidbounce.utils.client.FriendManager").getMethod("isFriend", LivingEntity::class.java)
-                    .invoke(null, e) as? Boolean ?: false
-            } catch (_: Exception) {
-                try { net.ccbluex.liquidbounce.utils.combat.CombatManager.isFriend(e) } catch (_: Exception) { false }
-            }
+                val fm = Class.forName("net.ccbluex.liquidbounce.utils.client.FriendManager")
+                val m = fm.methods.firstOrNull { it.name == "isFriend" && it.parameterCount == 1 }
+                m?.invoke(null, e) as? Boolean ?: false
+            } catch (_: Exception) { false }
             if (isFriend) return false
         }
         if (antiBot && isBot(e)) return false
@@ -355,14 +364,14 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         val eye = me.eyePosition
         val basePos = when (aimPoint) {
             AimPoint.HEAD -> target.eyePosition
-            AimPoint.CHEST -> target.position().add(0.0, (target.bbHeight * 0.6), 0.0)
+            AimPoint.CHEST -> target.position().add(0.0, (target.bbHeight.toDouble() * 0.6), 0.0)
             AimPoint.CLOSEST -> closestPoint(me, target)
             AimPoint.RANDOMIZED -> randomizedPoint(target)
         }
         var pos = basePos
         if (predict > 0f && predictSize > 0) {
             val vel = target.position().subtract(target.lastPos)
-            pos = pos.add(vel.scale(predict.toDouble() * predictSize.toDouble()))
+            pos = pos.add(vel.scale((predict * predictSize).toDouble()))
         }
         val dx = pos.x - eye.x
         val dy = pos.y - eye.y
