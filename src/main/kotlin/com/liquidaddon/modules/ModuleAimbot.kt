@@ -17,6 +17,7 @@ import net.ccbluex.liquidbounce.utils.aiming.RotationManager
 import net.ccbluex.liquidbounce.utils.aiming.RotationTarget
 import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
 import net.ccbluex.liquidbounce.utils.aiming.features.MovementCorrection
+import net.ccbluex.liquidbounce.utils.aiming.utils.RotationUtil
 import net.ccbluex.liquidbounce.utils.client.chat
 import net.ccbluex.liquidbounce.utils.client.mc
 import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
@@ -39,6 +40,9 @@ import kotlin.random.Random
  * Basato su HitFlick mode 2: GCD quantization + Silent MoveFix + deeplearn AI
  */
 object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
+
+    /** How far (in mouse counts) the rounding boundary may wobble when [gcdDither] is on. */
+    private const val DITHER_WOBBLE = 0.18
 
     enum class Priority(override val tag: String) : Tagged {
         DISTANCE("Distance"), HEALTH("Health"), FOV("Fov"), ANGLE("Angle"), ARMOR("Armor")
@@ -98,6 +102,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private val tremor by float("Tremor", 0.15f, 0f..1f, "°")
     private val perlinScale by float("PerlinScale", 0.3f, 0f..1f)
     private val gcdFix by boolean("GCDFix", true)
+    private val gcdDither by boolean("GCDDither", true)
     private val randomizeOffset by float("RandomizeOffset", 0.08f, 0f..0.5f)
     private val keepSprint by boolean("KeepSprint", true)
 
@@ -125,6 +130,10 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private var hitCount = 0
 
     // --- debug bookkeeping (only used when the "Debug" setting is on) ---
+    // rounding residual carried between ticks so the aim never stalls on a sub-count difference
+    private var yawCarry = 0.0
+    private var pitchCarry = 0.0
+
     private var debugTick = 0
     private var scanCount = 0
     private var validCount = 0
@@ -149,6 +158,8 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         perlinTick = 0
         debugTick = 0
         lastGate = "start"
+        yawCarry = 0.0
+        pitchCarry = 0.0
         resetRotationMemory()
     }
 
@@ -278,7 +289,18 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         if (silentFov && !isInFov(me, rotation)) return@handler
 
         val final = humanize(me, rotation)
-        val quantized = if (gcdFix) quantize(final) else final
+        val quantized = if (gcdFix) {
+            // Snap the DELTA from the rotation the client last aimed with, exactly like the
+            // RotationManager would do; never snap the absolute angle.
+            val base = if (silent) {
+                RotationManager.currentRotation ?: Rotation(me.yRot, me.xRot)
+            } else {
+                Rotation(me.yRot, me.xRot)
+            }
+            quantizeToMouseCounts(base, final)
+        } else {
+            final
+        }
 
         if (silent) {
             RotationManager.setRotationTarget(
@@ -288,7 +310,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
             )
         } else {
             me.yRot = quantized.yaw
-            me.xRot = quantized.pitch.coerceIn(-90f, 90f)
+            me.xRot = quantized.pitch.coerceIn(-89.9f, 89.9f)
         }
 
         remember(me, quantized)
@@ -507,12 +529,54 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         return (kotlin.math.sin(t * 0.31) * 0.5f + kotlin.math.sin(t * 0.07) * 0.3f).toFloat()
     }
 
-    private fun quantize(rot: Rotation): Rotation {
-        // OptionInstance<Double>#get returns a Double, so convert before mixing in Float factors.
-        val sens = Minecraft.getInstance().options.sensitivity().get().toFloat() * 0.6f + 0.2f
-        val gcd = sens * sens * sens * 8f * 0.15f
-        fun q(v: Float) = kotlin.math.round(v / gcd) * gcd
-        return Rotation(q(rot.yaw), q(rot.pitch))
+    /**
+     * Turns [desired] into a rotation a real mouse could have produced, starting from [from].
+     *
+     * The client moves the player by whole mouse counts: `step = (float)(f³ * 8) * 0.15f` degrees per
+     * count, with `f = sensitivity * 0.6 + 0.2`. That value is exactly [RotationUtil.gcd] and it is the
+     * same math LiquidBounce's [Rotation.normalize] uses, so:
+     *
+     *  - we round the DELTA from the last aimed rotation, never the absolute angle (rounding absolute
+     *    values to a global grid is what produces "impossible sensitivity" flags);
+     *  - we return the result marked [Rotation.isNormalized] so the manager does not round it again
+     *    from a different base, which would move it off the lattice;
+     *  - with [gcdDither] the residual is carried to the next tick and the rounding boundary wobbles,
+     *    because a real hand does not always land on the nearest count. A perfectly repeating delta
+     *    sequence (e.g. "+3 counts, +3 counts, ...") is a classic GCD/aimbot pattern.
+     */
+    private fun quantizeToMouseCounts(from: Rotation, desired: Rotation): Rotation {
+        val step = RotationUtil.gcd
+        if (step < 1.0e-6) return desired
+
+        val deltaYaw = RotationUtil.angleDifference(desired.yaw, from.yaw).toDouble()
+        val deltaPitch = (desired.pitch - from.pitch).toDouble()
+
+        val rawYaw = deltaYaw / step + (if (gcdDither) yawCarry else 0.0)
+        val rawPitch = deltaPitch / step + (if (gcdDither) pitchCarry else 0.0)
+
+        val countsYaw: Int
+        val countsPitch: Int
+
+        if (gcdDither) {
+            countsYaw = handRound(rawYaw)
+            countsPitch = handRound(rawPitch)
+            yawCarry = (rawYaw - countsYaw).coerceIn(-0.95, 0.95)
+            pitchCarry = (rawPitch - countsPitch).coerceIn(-0.95, 0.95)
+        } else {
+            countsYaw = kotlin.math.round(rawYaw).toInt()
+            countsPitch = kotlin.math.round(rawPitch).toInt()
+        }
+
+        val yaw = from.yaw + (countsYaw * step).toFloat()
+        // never touch the exact +-90 boundary, servers treat it as an untouched pitch
+        val pitch = (from.pitch + (countsPitch * step).toFloat()).coerceIn(-89.9f, 89.9f)
+        return Rotation(Mth.wrapDegrees(yaw), pitch, isNormalized = true)
+    }
+
+    /** Nearest whole mouse count, with the decision boundary wobbling like a human hand. */
+    private fun handRound(counts: Double): Int {
+        val wobble = Random.nextDouble(-DITHER_WOBBLE, DITHER_WOBBLE)
+        return kotlin.math.floor(counts + 0.5 + wobble).toInt()
     }
 
     /**
