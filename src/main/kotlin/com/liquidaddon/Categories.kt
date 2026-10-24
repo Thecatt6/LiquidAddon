@@ -7,6 +7,6 @@ import net.ccbluex.liquidbounce.features.module.ModuleCategory
  */
 object Categories {
 
-    val EXAMPLE = ModuleCategory("Example")
+    val LIQUIDADDON = ModuleCategory("LiquidAddon")
 
 }

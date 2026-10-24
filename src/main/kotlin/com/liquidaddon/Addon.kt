@@ -1,7 +1,8 @@
 package com.liquidaddon
 
-import com.liquidaddon.modules.ModuleExample
+import com.liquidaddon.modules.ModuleHitFlick
 import com.liquidaddon.modules.ModuleHitSelect
+import com.liquidaddon.modules.ModuleAimbot
 import net.ccbluex.liquidbounce.features.addon.LiquidBounceAddon
 
 /**
@@ -9,13 +10,13 @@ import net.ccbluex.liquidbounce.features.addon.LiquidBounceAddon
  */
 class Addon : LiquidBounceAddon() {
 
-    override val categories = listOf(Categories.EXAMPLE)
+    override val categories = listOf(Categories.LIQUIDADDON)
 
     override fun onInitialize() {
         logger.info("LiquidAddon starting up")
 
         // Registra i moduli. CommandExample è opzionale — se non c'è il file, commenta la riga sotto
-        registerModules(ModuleExample, ModuleHitSelect)
+        registerModules(ModuleHitSelect, ModuleHitFlick, ModuleAimbot)
 
         // Prova a registrare il comando se esiste
         try {
@@ -37,7 +38,6 @@ class Addon : LiquidBounceAddon() {
      * Le impostazioni sono state ripristinate dal disco a questo punto.
      */
     override fun onStarted() {
-        logger.info("Example module is ${if (ModuleExample.enabled) "enabled" else "disabled"}")
     }
 
     override fun onStopping() {
