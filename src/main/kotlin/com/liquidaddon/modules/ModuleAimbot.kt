@@ -14,16 +14,12 @@ import net.ccbluex.liquidbounce.event.events.PlayerNetworkMovementTickEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.utils.aiming.RotationManager
-import net.ccbluex.liquidbounce.utils.aiming.RotationTarget
 import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
-import net.ccbluex.liquidbounce.utils.aiming.features.MovementCorrection
-import net.ccbluex.liquidbounce.utils.aiming.utils.RotationUtil
 import net.ccbluex.liquidbounce.utils.client.chat
 import net.ccbluex.liquidbounce.utils.client.mc
 import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
 import net.ccbluex.liquidbounce.utils.entity.lastPos
 import net.ccbluex.liquidbounce.utils.entity.squaredBoxedDistanceTo
-import net.ccbluex.liquidbounce.utils.kotlin.Priority as RotationPriority
 import net.ccbluex.liquidbounce.utils.movement.DirectionalInput
 import net.minecraft.client.Minecraft
 import net.minecraft.client.player.LocalPlayer
@@ -40,9 +36,6 @@ import kotlin.random.Random
  * Basato su HitFlick mode 2: GCD quantization + Silent MoveFix + deeplearn AI
  */
 object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
-
-    /** How far (in mouse counts) the rounding boundary may wobble when [gcdDither] is on. */
-    private const val DITHER_WOBBLE = 0.18
 
     enum class Priority(override val tag: String) : Tagged {
         DISTANCE("Distance"), HEALTH("Health"), FOV("Fov"), ANGLE("Angle"), ARMOR("Armor")
@@ -102,14 +95,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private val tremor by float("Tremor", 0.15f, 0f..1f, "°")
     private val perlinScale by float("PerlinScale", 0.3f, 0f..1f)
     private val gcdFix by boolean("GCDFix", true)
-    private val gcdDither by boolean("GCDDither", true)
     private val randomizeOffset by float("RandomizeOffset", 0.08f, 0f..0.5f)
-    // Human-looking aim: a real crosshair never sits on the exact hitbox centre and its error
-    // moves slowly instead of being white noise around zero.
-    private val aimBias by float("AimBias", 1.2f, 0f..5f, "°")
-    private val driftAmount by float("Drift", 0.5f, 0f..3f, "°")
-    private val deadZone by float("DeadZone", 0.3f, 0f..3f, "°")
-    private val idleChance by int("IdleChance", 10, 0..40, "%")
     private val keepSprint by boolean("KeepSprint", true)
 
     private val silent by boolean("Silent", true)
@@ -123,7 +109,6 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private val pauseOnInventory by boolean("PauseOnInventory", true)
     private val pauseOnUse by boolean("PauseOnUse", false)
     private val chatLog by boolean("ChatLog", false)
-    private val debug by boolean("Debug", false)
 
     private var currentTarget: LivingEntity? = null
     private var lastTargetSwitch = 0L
@@ -134,25 +119,6 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private var beforePitch = 0f
     private var perlinTick = 0
     private var hitCount = 0
-
-    // --- debug bookkeeping (only used when the "Debug" setting is on) ---
-    // rounding residual carried between ticks so the aim never stalls on a sub-count difference
-    private var yawCarry = 0.0
-    private var pitchCarry = 0.0
-
-    // Per-target aim bias (re-rolled on every target switch) and the slow hand drift.
-    private var biasFor: LivingEntity? = null
-    private var biasYaw = 0f
-    private var biasPitch = 0f
-    private var driftYaw = 0f
-    private var driftPitch = 0f
-    // "micro-pauses": ticks in which a human simply does not move the mouse
-    private var idleLeft = 0
-
-    private var debugTick = 0
-    private var scanCount = 0
-    private var validCount = 0
-    private var lastGate = "start"
 
     private var spoofing = false
     private var spoofedMovement = false
@@ -171,24 +137,14 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         reactionUntil = 0L
         hitCount = 0
         perlinTick = 0
-        debugTick = 0
-        lastGate = "start"
-        yawCarry = 0.0
-        pitchCarry = 0.0
-        biasFor = null
-        biasYaw = 0f
-        biasPitch = 0f
-        driftYaw = 0f
-        driftPitch = 0f
-        idleLeft = 0
         resetRotationMemory()
     }
 
     override fun onDisabled() {
         val me = mc.player
         if (me != null) endSpoof(me)
-        // Nothing to clear by hand: RotationManager's RequestHandler drops every request whose provider
-        // is not running anymore, so disabling this module already stops the rotation.
+        // clear rotation — RotationManager has no nullable setter in 26.3, just stop targeting
+        try { RotationManager.setRotationTarget(Rotation(me?.yRot ?: 0f, me?.xRot ?: 0f), false, net.ccbluex.liquidbounce.utils.aiming.RotationsConfigurable(), net.ccbluex.liquidbounce.utils.aiming.RotationManager.Priority.NORMAL, this) } catch (_: Exception) {}
         currentTarget = null
     }
 
@@ -290,9 +246,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
         val target = findTarget(me) ?: run {
             if (!lockTarget) currentTarget = null
-            // Stop aiming: we just do not request a rotation anymore, the request sent in the previous
-            // tick expires on its own after `ticksUntilReset` ticks.
-            debugState("no target (scan=$scanCount valid=$validCount, last gate=$lastGate)")
+            try { RotationManager.setRotationTarget(Rotation(me.yRot, me.xRot), false, net.ccbluex.liquidbounce.utils.aiming.RotationsConfigurable(), RotationManager.Priority.NORMAL, this@ModuleAimbot) } catch (_: Exception) {}
             return@handler
         }
 
@@ -302,74 +256,39 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
             lastTargetSwitch = now
             reactionUntil = now + reactionDelay + Random.nextInt(reactionRandom + 1)
         }
-        if (target !== biasFor) {
-            biasFor = target
-            rollAimBias(target)
-        }
         currentTarget = target
 
         if (System.currentTimeMillis() < reactionUntil) return@handler
 
-        // A hand does not update the aim on every single tick: short holds are what makes a
-        // rotation log look human. The request below lives `ticksUntilReset` ticks, so it is safe.
-        if (idleLeft > 0) {
-            idleLeft--
-            return@handler
-        }
-        if (idleChance > 0 && Random.nextInt(100) < idleChance) {
-            idleLeft = Random.nextInt(1, 3)
-            return@handler
-        }
-
         val rotation = computeRotation(me, target) ?: return@handler
         if (silentFov && !isInFov(me, rotation)) return@handler
 
-        // Do not re-issue a request for a sub-degree correction: a human leaves those alone and
-        // a log full of perfect micro-corrections is exactly what "perfect rotation" checks count.
-        val current = currentAim(me)
-        val missing = abs(Mth.wrapDegrees(rotation.yaw - current.yaw)) + abs(rotation.pitch - current.pitch)
-        if (missing < deadZone) return@handler
-
         val final = humanize(me, rotation)
-        val quantized = if (gcdFix) {
-            // Snap the DELTA from the rotation the client last aimed with, exactly like the
-            // RotationManager would do; never snap the absolute angle.
-            quantizeToMouseCounts(currentAim(me), final)
-        } else {
-            final
-        }
+        val quantized = if (gcdFix) quantize(final) else final
 
         if (silent) {
-            RotationManager.setRotationTarget(
-                rotationPlan(quantized, target),
-                RotationPriority.IMPORTANT_FOR_USAGE_2,
-                this
-            )
+            try {
+                // stable API in 26.3: setRotationTarget(plan, priority, provider) where plan = RotationTarget(Rotation)
+                val plan = net.ccbluex.liquidbounce.utils.aiming.RotationTarget(quantized)
+                RotationManager.setRotationTarget(plan, RotationManager.Priority.NORMAL, this@ModuleAimbot)
+            } catch (e: Exception) {
+                try {
+                    // alternative: setRotationTarget(rotation, valueGroup, priority, provider)
+                    RotationManager.setRotationTarget(quantized, false, net.ccbluex.liquidbounce.utils.aiming.RotationsConfigurable(), RotationManager.Priority.NORMAL, this@ModuleAimbot)
+                } catch (_: Exception) {
+                    me.yRot = quantized.yaw
+                    me.xRot = quantized.pitch.coerceIn(-90f, 90f)
+                }
+            }
         } else {
             me.yRot = quantized.yaw
-            me.xRot = quantized.pitch.coerceIn(-89.9f, 89.9f)
+            me.xRot = quantized.pitch.coerceIn(-90f, 90f)
         }
 
         remember(me, quantized)
-        debugState(
-            "aiming %s dist=%.2f -> yaw=%.1f pitch=%.1f (silent=%s, mode=%s, cam=%.1f/%.1f)".format(
-                target.name.string, target.distanceTo(me), quantized.yaw, quantized.pitch,
-                silent, preset.tag, me.yRot, me.xRot
-            )
-        )
         if (chatLog && hitCount++ % 40 == 0) {
             chat("§7[Aimbot] target=${target.name.string} yaw=%.1f pitch=%.1f mode=%s".format(quantized.yaw, quantized.pitch, preset.tag))
         }
-    }
-
-    /**
-     * Prints the internal state once per second when the "Debug" setting is on: how many entities
-     * were scanned, which filter threw them away, and the rotation that was requested.
-     */
-    private fun debugState(message: String) {
-        if (!debug) return
-        if (++debugTick % 20 != 0) return
-        chat("§7[Aimbot] §f$message")
     }
 
     private fun findTarget(me: LocalPlayer): LivingEntity? {
@@ -387,25 +306,13 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         }
         var best: LivingEntity? = null
         var bestScore = Float.MAX_VALUE
-        scanCount = candidates.size
-        validCount = 0
         for (e in candidates) {
             if (e == me) continue
             if (!isValidTarget(me, e)) continue
             val rot = rotationTo(me, e)
-            if (!isInFov(me, rot)) {
-                lastGate = "outside FOV (${"%.0f".format(abs(Mth.wrapDegrees(rot.yaw - me.yRot)))}° > ${"%.0f".format(fov / 2f)}°)"
-                continue
-            }
-            if (checkVisible && !me.hasLineOfSight(e) && !throughWalls) {
-                lastGate = "no line of sight"
-                continue
-            }
-            if (e.squaredBoxedDistanceTo(me) > range * range) {
-                lastGate = "out of range"
-                continue
-            }
-            validCount++
+            if (!isInFov(me, rot)) continue
+            if (checkVisible && !me.hasLineOfSight(e) && !throughWalls) continue
+            if (e.squaredBoxedDistanceTo(me) > range * range) continue
             val score = when (priority) {
                 Priority.DISTANCE -> me.distanceTo(e)
                 Priority.HEALTH -> e.health
@@ -422,27 +329,21 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     }
 
     private fun isValidTarget(me: Player, e: LivingEntity): Boolean {
-        if (!e.isAlive) return reject("dead")
-        if (e.health <= minHealth) return reject("health <= MinHealth")
-        if (!targetDead && e.isDeadOrDying) return reject("dying")
-        if (!targetInvisible && e.isInvisible) return reject("invisible")
+        if (!e.isAlive) return false
+        if (e.health <= minHealth) return false
+        if (!targetDead && e.isDeadOrDying) return false
+        if (!targetInvisible && e.isInvisible) return false
         if (!targetFriends) {
             val isFriend = try {
                 val fm = Class.forName("net.ccbluex.liquidbounce.utils.client.FriendManager")
                 val m = fm.methods.firstOrNull { it.name == "isFriend" && it.parameterCount == 1 }
                 m?.invoke(null, e) as? Boolean ?: false
             } catch (_: Exception) { false }
-            if (isFriend) return reject("friend")
+            if (isFriend) return false
         }
-        if (antiBot && isBot(e)) return reject("anti-bot")
-        if (!e.shouldBeAttacked()) return reject("shouldBeAttacked() = false")
+        if (antiBot && isBot(e)) return false
+        if (!e.shouldBeAttacked()) return false
         return true
-    }
-
-    /** Records why an entity was filtered out, so the "Debug" log can show it. */
-    private fun reject(reason: String): Boolean {
-        lastGate = "rejected: $reason"
-        return false
     }
 
     private fun isBot(e: LivingEntity): Boolean {
@@ -503,17 +404,6 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         return net.minecraft.world.phys.Vec3(rx + rnd, ry + rnd, rz + rnd)
     }
 
-    /**
-     * The rotation the aim is currently at.
-     *
-     * In silent mode this must be what the manager is aiming with ("currentRotation"), NOT the
-     * camera: starting every step from the camera makes the smoothed result a constant value the
-     * module re-sends unchanged tick after tick — a perfectly still, perfectly on-target aim,
-     * which is exactly the pattern rotation checks look for.
-     */
-    private fun currentAim(me: LocalPlayer): Rotation =
-        if (silent) RotationManager.currentRotation ?: Rotation(me.yRot, me.xRot) else Rotation(me.yRot, me.xRot)
-
     private fun computeRotation(me: LocalPlayer, target: LivingEntity): Rotation? {
         val base = rotationTo(me, target)
         val mode = when (preset) {
@@ -538,7 +428,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     }
 
     private fun smoothStep(me: LocalPlayer, target: Rotation, speed: Float): Rotation {
-        val cur = currentAim(me)
+        val cur = Rotation(me.yRot, me.xRot)
         val diffYaw = Mth.wrapDegrees(target.yaw - cur.yaw)
         val diffPitch = target.pitch - cur.pitch
         val factor = when (smoothing) {
@@ -564,129 +454,25 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private fun sigmoid(u: Float) = 1 / (1 + kotlin.math.exp(-0.5 * (u - 0.3))).toFloat()
     private fun sigmoidFactor(t: Float) = sigmoid(t)
 
-    /**
-     * Re-rolls the persistent aim error for a new target.
-     *
-     * A human crosshair is never on the exact hitbox centre: there is a constant bias (they aim at
-     * the same wrong spot every time) plus a slow drift. Aiming at the geometric centre, even with
-     * white noise around it, keeps the *average* error at zero — which is what Vulcan's
-     * "Aim (Rotation)" and the "perfectrotation" packet check measure.
-     */
-    private fun rollAimBias(target: LivingEntity) {
-        if (aimBias <= 0f) {
-            biasYaw = 0f
-            biasPitch = 0f
-            return
-        }
-
-        val magnitude = aimBias * (0.4f + Random.nextFloat() * 0.6f)
-        val angle = Random.nextFloat() * 2f * Math.PI.toFloat()
-        biasYaw = (Math.cos(angle.toDouble()).toFloat() * magnitude)
-        // humans are worse vertically than horizontally
-        biasPitch = (Math.sin(angle.toDouble()).toFloat() * magnitude * 0.7f)
-
-        driftYaw = 0f
-        driftPitch = 0f
-    }
-
-    /**
-     * Applies bias + drift + a little noise. The drift is a mean-reverting random walk (not white
-     * noise), so the aim "breathes" like a hand instead of vibrating around the target.
-     */
     private fun humanize(me: LocalPlayer, rot: Rotation): Rotation {
-        if (driftAmount > 0f) {
-            driftYaw = (driftYaw * 0.9f + (Random.nextFloat() - 0.5f) * driftAmount * 0.5f)
-                .coerceIn(-driftAmount, driftAmount)
-            driftPitch = (driftPitch * 0.9f + (Random.nextFloat() - 0.5f) * driftAmount * 0.35f)
-                .coerceIn(-driftAmount * 0.7f, driftAmount * 0.7f)
-        }
-
-        var yaw = rot.yaw + biasYaw + driftYaw
-        var pitch = rot.pitch + biasPitch + driftPitch
-
-        // remaining white noise, kept small: its job is only to break exact repeats
-        yaw += (Random.nextFloat() - 0.5f) * jitterYaw * 0.35f
-        pitch += (Random.nextFloat() - 0.5f) * jitterPitch * 0.35f
-        yaw += perlinNoise(perlinTick + 100) * perlinScale * 0.5f
-        pitch += perlinNoise(perlinTick + 200) * perlinScale * 0.3f
-
+        var yaw = rot.yaw + (Random.nextFloat() - 0.5f) * randomizeOffset * 10f
+        var pitch = rot.pitch + (Random.nextFloat() - 0.5f) * randomizeOffset * 8f
+        yaw += perlinNoise(perlinTick + 100) * perlinScale
+        pitch += perlinNoise(perlinTick + 200) * perlinScale * 0.5f
         if (keepSprint && me.isSprinting) yaw = Mth.wrapDegrees(yaw)
-        return Rotation(yaw, pitch.coerceIn(-89.5f, 89.5f))
+        return Rotation(yaw, pitch.coerceIn(-90f, 90f))
     }
 
     private fun perlinNoise(t: Int): Float {
         return (kotlin.math.sin(t * 0.31) * 0.5f + kotlin.math.sin(t * 0.07) * 0.3f).toFloat()
     }
 
-    /**
-     * Turns [desired] into a rotation a real mouse could have produced, starting from [from].
-     *
-     * The client moves the player by whole mouse counts: `step = (float)(f³ * 8) * 0.15f` degrees per
-     * count, with `f = sensitivity * 0.6 + 0.2`. That value is exactly [RotationUtil.gcd] and it is the
-     * same math LiquidBounce's [Rotation.normalize] uses, so:
-     *
-     *  - we round the DELTA from the last aimed rotation, never the absolute angle (rounding absolute
-     *    values to a global grid is what produces "impossible sensitivity" flags);
-     *  - we return the result marked [Rotation.isNormalized] so the manager does not round it again
-     *    from a different base, which would move it off the lattice;
-     *  - with [gcdDither] the residual is carried to the next tick and the rounding boundary wobbles,
-     *    because a real hand does not always land on the nearest count. A perfectly repeating delta
-     *    sequence (e.g. "+3 counts, +3 counts, ...") is a classic GCD/aimbot pattern.
-     */
-    private fun quantizeToMouseCounts(from: Rotation, desired: Rotation): Rotation {
-        val step = RotationUtil.gcd
-        if (step < 1.0e-6) return desired
-
-        val deltaYaw = RotationUtil.angleDifference(desired.yaw, from.yaw).toDouble()
-        val deltaPitch = (desired.pitch - from.pitch).toDouble()
-
-        val rawYaw = deltaYaw / step + (if (gcdDither) yawCarry else 0.0)
-        val rawPitch = deltaPitch / step + (if (gcdDither) pitchCarry else 0.0)
-
-        val countsYaw: Int
-        val countsPitch: Int
-
-        if (gcdDither) {
-            countsYaw = handRound(rawYaw)
-            countsPitch = handRound(rawPitch)
-            yawCarry = (rawYaw - countsYaw).coerceIn(-0.95, 0.95)
-            pitchCarry = (rawPitch - countsPitch).coerceIn(-0.95, 0.95)
-        } else {
-            countsYaw = kotlin.math.round(rawYaw).toInt()
-            countsPitch = kotlin.math.round(rawPitch).toInt()
-        }
-
-        val yaw = from.yaw + (countsYaw * step).toFloat()
-        // never touch the exact +-90 boundary, servers treat it as an untouched pitch
-        val pitch = (from.pitch + (countsPitch * step).toFloat()).coerceIn(-89.9f, 89.9f)
-        return Rotation(Mth.wrapDegrees(yaw), pitch, isNormalized = true)
+    private fun quantize(rot: Rotation): Rotation {
+        val sens = Minecraft.getInstance().options.sensitivity().get() * 0.6f + 0.2f
+        val gcd = sens * sens * sens * 8f * 0.15f
+        fun q(v: Float) = kotlin.math.round(v / gcd) * gcd
+        return Rotation(q(rot.yaw), q(rot.pitch))
     }
-
-    /** Nearest whole mouse count, with the decision boundary wobbling like a human hand. */
-    private fun handRound(counts: Double): Int {
-        val wobble = Random.nextDouble(-DITHER_WOBBLE, DITHER_WOBBLE)
-        return kotlin.math.floor(counts + 0.5 + wobble).toInt()
-    }
-
-    /**
-     * Builds the plan handed to LiquidBounce's [RotationManager]: it carries the rotation this module already
-     * computed, so the manager only has to send it to the server without touching the camera (silent rotation).
-     *
-     * The processors are intentionally left empty — this module smooths and quantizes its own rotation every
-     * tick, and letting the manager run its angle smooth a second time would slow the aim down.
-     */
-    private fun rotationPlan(rotation: Rotation, entity: LivingEntity?) = RotationTarget(
-        rotation = rotation,
-        entity = entity,
-        ticksUntilReset = 5,
-        resetThreshold = 1f,
-        considerInventory = pauseOnInventory,
-        movementCorrection = when (moveFix) {
-            MoveFix.OFF -> MovementCorrection.OFF
-            MoveFix.STRICT -> MovementCorrection.STRICT
-            MoveFix.SILENT -> MovementCorrection.SILENT
-        },
-    )
 
     private fun mouseFactor(): Double {
         val d = Minecraft.getInstance().options.sensitivity().get() * 0.6f.toDouble() + 0.2f.toDouble()
@@ -701,7 +487,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
     private fun aiStep(me: LocalPlayer, goal: Rotation, target: LivingEntity): Rotation? {
         val mdl = model() ?: return null
-        val cur = currentAim(me)
+        val cur = Rotation(me.yRot, me.xRot)
         val prev = Rotation(beforeYaw, beforePitch)
         val output = runCatching {
             val sample = CombatSample(
