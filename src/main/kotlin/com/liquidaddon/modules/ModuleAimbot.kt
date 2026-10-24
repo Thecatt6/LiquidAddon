@@ -112,6 +112,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private val pauseOnInventory by boolean("PauseOnInventory", true)
     private val pauseOnUse by boolean("PauseOnUse", false)
     private val chatLog by boolean("ChatLog", false)
+    private val debug by boolean("Debug", false)
 
     private var currentTarget: LivingEntity? = null
     private var lastTargetSwitch = 0L
@@ -122,6 +123,12 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     private var beforePitch = 0f
     private var perlinTick = 0
     private var hitCount = 0
+
+    // --- debug bookkeeping (only used when the "Debug" setting is on) ---
+    private var debugTick = 0
+    private var scanCount = 0
+    private var validCount = 0
+    private var lastGate = "start"
 
     private var spoofing = false
     private var spoofedMovement = false
@@ -140,6 +147,8 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         reactionUntil = 0L
         hitCount = 0
         perlinTick = 0
+        debugTick = 0
+        lastGate = "start"
         resetRotationMemory()
     }
 
@@ -251,6 +260,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
             if (!lockTarget) currentTarget = null
             // Stop aiming: we just do not request a rotation anymore, the request sent in the previous
             // tick expires on its own after `ticksUntilReset` ticks.
+            debugState("no target (scan=$scanCount valid=$validCount, last gate=$lastGate)")
             return@handler
         }
 
@@ -282,9 +292,25 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         }
 
         remember(me, quantized)
+        debugState(
+            "aiming %s dist=%.2f -> yaw=%.1f pitch=%.1f (silent=%s, mode=%s, cam=%.1f/%.1f)".format(
+                target.name.string, target.distanceTo(me), quantized.yaw, quantized.pitch,
+                silent, preset.tag, me.yRot, me.xRot
+            )
+        )
         if (chatLog && hitCount++ % 40 == 0) {
             chat("§7[Aimbot] target=${target.name.string} yaw=%.1f pitch=%.1f mode=%s".format(quantized.yaw, quantized.pitch, preset.tag))
         }
+    }
+
+    /**
+     * Prints the internal state once per second when the "Debug" setting is on: how many entities
+     * were scanned, which filter threw them away, and the rotation that was requested.
+     */
+    private fun debugState(message: String) {
+        if (!debug) return
+        if (++debugTick % 20 != 0) return
+        chat("§7[Aimbot] §f$message")
     }
 
     private fun findTarget(me: LocalPlayer): LivingEntity? {
@@ -302,13 +328,25 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         }
         var best: LivingEntity? = null
         var bestScore = Float.MAX_VALUE
+        scanCount = candidates.size
+        validCount = 0
         for (e in candidates) {
             if (e == me) continue
             if (!isValidTarget(me, e)) continue
             val rot = rotationTo(me, e)
-            if (!isInFov(me, rot)) continue
-            if (checkVisible && !me.hasLineOfSight(e) && !throughWalls) continue
-            if (e.squaredBoxedDistanceTo(me) > range * range) continue
+            if (!isInFov(me, rot)) {
+                lastGate = "outside FOV (${"%.0f".format(abs(Mth.wrapDegrees(rot.yaw - me.yRot)))}° > ${"%.0f".format(fov / 2f)}°)"
+                continue
+            }
+            if (checkVisible && !me.hasLineOfSight(e) && !throughWalls) {
+                lastGate = "no line of sight"
+                continue
+            }
+            if (e.squaredBoxedDistanceTo(me) > range * range) {
+                lastGate = "out of range"
+                continue
+            }
+            validCount++
             val score = when (priority) {
                 Priority.DISTANCE -> me.distanceTo(e)
                 Priority.HEALTH -> e.health
@@ -325,21 +363,27 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     }
 
     private fun isValidTarget(me: Player, e: LivingEntity): Boolean {
-        if (!e.isAlive) return false
-        if (e.health <= minHealth) return false
-        if (!targetDead && e.isDeadOrDying) return false
-        if (!targetInvisible && e.isInvisible) return false
+        if (!e.isAlive) return reject("dead")
+        if (e.health <= minHealth) return reject("health <= MinHealth")
+        if (!targetDead && e.isDeadOrDying) return reject("dying")
+        if (!targetInvisible && e.isInvisible) return reject("invisible")
         if (!targetFriends) {
             val isFriend = try {
                 val fm = Class.forName("net.ccbluex.liquidbounce.utils.client.FriendManager")
                 val m = fm.methods.firstOrNull { it.name == "isFriend" && it.parameterCount == 1 }
                 m?.invoke(null, e) as? Boolean ?: false
             } catch (_: Exception) { false }
-            if (isFriend) return false
+            if (isFriend) return reject("friend")
         }
-        if (antiBot && isBot(e)) return false
-        if (!e.shouldBeAttacked()) return false
+        if (antiBot && isBot(e)) return reject("anti-bot")
+        if (!e.shouldBeAttacked()) return reject("shouldBeAttacked() = false")
         return true
+    }
+
+    /** Records why an entity was filtered out, so the "Debug" log can show it. */
+    private fun reject(reason: String): Boolean {
+        lastGate = "rejected: $reason"
+        return false
     }
 
     private fun isBot(e: LivingEntity): Boolean {
