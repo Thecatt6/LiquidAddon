@@ -14,12 +14,15 @@ import net.ccbluex.liquidbounce.event.events.PlayerNetworkMovementTickEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.utils.aiming.RotationManager
+import net.ccbluex.liquidbounce.utils.aiming.RotationTarget
 import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
+import net.ccbluex.liquidbounce.utils.aiming.features.MovementCorrection
 import net.ccbluex.liquidbounce.utils.client.chat
 import net.ccbluex.liquidbounce.utils.client.mc
 import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
 import net.ccbluex.liquidbounce.utils.entity.lastPos
 import net.ccbluex.liquidbounce.utils.entity.squaredBoxedDistanceTo
+import net.ccbluex.liquidbounce.utils.kotlin.Priority as RotationPriority
 import net.ccbluex.liquidbounce.utils.movement.DirectionalInput
 import net.minecraft.client.Minecraft
 import net.minecraft.client.player.LocalPlayer
@@ -35,7 +38,7 @@ import kotlin.random.Random
  * ModuleAimbot — Aimbot AI non-detectabile
  * Basato su HitFlick mode 2: GCD quantization + Silent MoveFix + deeplearn AI
  */
-object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
+object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
 
     enum class Priority(override val tag: String) : Tagged {
         DISTANCE("Distance"), HEALTH("Health"), FOV("Fov"), ANGLE("Angle"), ARMOR("Armor")
@@ -143,8 +146,8 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     override fun onDisabled() {
         val me = mc.player
         if (me != null) endSpoof(me)
-        // clear rotation — RotationManager has no nullable setter in 26.3, just stop targeting
-        try { RotationManager.setRotationTarget(Rotation(me?.yRot ?: 0f, me?.xRot ?: 0f), false, net.ccbluex.liquidbounce.utils.aiming.RotationsConfigurable(), net.ccbluex.liquidbounce.utils.aiming.RotationManager.Priority.NORMAL, this) } catch (_: Exception) {}
+        // Nothing to clear by hand: RotationManager's RequestHandler drops every request whose provider
+        // is not running anymore, so disabling this module already stops the rotation.
         currentTarget = null
     }
 
@@ -246,7 +249,8 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
         val target = findTarget(me) ?: run {
             if (!lockTarget) currentTarget = null
-            try { RotationManager.setRotationTarget(Rotation(me.yRot, me.xRot), false, net.ccbluex.liquidbounce.utils.aiming.RotationsConfigurable(), RotationManager.Priority.NORMAL, this@ModuleAimbot) } catch (_: Exception) {}
+            // Stop aiming: we just do not request a rotation anymore, the request sent in the previous
+            // tick expires on its own after `ticksUntilReset` ticks.
             return@handler
         }
 
@@ -267,19 +271,11 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
         val quantized = if (gcdFix) quantize(final) else final
 
         if (silent) {
-            try {
-                // stable API in 26.3: setRotationTarget(plan, priority, provider) where plan = RotationTarget(Rotation)
-                val plan = net.ccbluex.liquidbounce.utils.aiming.RotationTarget(quantized)
-                RotationManager.setRotationTarget(plan, RotationManager.Priority.NORMAL, this@ModuleAimbot)
-            } catch (e: Exception) {
-                try {
-                    // alternative: setRotationTarget(rotation, valueGroup, priority, provider)
-                    RotationManager.setRotationTarget(quantized, false, net.ccbluex.liquidbounce.utils.aiming.RotationsConfigurable(), RotationManager.Priority.NORMAL, this@ModuleAimbot)
-                } catch (_: Exception) {
-                    me.yRot = quantized.yaw
-                    me.xRot = quantized.pitch.coerceIn(-90f, 90f)
-                }
-            }
+            RotationManager.setRotationTarget(
+                rotationPlan(quantized, target),
+                RotationPriority.IMPORTANT_FOR_USAGE_2,
+                this
+            )
         } else {
             me.yRot = quantized.yaw
             me.xRot = quantized.pitch.coerceIn(-90f, 90f)
@@ -468,11 +464,32 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     }
 
     private fun quantize(rot: Rotation): Rotation {
-        val sens = Minecraft.getInstance().options.sensitivity().get() * 0.6f + 0.2f
+        // OptionInstance<Double>#get returns a Double, so convert before mixing in Float factors.
+        val sens = Minecraft.getInstance().options.sensitivity().get().toFloat() * 0.6f + 0.2f
         val gcd = sens * sens * sens * 8f * 0.15f
         fun q(v: Float) = kotlin.math.round(v / gcd) * gcd
         return Rotation(q(rot.yaw), q(rot.pitch))
     }
+
+    /**
+     * Builds the plan handed to LiquidBounce's [RotationManager]: it carries the rotation this module already
+     * computed, so the manager only has to send it to the server without touching the camera (silent rotation).
+     *
+     * The processors are intentionally left empty — this module smooths and quantizes its own rotation every
+     * tick, and letting the manager run its angle smooth a second time would slow the aim down.
+     */
+    private fun rotationPlan(rotation: Rotation, entity: LivingEntity?) = RotationTarget(
+        rotation = rotation,
+        entity = entity,
+        ticksUntilReset = 3,
+        resetThreshold = 1f,
+        considerInventory = pauseOnInventory,
+        movementCorrection = when (moveFix) {
+            MoveFix.OFF -> MovementCorrection.OFF
+            MoveFix.STRICT -> MovementCorrection.STRICT
+            MoveFix.SILENT -> MovementCorrection.SILENT
+        },
+    )
 
     private fun mouseFactor(): Double {
         val d = Minecraft.getInstance().options.sensitivity().get() * 0.6f.toDouble() + 0.2f.toDouble()

@@ -9,6 +9,7 @@
   "liquidbounce.module.hitSelect.value.pauseMode.description": "True=Pause static, False=Active dynamic.",
   "liquidbounce.module.hitSelect.value.preferKBReduction.description": "True=KB/movement, False=Criticals.",
   "liquidbounce.module.hitSelect.value.pauseTicks.description": "Ticks to pause (Pause mode).",
+  "liquidbounce.module.hitFlick.description": "Turns the yaw off the target before a hit and back on the hit, so the extra knockback (sprint hit or Knockback) goes sideways. OnlyExtraKnockback flicks only those hits.",
   "liquidbounce.module.aimbot.description": "AI Aimbot with humanization, GCD fix, silent rotations and MoveFix - undetectable.",
   "liquidbounce.module.aimbot.value.range.description": "Max distance to target.",
   "liquidbounce.module.aimbot.value.fov.description": "Field of view to consider targets.",
