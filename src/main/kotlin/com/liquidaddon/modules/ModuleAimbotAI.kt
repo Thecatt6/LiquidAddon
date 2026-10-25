@@ -346,6 +346,18 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     // Phase of the "breathing" motion used while the aim sits on the target.
     private var swayPhase = 0f
 
+    // Consecutive ticks in which an axis did not move at all. Matrix scores the ratio between
+    // the yaw and pitch jiff values: a pitch that stays exactly still for a whole window makes
+    // that ratio infinite on every sample (AimStatisticsCheck "Aim IQR").
+    private var stillYawTicks = 0
+    private var stillPitchTicks = 0
+
+    // Direction of the "keep moving" nudge. A hand that rests does not alternate +1/-1: it drifts
+    // in one direction and reverses now and then. Alternating would itself be a pattern
+    // (Matrix AimBasicCheck "pattern(random)" counts small increases and decreases).
+    private var nudgeYawSign = 1f
+    private var nudgePitchSign = 1f
+
     private var currentTarget: LivingEntity? = null
     private var lastTargetSwitch = 0L
     private var reactionUntil = 0L
@@ -392,6 +404,10 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         velYaw = 0f
         velPitch = 0f
         swayPhase = Random.nextFloat() * 6.283f
+        stillYawTicks = 0
+        stillPitchTicks = 0
+        nudgeYawSign = if (Random.nextBoolean()) 1f else -1f
+        nudgePitchSign = if (Random.nextBoolean()) 1f else -1f
         biasFor = null
         biasYaw = 0f
         biasPitch = 0f
@@ -560,12 +576,28 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         // *without* rotation, and the server keeps the last one. In silent mode the manager keeps
         // applying our rotation every tick, so a "still" aim would repeat the same angle forever.
         // One mouse count is enough to be a different rotation, and it is invisible.
-        if (quantized.yaw == from.yaw && quantized.pitch == from.pitch) {
-            val count = RotationUtil.gcd.toFloat()
+        if (quantized.yaw == from.yaw) stillYawTicks++ else stillYawTicks = 0
+        if (quantized.pitch == from.pitch) stillPitchTicks++ else stillPitchTicks = 0
+
+        // Matrix scores the yaw/pitch jiff ratio over 25 deltas: if the pitch never moves, every
+        // ratio is infinite and AimStatisticsCheck flags "Aim IQR". An axis may rest, never freeze.
+        if (stillYawTicks > 2) {
+            if (Random.nextInt(100) < 25) nudgeYawSign = -nudgeYawSign
+            quantized = Rotation(quantized.yaw + nudge(nudgeYawSign), quantized.pitch)
+            stillYawTicks = 0
+        }
+        if (stillPitchTicks > 2) {
+            if (Random.nextInt(100) < 25) nudgePitchSign = -nudgePitchSign
             quantized = Rotation(
-                quantized.yaw + if (Random.nextBoolean()) count else -count,
-                quantized.pitch
+                quantized.yaw,
+                (quantized.pitch + nudge(nudgePitchSign)).coerceIn(-89.5f, 89.5f)
             )
+            stillPitchTicks = 0
+        }
+
+        if (quantized.yaw == from.yaw && quantized.pitch == from.pitch) {
+            if (Random.nextInt(100) < 25) nudgeYawSign = -nudgeYawSign
+            quantized = Rotation(quantized.yaw + nudge(nudgeYawSign), quantized.pitch)
         }
 
         if (silent) {
@@ -854,9 +886,14 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         val rate = (0.3f * smoothSpeed * shape * responseJitter * (1f + 1.5f * ballistic))
             .coerceIn(0.02f, 1f)
 
-        // Speed we would like to have this tick (never above MaxStep).
-        val wantYaw = (dYaw * rate).coerceIn(-maxStep, maxStep)
-        val wantPitch = (dPitch * rate).coerceIn(-maxStep * 0.7f, maxStep * 0.7f)
+        // Speed we would like to have this tick. A HARD clamp here is what makes an aimbot
+        // detectable: while the cap is saturated every step has exactly the same magnitude, and
+        // Matrix's AimBasicCheck counts exactly that ("robotized" = |yawChange - yawChangeFirst|:
+        // more than 3 of 10 samples with the same magnitude is "heuristic(constant)"), while
+        // AimSmoothCheck flags three consecutive identical jiff values. A soft knee plus a tiny
+        // per-tick variation keeps the magnitude continuous and never pinned.
+        val wantYaw = softLimit(dYaw * rate, maxStep) * tickVariation()
+        val wantPitch = softLimit(dPitch * rate, maxStep * 0.7f) * tickVariation()
 
         // ...but the speed may only change by `maxAccel` per tick. Starting every turn at full
         // speed (or stopping it dead) is a signature every rotation check looks for, and ML models
@@ -880,6 +917,26 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     /** Moves [current] towards [target] by at most [maxDelta]. */
     private fun approach(current: Float, target: Float, maxDelta: Float): Float =
         current + (target - current).coerceIn(-maxDelta, maxDelta)
+
+    /**
+     * Saturates [value] softly at [limit]: proportional below the knee, asymptotically bounded
+     * above it, and never exactly equal to the limit. Behaving exactly like `coerceIn` for small
+     * values, so the smoothing feels the same, but the step magnitude can never get stuck.
+     */
+    private fun softLimit(value: Float, limit: Float): Float =
+        if (limit <= 0f) 0f else limit * kotlin.math.tanh(value / limit)
+
+    /** ±6% on the step magnitude. Two consecutive steps must never be equal. */
+    private fun tickVariation(): Float = 0.94f + Random.nextFloat() * 0.12f
+
+    /**
+     * A tiny, quantized correction used when the aim would otherwise not move at all: one or two
+     * mouse counts, keeping the direction for a while (a hand drifts, it does not oscillate).
+     */
+    private fun nudge(axisSign: Float): Float {
+        val magnitude = if (Random.nextInt(100) < 30) 2f else 1f
+        return magnitude * axisSign * RotationUtil.gcd.toFloat()
+    }
 
     private fun bezierFactor(t: Float): Float {
         val u = t.coerceIn(0f, 1f)
