@@ -343,6 +343,9 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     // Per-target response multiplier: two engagements should never share the same speed profile.
     private var responseJitter = 1f
 
+    // Phase of the "breathing" motion used while the aim sits on the target.
+    private var swayPhase = 0f
+
     private var currentTarget: LivingEntity? = null
     private var lastTargetSwitch = 0L
     private var reactionUntil = 0L
@@ -388,6 +391,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         lastSent = null
         velYaw = 0f
         velPitch = 0f
+        swayPhase = Random.nextFloat() * 6.283f
         biasFor = null
         biasYaw = 0f
         biasPitch = 0f
@@ -579,7 +583,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
                     (goal.pitch - quantized.pitch).toDouble()
                 ),
                 Mth.wrapDegrees(quantized.yaw), me.yRot, quantized.pitch, silent, preset.tag
-            )
+            ) + warnings()
         )
         if (chatLog && hitCount++ % 40 == 0) {
             chat("§7[Aimbot] target=${target?.name?.string} yaw=%.1f pitch=%.1f mode=%s".format(quantized.yaw, quantized.pitch, preset.tag))
@@ -601,6 +605,17 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     private fun writeRotation(me: LocalPlayer, rotation: Rotation) {
         me.yRot += Mth.wrapDegrees(rotation.yaw - me.yRot)
         me.xRot = rotation.pitch.coerceIn(-89.9f, 89.9f)
+    }
+
+    /**
+     * Settings that defeat the human-like behaviour, reported next to the debug line so a wrong
+     * configuration is visible instead of being guessed from the anticheat log.
+     */
+    private fun warnings(): String = buildString {
+        if (aimBias < 0.5f) append(" §cAimBias<0.5 (aim on the hitbox centre)")
+        if (idleChance == 0) append(" §cIdleChance=0 (updates every tick)")
+        if (maxStep > 8f) append(" §cMaxStep>8 (packets can carry a snap)")
+        if (!gcdFix) append(" §cGCDFix off (deltas off the mouse lattice)")
     }
 
     /**
@@ -791,14 +806,25 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
      *  - a difference below [deadZone] is not chased at all.
      */
     private fun stepTowards(from: Rotation, to: Rotation): Rotation {
-        val dYaw = Mth.wrapDegrees(to.yaw - from.yaw)
-        val dPitch = to.pitch - from.pitch
+        var dYaw = Mth.wrapDegrees(to.yaw - from.yaw)
+        var dPitch = to.pitch - from.pitch
 
         if (abs(dYaw) + abs(dPitch) < deadZone) {
-            velYaw = 0f
-            velPitch = 0f
-            return from
+            // The aim is on target. Freezing here is the worst thing we can do: a rotation that is
+            // completely still and exactly on the hitbox centre is the clearest "perfect rotation"
+            // signature there is (Vulcan "Aim (Rotation)", Matrix "Aim", packet "perfectrotation").
+            // A human keeps micro-correcting, so we keep the aim breathing inside the dead zone.
+            swayPhase += 0.16f + Random.nextFloat() * 0.14f
+            val amplitude = (0.35f + tremor * 1.5f + driftAmount * 0.2f).coerceIn(0.25f, 1f)
+            dYaw = kotlin.math.sin(swayPhase) * amplitude
+            dPitch = kotlin.math.sin(swayPhase * 0.63f + 1.1f) * amplitude * 0.5f
         }
+
+        // Momentum must never fight the new direction: if the target moved across our aim, the
+        // carried speed points the wrong way and keeping it makes the crosshair overshoot by
+        // several degrees in a single tick (that is a visible snap, and a rotation check).
+        if (velYaw * dYaw < 0f) velYaw = 0f
+        if (velPitch * dPitch < 0f) velPitch = 0f
 
         // The smoothing enum only bends the response curve; it can never push it above 1.
         val shape = when (smoothing) {
