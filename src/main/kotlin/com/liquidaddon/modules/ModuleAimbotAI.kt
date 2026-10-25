@@ -557,8 +557,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
                 this
             )
         } else {
-            me.yRot = quantized.yaw
-            me.xRot = quantized.pitch.coerceIn(-89.9f, 89.9f)
+            writeRotation(me, quantized)
         }
 
         val step = kotlin.math.hypot(
@@ -570,19 +569,38 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
 
         if (!report) return
 
+        // `raw` is the angle actually written to the player: it must grow/shrink continuously and
+        // must NEVER jump by ~360 between two lines (that would be the AimModulo360 signature).
         debugState(
-            "aiming %s dist=%.2f step=%.2f° remaining=%.1f° -> yaw=%.1f pitch=%.1f (silent=%s, preset=%s)".format(
+            "aiming %s dist=%.2f step=%.2f° remaining=%.1f° -> yaw=%.1f raw=%.1f pitch=%.1f (silent=%s, preset=%s)".format(
                 target?.name?.string, target?.distanceTo(me) ?: 0f, step,
                 if (goal == null) 0.0 else kotlin.math.hypot(
                     Mth.wrapDegrees(goal.yaw - quantized.yaw).toDouble(),
                     (goal.pitch - quantized.pitch).toDouble()
                 ),
-                quantized.yaw, quantized.pitch, silent, preset.tag
+                Mth.wrapDegrees(quantized.yaw), me.yRot, quantized.pitch, silent, preset.tag
             )
         )
         if (chatLog && hitCount++ % 40 == 0) {
             chat("§7[Aimbot] target=${target?.name?.string} yaw=%.1f pitch=%.1f mode=%s".format(quantized.yaw, quantized.pitch, preset.tag))
         }
+    }
+
+    /**
+     * Writes the rotation to the player without ever making the yaw "jump by a full turn".
+     *
+     * The vanilla client never sets an absolute angle on the player: `Entity.turn` *adds* the mouse
+     * delta and `yRot` keeps accumulating (it can read 361.4, -720.8, ...). The server wraps it when
+     * it applies the packet. Assigning a wrapped absolute value (`me.yRot = 179.9` followed by
+     * `-179.9`) makes the field, and therefore the packet, jump by ~-360 degrees in a single tick,
+     * which is precisely what Grim reports as "AimModulo360" (and Vulcan as "Aim (Rotation)").
+     *
+     * So we always add the shortest delta: the aim still lands on the wanted angle, but modulo 360
+     * aligned with the current value.
+     */
+    private fun writeRotation(me: LocalPlayer, rotation: Rotation) {
+        me.yRot += Mth.wrapDegrees(rotation.yaw - me.yRot)
+        me.xRot = rotation.pitch.coerceIn(-89.9f, 89.9f)
     }
 
     /**
@@ -805,8 +823,10 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         val stepYaw = if (abs(velYaw) > abs(dYaw)) dYaw else velYaw
         val stepPitch = if (abs(velPitch) > abs(dPitch)) dPitch else velPitch
 
+        // The yaw is kept CONTINUOUS on purpose: see [writeRotation] for why wrapping an absolute
+        // angle here ends up in a ~360 degrees jump in the movement packet.
         return Rotation(
-            Mth.wrapDegrees(from.yaw + stepYaw),
+            from.yaw + stepYaw,
             (from.pitch + stepPitch).coerceIn(-89.5f, 89.5f)
         )
     }
@@ -928,7 +948,8 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         val yaw = from.yaw + (countsYaw * step).toFloat()
         // never touch the exact +-90 boundary, servers treat it as an untouched pitch
         val pitch = (from.pitch + (countsPitch * step).toFloat()).coerceIn(-89.9f, 89.9f)
-        return Rotation(Mth.wrapDegrees(yaw), pitch, isNormalized = true)
+        // continuous yaw, like the vanilla client accumulates it (see [writeRotation])
+        return Rotation(yaw, pitch, isNormalized = true)
     }
 
     /** Nearest whole mouse count, with the decision boundary wobbling like a human hand. */
