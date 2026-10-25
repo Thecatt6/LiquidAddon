@@ -15,6 +15,7 @@ import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
 import net.ccbluex.liquidbounce.utils.aiming.features.MovementCorrection
 import net.ccbluex.liquidbounce.utils.aiming.utils.RotationUtil
 import net.ccbluex.liquidbounce.utils.client.chat
+import net.ccbluex.liquidbounce.utils.client.mc
 import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
 import net.ccbluex.liquidbounce.utils.entity.lastPos
 import net.ccbluex.liquidbounce.utils.entity.squaredBoxedDistanceTo
@@ -26,8 +27,6 @@ import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.player.Player
 import kotlin.math.abs
 import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 
@@ -43,7 +42,7 @@ import kotlin.random.Random
  * ClickGUI always shows what the module is really doing. `Custom` leaves the sliders alone.
  * `Undetectable` is the profile tuned for Vulcan "Aim (Rotation)" / packet "perfectrotation".
  */
-object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
+object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
     /** How far (in mouse counts) the rounding boundary may wobble when [gcdDither] is on. */
     private const val DITHER_WOBBLE = 0.18
@@ -335,6 +334,14 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
      */
     private var lastSent: Rotation? = null
 
+    // Angular velocity of the aim in degrees per tick. The stepper accelerates towards the wanted
+    // speed instead of jumping to it, which gives the turn an ease-in / ease-out profile.
+    private var velYaw = 0f
+    private var velPitch = 0f
+
+    // Per-target response multiplier: two engagements should never share the same speed profile.
+    private var responseJitter = 1f
+
     private var currentTarget: LivingEntity? = null
     private var lastTargetSwitch = 0L
     private var reactionUntil = 0L
@@ -378,6 +385,8 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         yawCarry = 0.0
         pitchCarry = 0.0
         lastSent = null
+        velYaw = 0f
+        velPitch = 0f
         biasFor = null
         biasYaw = 0f
         biasPitch = 0f
@@ -392,6 +401,8 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         // RequestHandler drops every request whose provider is not running anymore.
         currentTarget = null
         lastSent = null
+        velYaw = 0f
+        velPitch = 0f
     }
 
     private fun resetRotationMemory() {
@@ -415,37 +426,35 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         val me = mc.player ?: return@handler
         if (mc.gameMode == null) {
             currentTarget = null
+            lastSent = null
             return@handler
         }
-        // inventory check - API changed in 26.3 (screen -> currentScreen), fallback disabled
-        // if needed, rely on mc.screen check via reflection
-        if (pauseOnInventory) {
-            try {
-                val f = Minecraft::class.java.getDeclaredField("screen").apply { isAccessible = true }
-                val scr = f.get(Minecraft.getInstance())
-                if (scr != null) return@handler
-            } catch (_: Exception) {
-                try {
-                    val f2 = Minecraft::class.java.getDeclaredField("currentScreen").apply { isAccessible = true }
-                    if (f2.get(Minecraft.getInstance()) != null) return@handler
-                } catch (_: Exception) {}
-            }
-        }
-        if (pauseOnUse && me.isUsingItem) return@handler
-        if (!onSneak && me.isShiftKeyDown) return@handler
-        if (!onSprint && me.isSprinting) return@handler
 
-        val target = findTarget(me) ?: run {
+        // Settings that pause the aim. They must NOT make the rotation request disappear: the
+        // manager would drop it and the next packet would carry the camera angle again — a jump of
+        // as many degrees as the aim was away from the view, which is exactly what Vulcan reports
+        // as "Aim (Rotation) ... diff=25". The aim is walked back instead (see [releaseAim]).
+        val blocked = (pauseOnInventory && isInventoryOpen()) ||
+            (pauseOnUse && me.isUsingItem) ||
+            (!onSneak && me.isShiftKeyDown) ||
+            (!onSprint && me.isSprinting)
+
+        val target = if (blocked) null else findTarget(me)
+
+        if (target == null) {
             if (!lockTarget) currentTarget = null
-            // Stop aiming: we just do not request a rotation anymore, the request sent in the previous
-            // tick expires on its own after `ticksUntilReset` ticks.
-            debugState("no target (scan=$scanCount valid=$validCount, last gate=$lastGate)")
+            releaseAim(me)
+            debugState("no target (blocked=$blocked scan=$scanCount valid=$validCount, last gate=$lastGate)")
             return@handler
         }
 
+        val now = System.currentTimeMillis()
         if (currentTarget == null || !isValidTarget(me, target)) {
-            val now = System.currentTimeMillis()
-            if (now - lastTargetSwitch < switchDelay) return@handler
+            if (now - lastTargetSwitch < switchDelay) {
+                // Still deciding whether to commit to this target: keep the current aim alive.
+                holdAim(me, target)
+                return@handler
+            }
             lastTargetSwitch = now
             reactionUntil = now + reactionDelay + Random.nextInt(reactionRandom + 1)
         }
@@ -455,30 +464,90 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         }
         currentTarget = target
 
-        if (System.currentTimeMillis() < reactionUntil) return@handler
-
-        // Where the aim currently is: the rotation of the last packet we sent. Starting from the
-        // camera instead would make every step re-derive the same value and the aim would freeze.
-        val sent = lastSent ?: currentAim(me)
-
-        // A hand does not move the mouse on every tick. We do NOT skip the request (the angle would
-        // keep growing and the next update would be a visible burst): we keep sending the same
-        // rotation, which is exactly what a player holding the mouse still looks like.
-        var holding = false
-        if (idleLeft > 0) {
-            idleLeft--
-            holding = true
-        } else if (idleChance > 0 && Random.nextInt(100) < idleChance) {
-            idleLeft = Random.nextInt(1, 3)
-            holding = true
+        if (now < reactionUntil) {
+            holdAim(me, target)
+            return@handler
         }
 
-        val goal = goalRotation(me, target)
-        if (silentFov && !isInFov(me, goal)) return@handler
+        // A hand does not move the mouse on every tick: holding the same rotation is what that
+        // looks like. Skipping the update instead makes the angle grow and the next step burst.
+        if (idleLeft > 0) {
+            idleLeft--
+            holdAim(me, target)
+            return@handler
+        }
+        if (idleChance > 0 && Random.nextInt(100) < idleChance) {
+            idleLeft = Random.nextInt(1, 3)
+            holdAim(me, target)
+            return@handler
+        }
 
-        // One bounded step towards the goal: this is the only place the rotation may move.
-        val next = if (holding) sent else stepTowards(sent, goal)
-        val quantized = if (gcdFix) quantizeToMouseCounts(sent, next) else next
+        val sent = lastSent ?: currentAim(me)
+        val goal = goalRotation(me, target)
+        if (silentFov && !isInFov(me, goal)) {
+            holdAim(me, target)
+            return@handler
+        }
+
+        // One bounded step towards the goal: the only place the aim is allowed to move.
+        sendAim(me, stepTowards(sent, goal), target, sent, goal, report = true)
+    }
+
+    /** True when a GUI is open, so the aim has to pause like a player's would. */
+    private fun isInventoryOpen(): Boolean {
+        // `screen` is the field name in 26.3; the older name is kept as a fallback.
+        return try {
+            val field = Minecraft::class.java.getDeclaredField("screen").apply { isAccessible = true }
+            field.get(Minecraft.getInstance()) != null
+        } catch (_: Exception) {
+            try {
+                val field = Minecraft::class.java.getDeclaredField("currentScreen").apply { isAccessible = true }
+                field.get(Minecraft.getInstance()) != null
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
+
+    /** Re-sends the current aim unchanged: keeps the request alive without moving the crosshair. */
+    private fun holdAim(me: LocalPlayer, target: LivingEntity) {
+        val sent = lastSent ?: return
+        sendAim(me, sent, target, sent, null, report = false)
+    }
+
+    /**
+     * Walks the aim back to the camera with the same bounded step, and only lets the request go
+     * when the view is almost back. Without this the manager would hand the rotation back to the
+     * camera in a single packet as soon as we stop asking for it.
+     */
+    private fun releaseAim(me: LocalPlayer) {
+        val sent = lastSent ?: return
+        val camera = Rotation(me.yRot, me.xRot)
+        val gap = abs(Mth.wrapDegrees(camera.yaw - sent.yaw)) + abs(camera.pitch - sent.pitch)
+
+        if (gap < deadZone) {
+            lastSent = null
+            velYaw = 0f
+            velPitch = 0f
+            return
+        }
+
+        sendAim(me, stepTowards(sent, camera), null, sent, camera, report = false)
+    }
+
+    /**
+     * Quantizes, hands the rotation to [RotationManager] (or to the camera when not silent) and
+     * records it as the new [lastSent].
+     */
+    private fun sendAim(
+        me: LocalPlayer,
+        next: Rotation,
+        target: LivingEntity?,
+        from: Rotation,
+        goal: Rotation?,
+        report: Boolean
+    ) {
+        val quantized = if (gcdFix) quantizeToMouseCounts(from, next) else next
 
         if (silent) {
             RotationManager.setRotationTarget(
@@ -492,16 +561,18 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         }
 
         val step = kotlin.math.hypot(
-            Mth.wrapDegrees(quantized.yaw - sent.yaw).toDouble(),
-            (quantized.pitch - sent.pitch).toDouble()
+            Mth.wrapDegrees(quantized.yaw - from.yaw).toDouble(),
+            (quantized.pitch - from.pitch).toDouble()
         )
         lastSent = quantized
-
         remember(me, quantized)
+
+        if (!report) return
+
         debugState(
             "aiming %s dist=%.2f step=%.2f° remaining=%.1f° -> yaw=%.1f pitch=%.1f (silent=%s, preset=%s)".format(
-                target.name.string, target.distanceTo(me), step,
-                kotlin.math.hypot(
+                target?.name?.string, target?.distanceTo(me) ?: 0f, step,
+                if (goal == null) 0.0 else kotlin.math.hypot(
                     Mth.wrapDegrees(goal.yaw - quantized.yaw).toDouble(),
                     (goal.pitch - quantized.pitch).toDouble()
                 ),
@@ -509,7 +580,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
             )
         )
         if (chatLog && hitCount++ % 40 == 0) {
-            chat("§7[Aimbot] target=${target.name.string} yaw=%.1f pitch=%.1f mode=%s".format(quantized.yaw, quantized.pitch, preset.tag))
+            chat("§7[Aimbot] target=${target?.name?.string} yaw=%.1f pitch=%.1f mode=%s".format(quantized.yaw, quantized.pitch, preset.tag))
         }
     }
 
@@ -601,7 +672,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     }
 
     private fun getArmorValue(e: LivingEntity): Float {
-        return try { e.armorValue.toFloat() } catch (_: Exception) { 0f }
+        return try { e.getArmorValue().toFloat() } catch (_: Exception) { 0f }
     }
 
     private fun isInFov(me: LocalPlayer, rot: Rotation): Boolean {
@@ -634,16 +705,25 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     private fun closestPoint(me: LocalPlayer, target: LivingEntity): net.minecraft.world.phys.Vec3 {
         val eye = me.eyePosition
         val box = target.boundingBox
-        val dir = Rotation(me.yRot, me.xRot).directionVector
-        val dist = eye.distanceTo(target.position())
-        val along = kotlin.math.max(0.5, dist)
-        val p = eye.add(dir.scale(along))
+        val dist = eye.distanceTo(box.center)
+
+        // Point blank: clamping a ray inside a box that surrounds the camera makes the aim swing
+        // tens of degrees for a few centimetres of movement (this is where "dist=0.9, diff=25"
+        // came from). Aim at the body, which moves smoothly with the entity.
+        if (dist < 1.5) return box.center
+
+        val dir = (lastSent ?: Rotation(me.yRot, me.xRot)).directionVector
+        val p = eye.add(dir.scale(dist))
         return net.minecraft.world.phys.Vec3(
-            p.x.coerceIn(box.minX + 0.15, box.maxX - 0.15),
-            p.y.coerceIn(box.minY + 0.1, box.maxY - 0.15),
-            p.z.coerceIn(box.minZ + 0.15, box.maxZ - 0.15)
+            clampAxis(p.x, box.minX + 0.15, box.maxX - 0.15),
+            clampAxis(p.y, box.minY + 0.1, box.maxY - 0.15),
+            clampAxis(p.z, box.minZ + 0.15, box.maxZ - 0.15)
         )
     }
+
+    /** coerceIn that also survives a box thinner than the margin. */
+    private fun clampAxis(value: Double, min: Double, max: Double): Double =
+        if (min > max) (min + max) * 0.5 else value.coerceIn(min, max)
 
     private fun randomizedPoint(target: LivingEntity): net.minecraft.world.phys.Vec3 {
         val box = target.boundingBox
@@ -695,7 +775,11 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         val dYaw = Mth.wrapDegrees(to.yaw - from.yaw)
         val dPitch = to.pitch - from.pitch
 
-        if (abs(dYaw) + abs(dPitch) < deadZone) return from
+        if (abs(dYaw) + abs(dPitch) < deadZone) {
+            velYaw = 0f
+            velPitch = 0f
+            return from
+        }
 
         // The smoothing enum only bends the response curve; it can never push it above 1.
         val shape = when (smoothing) {
@@ -703,17 +787,32 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
             Smoothing.SIGMOID -> 0.75f + 0.5f * sigmoidFactor(abs(dYaw) / 180f)
             Smoothing.LINEAR -> 1f
         }
-        // Exponential rate: 0.3 * SmoothSpeed * shape (SmoothSpeed 1 -> ~30% of the gap per tick).
-        val rate = (0.3f * smoothSpeed * shape).coerceIn(0.02f, 1f)
+        val rate = (0.3f * smoothSpeed * shape * responseJitter).coerceIn(0.02f, 1f)
 
-        val stepYaw = (dYaw * rate).coerceIn(-maxStep, maxStep)
-        val stepPitch = (dPitch * rate).coerceIn(-maxStep * 0.7f, maxStep * 0.7f)
+        // Speed we would like to have this tick (never above MaxStep).
+        val wantYaw = (dYaw * rate).coerceIn(-maxStep, maxStep)
+        val wantPitch = (dPitch * rate).coerceIn(-maxStep * 0.7f, maxStep * 0.7f)
+
+        // ...but the speed may only change by `maxAccel` per tick. Starting every turn at full
+        // speed (or stopping it dead) is a signature every rotation check looks for, and ML models
+        // detect it straight away; ramping the speed gives the turn an ease-in / ease-out profile.
+        val maxAccel = (maxStep * 0.45f).coerceAtLeast(0.2f)
+        velYaw = approach(velYaw, wantYaw, maxAccel)
+        velPitch = approach(velPitch, wantPitch, maxAccel * 0.8f)
+
+        // The carried speed must not overshoot the goal.
+        val stepYaw = if (abs(velYaw) > abs(dYaw)) dYaw else velYaw
+        val stepPitch = if (abs(velPitch) > abs(dPitch)) dPitch else velPitch
 
         return Rotation(
             Mth.wrapDegrees(from.yaw + stepYaw),
             (from.pitch + stepPitch).coerceIn(-89.5f, 89.5f)
         )
     }
+
+    /** Moves [current] towards [target] by at most [maxDelta]. */
+    private fun approach(current: Float, target: Float, maxDelta: Float): Float =
+        current + (target - current).coerceIn(-maxDelta, maxDelta)
 
     private fun bezierFactor(t: Float): Float {
         val u = t.coerceIn(0f, 1f)
@@ -735,17 +834,21 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         if (aimBias <= 0f) {
             biasYaw = 0f
             biasPitch = 0f
+            driftYaw = 0f
+            driftPitch = 0f
+            responseJitter = 0.85f + Random.nextFloat() * 0.3f
             return
         }
 
         val magnitude = aimBias * (0.4f + Random.nextFloat() * 0.6f)
         val angle = Random.nextFloat() * 2f * Math.PI.toFloat()
-        biasYaw = (cos(angle.toDouble()).toFloat() * magnitude)
+        biasYaw = (Math.cos(angle.toDouble()).toFloat() * magnitude)
         // humans are worse vertically than horizontally
-        biasPitch = (sin(angle.toDouble()).toFloat() * magnitude * 0.7f)
+        biasPitch = (Math.sin(angle.toDouble()).toFloat() * magnitude * 0.7f)
 
         driftYaw = 0f
         driftPitch = 0f
+        responseJitter = 0.85f + Random.nextFloat() * 0.3f
     }
 
     /**
@@ -861,11 +964,12 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
 
     private fun aiStep(me: LocalPlayer, from: Rotation, goal: Rotation, target: LivingEntity): Rotation? {
         val mdl = model() ?: return null
+        val cur = from
         val prev = Rotation(beforeYaw, beforePitch)
         val output = runCatching {
             val sample = CombatSample(
-                from.directionVector, prev.directionVector, goal.directionVector,
-                prev.rotationDeltaTo(from).toVec2f(),
+                cur.directionVector, prev.directionVector, goal.directionVector,
+                prev.rotationDeltaTo(cur).toVec2f(),
                 me.position().subtract(me.lastPos),
                 target.position().subtract(target.lastPos),
                 me.squaredBoxedDistanceTo(target).toFloat(),
@@ -874,8 +978,8 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
             mdl.predict(sample.asInput)
         }.getOrNull() ?: return null
         if (output.size < 2 || !output[0].isFinite() || !output[1].isFinite()) return null
-        var yaw = from.yaw + output[0] * aiYawMultiplier
-        var pitch = from.pitch + output[1] * aiPitchMultiplier
+        var yaw = cur.yaw + output[0] * aiYawMultiplier
+        var pitch = cur.pitch + output[1] * aiPitchMultiplier
         yaw += Mth.wrapDegrees(goal.yaw - yaw) * (aiCorrection / 100f)
         pitch += (goal.pitch - pitch) * (aiCorrection / 100f)
         return Rotation(Mth.wrapDegrees(yaw), pitch.coerceIn(-90f, 90f))

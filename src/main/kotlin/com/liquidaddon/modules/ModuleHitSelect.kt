@@ -38,7 +38,7 @@ object ModuleHitSelect : ClientModule("HitSelect", Categories.LIQUIDADDON) {
     }
     @Suppress("unused")
     private val attackHandler = handler<net.ccbluex.liquidbounce.event.events.AttackEntityEvent> { event ->
-        val me = player
+        val me = player ?: return@handler
         val targetAny: Any? = try {
             event.javaClass.getMethod("getEntity").invoke(event)
         } catch (_: Exception) {
