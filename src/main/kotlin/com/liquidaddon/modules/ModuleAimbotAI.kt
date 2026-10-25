@@ -372,6 +372,15 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     // How much of the step limit is currently unlocked (0 = corrective, 1 = full flick).
     private var flickAmount = 0f
 
+    // Chaotic source for the speed modulation (logistic map) and the current "flinch" countdown.
+    // Its job is that no two steps have the same size, so the sequence of magnitudes never
+    // repeats a pattern.
+    private var chaos = 0.37f
+    private var flinchLeft = 0
+
+    // Last yaw deltas that were actually sent, used to reproduce Matrix's rank metric locally.
+    private val recentYawDeltas = ArrayDeque<Float>()
+
     private var currentTarget: LivingEntity? = null
     private var lastTargetSwitch = 0L
     private var reactionUntil = 0L
@@ -427,6 +436,9 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         speedGust = 1f
         repeatedSpeed = 0
         flickAmount = 0f
+        chaos = 0.2f + Random.nextFloat() * 0.6f
+        flinchLeft = 0
+        recentYawDeltas.clear()
         biasFor = null
         biasYaw = 0f
         biasPitch = 0f
@@ -637,6 +649,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
             )
         }
         lastStepCounts = stepCountsOf(from, quantized)
+        recordYawDelta(Mth.wrapDegrees(quantized.yaw - from.yaw))
 
         if (silent) {
             RotationManager.setRotationTarget(
@@ -668,7 +681,9 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
                     (goal.pitch - quantized.pitch).toDouble()
                 ),
                 Mth.wrapDegrees(quantized.yaw), me.yRot, quantized.pitch, silent, preset.tag
-            ) + " §7(stepCounts=${stepCountsOf(from, quantized)} lim=${"%.1f".format(maxStep * (1f + 2.2f * flickAmount))} repeatedSpeed=$repeatedSpeed)" + warnings()
+            ) + " §7(stepCounts=${stepCountsOf(from, quantized)} " +
+                "lim=${"%.1f".format(maxStep * (1f + 2.2f * flickAmount))} " +
+                "rank=${"%.2f".format(analysisRank())} repeatedSpeed=$repeatedSpeed)" + warnings()
         )
         if (chatLog && hitCount++ % 40 == 0) {
             chat("§7[Aimbot] target=${target?.name?.string} yaw=%.1f pitch=%.1f mode=%s".format(quantized.yaw, quantized.pitch, preset.tag))
@@ -938,7 +953,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         val error = kotlin.math.max(abs(dYaw), abs(dPitch) * 1.4f)
         val flick = ((error - 4f) / 12f).coerceIn(0f, 1f)
         flickAmount = flick
-        val limitFactor = 1f + 2.2f * flick
+        val limitFactor = (1f + 2.2f * flick) * (0.9f + 0.2f * chaosAbs())
         val limitYaw = maxStep * limitFactor
         val limitPitch = maxStep * 0.7f * limitFactor
 
@@ -948,9 +963,10 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         // 3 of 10 samples with the same magnitude is "heuristic(constant)"), while AimSmoothCheck
         // flags three consecutive identical jiff values. A soft knee plus a per-tick variation
         // keeps the magnitude continuous and never pinned.
-        val variation = tickVariation()
-        val wantYaw = softLimit(dYaw * rate, limitYaw) * variation
-        val wantPitch = softLimit(dPitch * rate, limitPitch) * variation
+        // Independent per-axis modulation: yaw and pitch moving by the same factor every tick is
+        // another regularity (and it flattens the speed sequence the ML model reads).
+        val wantYaw = softLimit(dYaw * rate, limitYaw) * tickVariation()
+        val wantPitch = softLimit(dPitch * rate, limitPitch) * tickVariation()
 
         // ...but the speed may only change by `maxAccel` per tick. Starting every turn at full
         // speed (or stopping it dead) is a signature every rotation check looks for, and ML models
@@ -969,6 +985,39 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
             from.yaw + stepYaw,
             (from.pitch + stepPitch).coerceIn(-89.5f, 89.5f)
         )
+    }
+
+    /**
+     * Reproduces Matrix's `AimAnalysisCheck` metric locally, so the value it would compute is
+     * visible in the debug line instead of being guessed from an anticheat message.
+     *
+     * The check keeps the yaw deltas of the "big" rotations (|yaw| > 1.35), cuts them in windows of
+     * 10, computes the 4th order jiff of each window and counts the distinct values. 6 of 6 for a
+     * window means rank 1.0; the batch is flagged when the average over 10 windows is below 0.95.
+     *
+     * @return the per-window ratio, or -1 while there are not enough samples yet.
+     */
+    private fun analysisRank(): Float {
+        if (recentYawDeltas.size < 10) return -1f
+
+        var values = recentYawDeltas.toList()
+        repeat(4) {
+            if (values.size < 2) return@repeat
+            val next = ArrayList<Float>(values.size - 1)
+            for (i in 1 until values.size) {
+                next.add(kotlin.math.abs(kotlin.math.abs(values[i]) - kotlin.math.abs(values[i - 1])))
+            }
+            values = next
+        }
+        if (values.isEmpty()) return -1f
+        return values.distinct().size.toFloat() / values.size
+    }
+
+    /** Records a sent yaw delta for [analysisRank]; only the "big" ones are scored by Matrix. */
+    private fun recordYawDelta(delta: Float) {
+        if (kotlin.math.abs(delta) <= 1.35f) return
+        recentYawDeltas.addLast(delta)
+        while (recentYawDeltas.size > 10) recentYawDeltas.removeFirst()
     }
 
     /** Length of a step in whole mouse counts: what the ML model measures as "speed". */
@@ -992,14 +1041,41 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         if (limit <= 0f) 0f else limit * kotlin.math.tanh(value / limit)
 
     /**
-     * Speed modulation for the current tick: a random walk (the "gust") plus a small per-tick
-     * noise. A human hand does not hold one speed: entropy, standard deviation and kurtosis of the
-     * speed sequence are inputs of the ML model, and a constant speed minimises all three.
+     * Speed modulation for one axis of the current tick.
+     *
+     * Three ingredients, and the third one is what Matrix's `AimAnalysisCheck` measures: it takes
+     * the last 100 "big" yaw deltas, cuts them in windows of 10, computes the 4th order jiff
+     * (iterated |Δ| of |values|) and counts how many of the resulting 6 numbers are distinct.
+     * Fewer than ~58 of 60 for a whole batch is flagged as "Long term analysis". Repeating
+     * magnitudes — which a quantized, capped aimbot produces — is exactly what makes those 6
+     * numbers repeat, so the magnitude must be driven by something that never repeats.
+     *
+     *  - a mean-reverting random walk (the "gust") for the overall speed;
+     *  - a logistic map (chaotic, deterministic but aperiodic) for the fine structure;
+     *  - an occasional "flinch": 1-3 ticks noticeably slower or faster, like a hand that slips.
      */
     private fun tickVariation(): Float {
+        chaos = 3.99f * chaos * (1f - chaos)
+        if (chaos <= 0.001f || chaos >= 0.999f) chaos = 0.51f
+        val chaotic = (chaos - 0.5f) * 2f
+
+        if (flinchLeft <= 0 && Random.nextInt(100) < 4) {
+            flinchLeft = Random.nextInt(1, 4)
+        }
+
+        var variation = speedGust * (0.93f + Random.nextFloat() * 0.14f) * (1f + 0.18f * chaotic)
+
+        if (flinchLeft > 0) {
+            flinchLeft--
+            variation *= if (Random.nextBoolean()) 0.72f else 1.22f
+        }
+
         speedGust = (speedGust * 0.82f + (Random.nextFloat() - 0.5f) * 0.45f).coerceIn(0.62f, 1.45f)
-        return speedGust * (0.93f + Random.nextFloat() * 0.14f)
+        return variation
     }
+
+    /** |chaos| in 0..1, used to dither the step limit so it is never the same ceiling. */
+    private fun chaosAbs(): Float = kotlin.math.abs(chaos - 0.5f) * 2f
 
     /**
      * A tiny, quantized correction used when the aim would otherwise not move at all: one or two
