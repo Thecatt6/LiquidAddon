@@ -552,7 +552,21 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         goal: Rotation?,
         report: Boolean
     ) {
-        val quantized = if (gcdFix) quantizeToMouseCounts(from, next) else next
+        var quantized = if (gcdFix) quantizeToMouseCounts(from, next) else next
+
+        // Grim's AimDuplicateLook flags a movement packet whose rotation is identical to the
+        // previous one ("Sent a duplicate rotation update without changing look direction").
+        // A vanilla client never sends that: when the mouse does not move it sends a packet
+        // *without* rotation, and the server keeps the last one. In silent mode the manager keeps
+        // applying our rotation every tick, so a "still" aim would repeat the same angle forever.
+        // One mouse count is enough to be a different rotation, and it is invisible.
+        if (quantized.yaw == from.yaw && quantized.pitch == from.pitch) {
+            val count = RotationUtil.gcd.toFloat()
+            quantized = Rotation(
+                quantized.yaw + if (Random.nextBoolean()) count else -count,
+                quantized.pitch
+            )
+        }
 
         if (silent) {
             RotationManager.setRotationTarget(
@@ -832,7 +846,13 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
             Smoothing.SIGMOID -> 0.75f + 0.5f * sigmoidFactor(abs(dYaw) / 180f)
             Smoothing.LINEAR -> 1f
         }
-        val rate = (0.3f * smoothSpeed * shape * responseJitter).coerceIn(0.02f, 1f)
+        // Human aim has two phases (Fitts' law): a fast ballistic movement for a big error and a
+        // slow corrective one when the crosshair is already close. Without the ballistic phase the
+        // aim lags behind a moving target for seconds and the error keeps growing, which looks far
+        // worse (a rotation that follows a target at constant speed) than a quick flick.
+        val ballistic = (abs(dYaw) / 20f).coerceIn(0f, 1f)
+        val rate = (0.3f * smoothSpeed * shape * responseJitter * (1f + 1.5f * ballistic))
+            .coerceIn(0.02f, 1f)
 
         // Speed we would like to have this tick (never above MaxStep).
         val wantYaw = (dYaw * rate).coerceIn(-maxStep, maxStep)
@@ -841,7 +861,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         // ...but the speed may only change by `maxAccel` per tick. Starting every turn at full
         // speed (or stopping it dead) is a signature every rotation check looks for, and ML models
         // detect it straight away; ramping the speed gives the turn an ease-in / ease-out profile.
-        val maxAccel = (maxStep * 0.45f).coerceAtLeast(0.2f)
+        val maxAccel = (maxStep * (0.45f + 0.9f * ballistic)).coerceAtLeast(0.2f)
         velYaw = approach(velYaw, wantYaw, maxAccel)
         velPitch = approach(velPitch, wantPitch, maxAccel * 0.8f)
 
