@@ -1,11 +1,11 @@
 package com.liquidaddon.modules
 
+import com.liquidaddon.Categories
 import net.ccbluex.liquidbounce.config.types.list.Tagged
 import net.ccbluex.liquidbounce.event.events.GameTickEvent
 import net.ccbluex.liquidbounce.event.events.MovementInputEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
-import net.ccbluex.liquidbounce.features.module.ModuleCategories
 import net.ccbluex.liquidbounce.utils.movement.DirectionalInput
 import net.minecraft.client.KeyMapping
 import net.minecraft.client.Minecraft
@@ -60,7 +60,7 @@ import kotlin.random.Random
  *
  * Only on the test servers (TestServers: single player, local/LAN, anticheat-test.com).
  */
-object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", ModuleCategories.WORLD) {
+object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDON) {
 
     enum class Mode(override val tag: String) : Tagged {
         STAIRS("Stairs"),
