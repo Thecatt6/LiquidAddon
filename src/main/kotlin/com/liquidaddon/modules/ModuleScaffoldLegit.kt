@@ -57,8 +57,6 @@ import kotlin.random.Random
  *   MaxDelay         ticks to wait, at most (random in between, every click)
  *   ChatLog          every 5 steps: how many, misses, and at which tick of the jump the block went down
  *   Debug            writes in chat what the module waits for, whenever it changes
- *
- * Only on the test servers (TestServers: single player, local/LAN, anticheat-test.com).
  */
 object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDON) {
 
