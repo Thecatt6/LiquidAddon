@@ -34,6 +34,8 @@ jobs:
           name: addon
           path: build/libs/*.jar
 
+      
+
       - name: Publish snapshot release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
@@ -48,10 +50,10 @@ jobs:
 
           Not a stable release - it tracks whatever is on main right now."
 
-          # Recreate rather than edit: `gh release upload --clobber` cannot retarget the tag when
-          # main has moved on.
           gh release delete snapshot --cleanup-tag --yes || true
-          gh release create snapshot "$JAR" \
+
+          gh release create snapshot \
+            "$JAR" \
             --title "Snapshot" \
             --notes "$NOTES" \
             --prerelease \
