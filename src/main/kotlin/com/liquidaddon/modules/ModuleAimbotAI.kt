@@ -15,7 +15,6 @@ import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
 import net.ccbluex.liquidbounce.utils.aiming.features.MovementCorrection
 import net.ccbluex.liquidbounce.utils.aiming.utils.RotationUtil
 import net.ccbluex.liquidbounce.utils.client.chat
-import net.ccbluex.liquidbounce.utils.client.mc
 import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
 import net.ccbluex.liquidbounce.utils.entity.lastPos
 import net.ccbluex.liquidbounce.utils.entity.squaredBoxedDistanceTo
@@ -27,11 +26,13 @@ import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.player.Player
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 
 /**
- * ModuleAimbot — silent aimbot with human-like rotations.
+ * ModuleAimbotAI — silent aimbot with human-like rotations.
  *
  * Pipeline every tick: [findTarget] -> [goalRotation] -> [stepTowards] -> [quantizeToMouseCounts]
  * -> `RotationManager.setRotationTarget`. Every step is bounded by [maxStep] degrees, so the aim
@@ -42,7 +43,7 @@ import kotlin.random.Random
  * ClickGUI always shows what the module is really doing. `Custom` leaves the sliders alone.
  * `Undetectable` is the profile tuned for Vulcan "Aim (Rotation)" / packet "perfectrotation".
  */
-object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
+object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
 
     /** How far (in mouse counts) the rounding boundary may wobble when [gcdDither] is on. */
     private const val DITHER_WOBBLE = 0.18
@@ -672,7 +673,7 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
     }
 
     private fun getArmorValue(e: LivingEntity): Float {
-        return try { e.getArmorValue().toFloat() } catch (_: Exception) { 0f }
+        return try { e.armorValue.toFloat() } catch (_: Exception) { 0f }
     }
 
     private fun isInFov(me: LocalPlayer, rot: Rotation): Boolean {
@@ -842,9 +843,9 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
         val magnitude = aimBias * (0.4f + Random.nextFloat() * 0.6f)
         val angle = Random.nextFloat() * 2f * Math.PI.toFloat()
-        biasYaw = (Math.cos(angle.toDouble()).toFloat() * magnitude)
+        biasYaw = (cos(angle.toDouble()).toFloat() * magnitude)
         // humans are worse vertically than horizontally
-        biasPitch = (Math.sin(angle.toDouble()).toFloat() * magnitude * 0.7f)
+        biasPitch = (sin(angle.toDouble()).toFloat() * magnitude * 0.7f)
 
         driftYaw = 0f
         driftPitch = 0f
@@ -964,12 +965,11 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
 
     private fun aiStep(me: LocalPlayer, from: Rotation, goal: Rotation, target: LivingEntity): Rotation? {
         val mdl = model() ?: return null
-        val cur = from
         val prev = Rotation(beforeYaw, beforePitch)
         val output = runCatching {
             val sample = CombatSample(
-                cur.directionVector, prev.directionVector, goal.directionVector,
-                prev.rotationDeltaTo(cur).toVec2f(),
+                from.directionVector, prev.directionVector, goal.directionVector,
+                prev.rotationDeltaTo(from).toVec2f(),
                 me.position().subtract(me.lastPos),
                 target.position().subtract(target.lastPos),
                 me.squaredBoxedDistanceTo(target).toFloat(),
@@ -978,8 +978,8 @@ object ModuleAimbot : ClientModule("Aimbot", Categories.LIQUIDADDON) {
             mdl.predict(sample.asInput)
         }.getOrNull() ?: return null
         if (output.size < 2 || !output[0].isFinite() || !output[1].isFinite()) return null
-        var yaw = cur.yaw + output[0] * aiYawMultiplier
-        var pitch = cur.pitch + output[1] * aiPitchMultiplier
+        var yaw = from.yaw + output[0] * aiYawMultiplier
+        var pitch = from.pitch + output[1] * aiPitchMultiplier
         yaw += Mth.wrapDegrees(goal.yaw - yaw) * (aiCorrection / 100f)
         pitch += (goal.pitch - pitch) * (aiCorrection / 100f)
         return Rotation(Mth.wrapDegrees(yaw), pitch.coerceIn(-90f, 90f))
