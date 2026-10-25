@@ -48,6 +48,9 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     /** How far (in mouse counts) the rounding boundary may wobble when [gcdDither] is on. */
     private const val DITHER_WOBBLE = 0.18
 
+    /** Steps below this many mouse counts (~3 degrees) are too slow for the "constant" counter. */
+    private const val FAST_STEP_COUNTS = 20
+
     enum class Priority(override val tag: String) : Tagged {
         DISTANCE("Distance"), HEALTH("Health"), FOV("Fov"), ANGLE("Angle"), ARMOR("Armor")
     }
@@ -358,6 +361,14 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     private var nudgeYawSign = 1f
     private var nudgePitchSign = 1f
 
+    // Magnitude of the last sent step, in mouse counts, and the "gust" that modulates the speed.
+    // The RNN scores the sequence of speeds (sqrt(yaw^2 + pitch^2)) and counts how often a fast
+    // movement keeps almost the same speed as the tick before (< 0.02 degrees while turning more
+    // than 3): that count is one of its "robot" counters.
+    private var lastStepCounts = 0
+    private var speedGust = 1f
+    private var repeatedSpeed = 0
+
     private var currentTarget: LivingEntity? = null
     private var lastTargetSwitch = 0L
     private var reactionUntil = 0L
@@ -408,6 +419,9 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         stillPitchTicks = 0
         nudgeYawSign = if (Random.nextBoolean()) 1f else -1f
         nudgePitchSign = if (Random.nextBoolean()) 1f else -1f
+        lastStepCounts = 0
+        speedGust = 1f
+        repeatedSpeed = 0
         biasFor = null
         biasYaw = 0f
         biasPitch = 0f
@@ -600,6 +614,25 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
             quantized = Rotation(quantized.yaw + nudge(nudgeYawSign), quantized.pitch)
         }
 
+        // --- the ML model's "constant rotation" counter -------------------------------------
+        // The RNN counts, per window, how many times the crosshair moves fast but with a speed
+        // almost identical to the previous tick: a difference below 0.02 degrees while turning
+        // more than 3 degrees counts as a robot. A saturated step limit produces exactly that,
+        // because the quantizer keeps rounding the same magnitude to the same mouse count.
+        // So: while the step is fast, its magnitude is never allowed to repeat.
+        if (stepCountsOf(from, quantized) >= FAST_STEP_COUNTS &&
+            stepCountsOf(from, quantized) == lastStepCounts
+        ) {
+            repeatedSpeed++
+            // one count (0.15 degrees at the default sensitivity) is far above the 0.02 threshold
+            val direction = if (Mth.wrapDegrees(quantized.yaw - from.yaw) >= 0f) 1 else -1
+            quantized = Rotation(
+                quantized.yaw + direction * RotationUtil.gcd.toFloat(),
+                quantized.pitch
+            )
+        }
+        lastStepCounts = stepCountsOf(from, quantized)
+
         if (silent) {
             RotationManager.setRotationTarget(
                 rotationPlan(quantized, target),
@@ -618,6 +651,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         remember(me, quantized)
 
         if (!report) return
+        if (debugTick % 20 == 0) repeatedSpeed = 0
 
         // `raw` is the angle actually written to the player: it must grow/shrink continuously and
         // must NEVER jump by ~360 between two lines (that would be the AimModulo360 signature).
@@ -629,7 +663,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
                     (goal.pitch - quantized.pitch).toDouble()
                 ),
                 Mth.wrapDegrees(quantized.yaw), me.yRot, quantized.pitch, silent, preset.tag
-            ) + warnings()
+            ) + " §7(stepCounts=${stepCountsOf(from, quantized)} repeatedSpeed=$repeatedSpeed)" + warnings()
         )
         if (chatLog && hitCount++ % 40 == 0) {
             chat("§7[Aimbot] target=${target?.name?.string} yaw=%.1f pitch=%.1f mode=%s".format(quantized.yaw, quantized.pitch, preset.tag))
@@ -914,6 +948,14 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         )
     }
 
+    /** Length of a step in whole mouse counts: what the ML model measures as "speed". */
+    private fun stepCountsOf(from: Rotation, to: Rotation): Int = kotlin.math.round(
+        kotlin.math.hypot(
+            Mth.wrapDegrees(to.yaw - from.yaw).toDouble(),
+            (to.pitch - from.pitch).toDouble()
+        ) / RotationUtil.gcd
+    ).toInt()
+
     /** Moves [current] towards [target] by at most [maxDelta]. */
     private fun approach(current: Float, target: Float, maxDelta: Float): Float =
         current + (target - current).coerceIn(-maxDelta, maxDelta)
@@ -926,8 +968,15 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     private fun softLimit(value: Float, limit: Float): Float =
         if (limit <= 0f) 0f else limit * kotlin.math.tanh(value / limit)
 
-    /** ±6% on the step magnitude. Two consecutive steps must never be equal. */
-    private fun tickVariation(): Float = 0.94f + Random.nextFloat() * 0.12f
+    /**
+     * Speed modulation for the current tick: a random walk (the "gust") plus a small per-tick
+     * noise. A human hand does not hold one speed: entropy, standard deviation and kurtosis of the
+     * speed sequence are inputs of the ML model, and a constant speed minimises all three.
+     */
+    private fun tickVariation(): Float {
+        speedGust = (speedGust * 0.82f + (Random.nextFloat() - 0.5f) * 0.45f).coerceIn(0.62f, 1.45f)
+        return speedGust * (0.93f + Random.nextFloat() * 0.14f)
+    }
 
     /**
      * A tiny, quantized correction used when the aim would otherwise not move at all: one or two
