@@ -369,6 +369,9 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     private var speedGust = 1f
     private var repeatedSpeed = 0
 
+    // How much of the step limit is currently unlocked (0 = corrective, 1 = full flick).
+    private var flickAmount = 0f
+
     private var currentTarget: LivingEntity? = null
     private var lastTargetSwitch = 0L
     private var reactionUntil = 0L
@@ -397,6 +400,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     private var scanCount = 0
     private var validCount = 0
     private var lastGate = "start"
+    private var lastDebugMessage = ""
 
     override val tag: String
         get() = currentTarget?.let { "${it.name.string.take(8)} ${String.format("%.1f", it.health)}" } ?: ""
@@ -422,6 +426,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         lastStepCounts = 0
         speedGust = 1f
         repeatedSpeed = 0
+        flickAmount = 0f
         biasFor = null
         biasYaw = 0f
         biasPitch = 0f
@@ -663,7 +668,7 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
                     (goal.pitch - quantized.pitch).toDouble()
                 ),
                 Mth.wrapDegrees(quantized.yaw), me.yRot, quantized.pitch, silent, preset.tag
-            ) + " §7(stepCounts=${stepCountsOf(from, quantized)} repeatedSpeed=$repeatedSpeed)" + warnings()
+            ) + " §7(stepCounts=${stepCountsOf(from, quantized)} lim=${"%.1f".format(maxStep * (1f + 2.2f * flickAmount))} repeatedSpeed=$repeatedSpeed)" + warnings()
         )
         if (chatLog && hitCount++ % 40 == 0) {
             chat("§7[Aimbot] target=${target?.name?.string} yaw=%.1f pitch=%.1f mode=%s".format(quantized.yaw, quantized.pitch, preset.tag))
@@ -705,6 +710,11 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     private fun debugState(message: String) {
         if (!debug) return
         if (++debugTick % 20 != 0) return
+
+        // The "no target" line used to be printed every second, forever, while walking around.
+        if (message.startsWith("no target") && message == lastDebugMessage) return
+        lastDebugMessage = message
+
         chat("§7[Aimbot] §f$message")
     }
 
@@ -920,19 +930,32 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
         val rate = (0.3f * smoothSpeed * shape * responseJitter * (1f + 1.5f * ballistic))
             .coerceIn(0.02f, 1f)
 
-        // Speed we would like to have this tick. A HARD clamp here is what makes an aimbot
-        // detectable: while the cap is saturated every step has exactly the same magnitude, and
-        // Matrix's AimBasicCheck counts exactly that ("robotized" = |yawChange - yawChangeFirst|:
-        // more than 3 of 10 samples with the same magnitude is "heuristic(constant)"), while
-        // AimSmoothCheck flags three consecutive identical jiff values. A soft knee plus a tiny
-        // per-tick variation keeps the magnitude continuous and never pinned.
-        val wantYaw = softLimit(dYaw * rate, maxStep) * tickVariation()
-        val wantPitch = softLimit(dPitch * rate, maxStep * 0.7f) * tickVariation()
+        // The cap must GROW with the error, otherwise the aim can never catch a target that
+        // circles around the player: it creeps at one constant speed for seconds while the error
+        // keeps growing (the log showed remaining 13 -> 22 -> 44 degrees at step 3). That constant
+        // creep is also the flattest possible speed sequence, which is what the ML model scores.
+        // A human flick to a far target is fast: maxStep near the crosshair, up to 3.2x for a flick.
+        val error = kotlin.math.max(abs(dYaw), abs(dPitch) * 1.4f)
+        val flick = ((error - 4f) / 12f).coerceIn(0f, 1f)
+        flickAmount = flick
+        val limitFactor = 1f + 2.2f * flick
+        val limitYaw = maxStep * limitFactor
+        val limitPitch = maxStep * 0.7f * limitFactor
+
+        // Speed we would like to have this tick. A HARD clamp is what makes an aimbot detectable:
+        // while the cap is saturated every step has exactly the same magnitude, and Matrix's
+        // AimBasicCheck counts exactly that ("robotized" = |yawChange - yawChangeFirst|: more than
+        // 3 of 10 samples with the same magnitude is "heuristic(constant)"), while AimSmoothCheck
+        // flags three consecutive identical jiff values. A soft knee plus a per-tick variation
+        // keeps the magnitude continuous and never pinned.
+        val variation = tickVariation()
+        val wantYaw = softLimit(dYaw * rate, limitYaw) * variation
+        val wantPitch = softLimit(dPitch * rate, limitPitch) * variation
 
         // ...but the speed may only change by `maxAccel` per tick. Starting every turn at full
         // speed (or stopping it dead) is a signature every rotation check looks for, and ML models
         // detect it straight away; ramping the speed gives the turn an ease-in / ease-out profile.
-        val maxAccel = (maxStep * (0.45f + 0.9f * ballistic)).coerceAtLeast(0.2f)
+        val maxAccel = (maxStep * (0.45f + 0.9f * ballistic) * (1f + 1.5f * flick)).coerceAtLeast(0.2f)
         velYaw = approach(velYaw, wantYaw, maxAccel)
         velPitch = approach(velPitch, wantPitch, maxAccel * 0.8f)
 
