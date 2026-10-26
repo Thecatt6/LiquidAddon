@@ -7,12 +7,15 @@ import net.ccbluex.liquidbounce.event.events.GameTickEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.features.module.modules.combat.ModuleAutoClicker
+import net.ccbluex.liquidbounce.features.module.modules.combat.ModuleHitbox
+import net.ccbluex.liquidbounce.features.module.modules.player.ModuleReach
 import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
 import net.ccbluex.liquidbounce.utils.aiming.utils.RotationUtil
 import net.ccbluex.liquidbounce.utils.block.SwingMode
 import net.ccbluex.liquidbounce.utils.client.chat
 import net.ccbluex.liquidbounce.utils.combat.attackEntity
 import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
+import net.ccbluex.liquidbounce.utils.entity.ping
 import net.ccbluex.liquidbounce.utils.entity.squaredBoxedDistanceTo
 import net.ccbluex.liquidbounce.utils.input.InputTracker.isPressedOnAny
 import net.ccbluex.liquidbounce.utils.item.WeaponType
@@ -23,6 +26,7 @@ import net.minecraft.client.KeyMapping
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.util.Util
 import net.minecraft.world.InteractionHand
+import net.minecraft.world.phys.EntityHitResult
 import net.minecraft.world.entity.LivingEntity
 import kotlin.math.max
 import kotlin.math.sqrt
@@ -78,6 +82,27 @@ import kotlin.random.Random
  * hitbox, **without** the client pick-radius slack. Using the usual boxed distance (which inflates
  * the hitbox by 0.1) is enough on its own to push a "3.0 blocks" attack over the limit.
  *
+ * ### Why a reach flag appears "every now and then"
+ *
+ * Three things move the distance the server computes away from the one the client sees, and none of
+ * them shows up when you stand still — which is exactly why the flag looks random:
+ *
+ *  1. **Latency.** The server measures from your last received position against the position the
+ *     enemy had when that packet was sent. If you are both closing in, that pair is farther apart
+ *     than what you see on screen. [desync] subtracts `(my speed + their speed) × half the RTT` from
+ *     the attack distance, read from the real [ping], so the click is only allowed when even the
+ *     server's older view is inside the reach;
+ *  2. **`Reach` and the item's range component.** `ENTITY_INTERACTION_RANGE` is what *your client*
+ *     thinks it can hit; the server only knows the vanilla 3.0. That is why every attack is capped
+ *     by [serverReach] (3.0 by default) instead of by the attribute;
+ *  3. **`Hitbox`.** It inflates the vanilla hit result through the item's hitbox margin, so in
+ *     [PrePress.KEY] mode a queued press could become an out-of-range attack. The press is filtered
+ *     against the real distance before it is queued.
+ *
+ * With `ServerReach = 3.0`, `SafetyGap = 0.05`, `OverReach = 0` and [desync] on, the attack happens
+ * at `2.95 - drift`, i.e. between ~2.4 and 2.95 blocks depending on how fast both sides are closing.
+ * The margin is the price of not being flagged; the early press is what keeps the speed.
+ *
  * Settings:
  *   Preset            ready-made configs (Custom = the sliders below)
  *   Range             base trigger distance, used while the enemy is still outside real reach
@@ -91,6 +116,8 @@ import kotlin.random.Random
  *   SafetyGap         how much of the reach is left unused while ServerSafe is on
  *   OverReach         how far past the reach an *attack* may go (0 = never, keep it there)
  *   PrePress          Off / Swing / Key: what the early press does
+ *   ServerReach       the reach the server measures (3.0), caps every attack
+ *   DesyncCompensation / DesyncPercent   subtract the position drift caused by ping
  *   CPS / CpsJitter   click rate as a slider range, plus a random stretch per click
  *   MinCooldown       minimum attack strength, so the rate never nerfs the damage
  *   Predict           lead the enemy's movement
@@ -127,6 +154,9 @@ object ModuleTriggerBotPlus : ClientModule(
     /** Never trigger closer than this, a cushion larger than the reach would make no sense. */
     private const val MIN_TRIGGER = 0.4
 
+    /** Upper bound on the latency allowance, in blocks. Beyond this it is a lag spike, not drift. */
+    private const val MAX_DESYNC = 0.8
+
     /**
      * How long a lost target keeps its drawn cushion. The crosses of a mouse sitting on the edge of
      * a hitbox are not stable for a single tick; without this grace every flicker would re-roll the
@@ -151,7 +181,10 @@ object ModuleTriggerBotPlus : ClientModule(
         val serverSafe: Boolean = true,
         val safetyGap: Float = 0.05f,
         val overReach: Float = 0.0f,
-        val prePress: PrePress = PrePress.SWING
+        val prePress: PrePress = PrePress.SWING,
+        val serverReach: Float = 3.0f,
+        val desync: Boolean = true,
+        val desyncPercent: Int = 100
     )
 
     enum class Preset(override val tag: String, val profile: Profile?) : Tagged {
@@ -164,7 +197,7 @@ object ModuleTriggerBotPlus : ClientModule(
                 range = 3.0f, matchVanilla = true, early = 0.10f..0.30f, earlyChance = 40,
                 predict = true, predictTicks = 1, reaction = 0..1, minCooldown = 1.0f,
                 cps = 8..11, clickDelay = 0..1, throughWalls = false, keepSprint = false,
-                serverSafe = true, safetyGap = 0.05f, overReach = 0.0f, prePress = PrePress.SWING
+                serverSafe = true, safetyGap = 0.05f, overReach = 0.0f, prePress = PrePress.SWING, serverReach = 3.0f, desync = true, desyncPercent = 100
             )
         ),
 
@@ -175,7 +208,7 @@ object ModuleTriggerBotPlus : ClientModule(
                 range = 3.0f, matchVanilla = true, early = 0.20f..0.55f, earlyChance = 75,
                 predict = true, predictTicks = 2, reaction = 0..0, minCooldown = 1.0f,
                 cps = 10..14, clickDelay = 0..0, throughWalls = false, keepSprint = false,
-                serverSafe = true, safetyGap = 0.05f, overReach = 0.0f, prePress = PrePress.KEY
+                serverSafe = true, safetyGap = 0.05f, overReach = 0.0f, prePress = PrePress.KEY, serverReach = 3.0f, desync = true, desyncPercent = 100
             )
         ),
 
@@ -186,7 +219,7 @@ object ModuleTriggerBotPlus : ClientModule(
                 range = 3.2f, matchVanilla = false, early = 0.35f..0.90f, earlyChance = 100,
                 predict = true, predictTicks = 2, reaction = 0..0, minCooldown = 0.90f,
                 cps = 14..20, clickDelay = 0..0, throughWalls = true, keepSprint = false,
-                serverSafe = false, safetyGap = 0.05f, overReach = 0.0f, prePress = PrePress.SWING
+                serverSafe = false, safetyGap = 0.05f, overReach = 0.0f, prePress = PrePress.SWING, serverReach = 3.0f, desync = true, desyncPercent = 100
             )
         )
     }
@@ -274,6 +307,26 @@ object ModuleTriggerBotPlus : ClientModule(
      */
     private val overReachValue = float("OverReach", 0.0f, 0.0f..0.50f, "blocks")
     private val overReach by overReachValue
+
+    /**
+     * The reach the **server** measures, which is not the one the client uses: the vanilla attribute
+     * is 3.0, while `Reach` (or a long item) raises only the client side. Attacks are gated against
+     * `min(base, ServerReach)`, so turning Reach up cannot drag this module into a flag.
+     */
+    private val serverReachValue = float("ServerReach", 3.0f, 2.0f..6.0f, "blocks")
+    private val serverReach by serverReachValue
+
+    /**
+     * Compensate the position desync: the server evaluates the attack against *older* positions, so
+     * while you and the enemy close in on each other the distance it computes is larger than yours.
+     * The allowance is subtracted from the attack distance, which only ever makes the click later.
+     */
+    private val desyncValue = boolean("DesyncCompensation", true)
+    private val desync by desyncValue
+
+    /** How much of the estimated desync to take into account, in percent of half the round trip. */
+    private val desyncPercentValue = int("DesyncPercent", 100, 0..200, "%")
+    private val desyncPercent by desyncPercentValue
 
     /**
      * What the early click actually is. [PrePress.SWING] and [PrePress.KEY] both press the left
@@ -405,6 +458,22 @@ object ModuleTriggerBotPlus : ClientModule(
             )
         }
 
+        if (ModuleReach.enabled) {
+            chat(
+                "§7[TriggerBotPlus] §eReach is on: it raises your client range, never the server's. " +
+                    "ServerReach (§f${serverReach}§e) keeps the attacks of this module legal, but the " +
+                    "rest of your clicks are still on you."
+            )
+        }
+
+        if (prePress == PrePress.KEY && ModuleHitbox.enabled) {
+            chat(
+                "§7[TriggerBotPlus] §eHitbox is on: it inflates the vanilla hit result through the item " +
+                    "margin, so the Key press is filtered against the real distance and some presses " +
+                    "are skipped on purpose."
+            )
+        }
+
         if (pauseWithAutoClicker && ModuleAutoClicker.enabled) {
             chat(
                 "§7[TriggerBotPlus] §cAutoClicker is enabled — this module stays paused. " +
@@ -464,7 +533,7 @@ object ModuleTriggerBotPlus : ClientModule(
 
         val base = baseDistance(me)
         val measured = serverDistance(me, target)
-        val attackAt = attackLimit(me, base)
+        val attackAt = attackLimit(me, base, target)
         val distance = if (serverSafe) measured else predictedDistance(me, target, measured)
 
         // The early click: the enemy is still beyond the attack distance, so we only press the left
@@ -523,6 +592,14 @@ object ModuleTriggerBotPlus : ClientModule(
                 // Vanilla ignores clicks for a few ticks after a missed swing; pressing now would be
                 // swallowed and the real click would come too late.
                 if (mc.missTime > 0) return
+
+                // Vanilla resolves the press against its own hit result. If that hit result is an
+                // entity we would not be allowed to attack, the press would become an out-of-range
+                // attack — which is a flag, not an early click. (`Hitbox` inflates that hit result
+                // through the item's hitbox margin, so this guard is not theoretical.)
+                val vanillaTarget = (mc.hitResult as? EntityHitResult)?.entity as? LivingEntity
+                if (vanillaTarget != null && serverDistance(me, vanillaTarget) > attackAt) return
+
                 KeyMapping.click(mc.options.keyAttack.key)
             }
         }
@@ -610,15 +687,49 @@ object ModuleTriggerBotPlus : ClientModule(
      * The distance at which the module is allowed to **attack**. The early part of the module lives
      * on the press ([pressEarly]), never here, so this stays inside the reach:
      *
-     *  - [serverSafe] on: `reach - SafetyGap` (+ [overReach], which is 0 by default). Nothing to flag;
+     *  - [serverSafe] on: `min(base, ServerReach, interaction range) + OverReach - SafetyGap - drift`,
+     *    with `OverReach = 0` by default. The `ServerReach` clamp is what makes `Reach` harmless here,
+     *    the drift is [desyncAllowance];
      *  - [serverSafe] off: `base + cushion`, i.e. the attack itself happens out of range — reach hack,
      *    and exactly what Grim flags.
      */
-    private fun attackLimit(me: LocalPlayer, base: Double): Double {
-        if (!serverSafe) return (base + earlyMargin).coerceAtLeast(MIN_TRIGGER)
+    private fun attackLimit(me: LocalPlayer, base: Double, target: LivingEntity): Double {
+        if (!serverSafe) {
+            return (base + earlyMargin).coerceAtLeast(MIN_TRIGGER)
+        }
 
-        val ceiling = me.entityInteractionRange() + overReach - safetyGap
-        return minOf(base, ceiling).coerceAtLeast(MIN_TRIGGER)
+        // Never above what the server itself accepts: ServerReach is the honest 3.0, and the
+        // interaction range is capped by it so the Reach module cannot push the attack farther.
+        val ceiling = minOf(base, serverReach.toDouble(), me.entityInteractionRange()) + overReach - safetyGap
+        return (ceiling - desyncAllowance(me, target)).coerceAtLeast(MIN_TRIGGER)
+    }
+
+    /**
+     * How many blocks the client is "ahead" of the server when both sides are closing in.
+     *
+     * A server does not measure the attack from where you are now: it measures it from the position
+     * it last received, and against the position the enemy had when that packet was sent. If you are
+     * sprinting into each other, that pair of positions is farther apart than the pair you see, and
+     * the difference is `(my speed + their speed) × half the round trip`. Attacking at exactly the
+     * limit is what produces a flag "every now and then": when nobody is moving there is no error,
+     * and the moment both of you walk in it appears.
+     */
+    private fun desyncAllowance(me: LocalPlayer, target: LivingEntity): Double {
+        if (!desync) return 0.0
+
+        val latency = me.ping.coerceIn(0, 500)
+        if (latency <= 0) return 0.0
+
+        val toTarget = target.boundingBox.center.subtract(me.eyePosition)
+        if (toTarget.lengthSqr() < 1.0e-5) return 0.0
+
+        val direction = toTarget.normalize()
+        val ownClosing = me.deltaMovement.dot(direction).coerceAtLeast(0.0)
+        val theirClosing = (-target.deltaMovement.dot(direction)).coerceAtLeast(0.0)
+
+        // half the round trip, in ticks (one tick = 50 ms)
+        val ticks = latency / 100.0 * (desyncPercent / 100.0)
+        return ((ownClosing + theirClosing) * ticks).coerceIn(0.0, MAX_DESYNC)
     }
 
     /**
@@ -705,6 +816,9 @@ object ModuleTriggerBotPlus : ClientModule(
         safetyGapValue.set(p.safetyGap)
         overReachValue.set(p.overReach)
         prePressValue.set(p.prePress)
+        serverReachValue.set(p.serverReach)
+        desyncValue.set(p.desync)
+        desyncPercentValue.set(p.desyncPercent)
 
         if (debug || chatLog) {
             chat("§7[TriggerBotPlus] §fpreset §7${preset.tag}§f applied")
@@ -730,7 +844,7 @@ object ModuleTriggerBotPlus : ClientModule(
         if (debug) {
             chat(
                 "§7[TriggerBotPlus] §ftrigger #$triggers §7(pre $preTriggers, presses $presses) §fdist=%.2f base=%.2f attackAt=%.2f cps=%d%s"
-                    .format(measured, base, attackLimit(me, base), nextIn(cps), if (isEarly) " §6early" else "")
+                    .format(measured, base, attackLimit(me, base, target), nextIn(cps), if (isEarly) " §6early" else "")
             )
         }
     }
