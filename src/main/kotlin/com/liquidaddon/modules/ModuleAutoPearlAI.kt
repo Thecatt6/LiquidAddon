@@ -648,10 +648,11 @@ object ModuleAutoPearlAI : ClientModule(
      */
     private fun throwVelocity(me: LocalPlayer, rotation: Rotation): Vec3 {
         val look = rotation.directionVector.scale(PEARL_SPEED)
-        return look.add(
-            me.deltaMovement.x,
-            if (me.onGround()) 0.0 else me.deltaMovement.y,
-            me.deltaMovement.z
+        val carriedY = if (me.onGround()) 0.0 else me.deltaMovement.y
+        return Vec3(
+            look.x + me.deltaMovement.x,
+            look.y + carriedY,
+            look.z + me.deltaMovement.z
         )
     }
 
