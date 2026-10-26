@@ -1,451 +1,98 @@
 package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
-import net.ccbluex.liquidbounce.config.types.list.Tagged
-import net.ccbluex.liquidbounce.deeplearn.DeepLearningEngine
-import net.ccbluex.liquidbounce.deeplearn.ModelManager
-import net.ccbluex.liquidbounce.deeplearn.data.CombatSample
-import net.ccbluex.liquidbounce.deeplearn.models.TwoDimensionalRegressionModel
+import com.liquidaddon.aiming.AimbotValues
+import com.liquidaddon.aiming.AimassistCore
+import net.ccbluex.liquidbounce.event.events.AttackEntityEvent
+import net.ccbluex.liquidbounce.event.events.GameRenderEvent
 import net.ccbluex.liquidbounce.event.events.GameTickEvent
+import net.ccbluex.liquidbounce.event.events.MouseRotationEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
-import net.ccbluex.liquidbounce.utils.aiming.RotationManager
-import net.ccbluex.liquidbounce.utils.aiming.RotationTarget
-import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
-import net.ccbluex.liquidbounce.utils.aiming.features.MovementCorrection
-import net.ccbluex.liquidbounce.utils.aiming.utils.RotationUtil
-import net.ccbluex.liquidbounce.utils.client.chat
-import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
-import net.ccbluex.liquidbounce.utils.entity.lastPos
-import net.ccbluex.liquidbounce.utils.entity.squaredBoxedDistanceTo
-import net.ccbluex.liquidbounce.utils.kotlin.Priority as RotationPriority
-import net.minecraft.client.Minecraft
-import net.minecraft.client.player.LocalPlayer
-import net.minecraft.util.Mth
-import net.minecraft.world.entity.LivingEntity
-import net.minecraft.world.entity.player.Player
-import kotlin.math.abs
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.sin
-import kotlin.math.sqrt
-import kotlin.random.Random
+import net.ccbluex.liquidbounce.utils.render.TargetRenderer
 
 /**
- * ModuleAimbotAI — silent aimbot with human-like rotations.
+ * AimbotAI — aims by itself, with the Aimassist's engine.
  *
- * Pipeline every tick: [findTarget] -> [goalRotation] -> [stepTowards] -> [quantizeToMouseCounts]
- * -> `RotationManager.setRotationTarget`. Every step is bounded by [maxStep] degrees, so the aim
- * can never jump inside a single packet (Vulcan's "packet diff" flag) and the movement stays smooth.
- * -> `RotationManager.setRotationTarget`. The module never clicks; it only aims.
+ * The aiming logic is not duplicated: this module drives the same [AimassistCore] the Aimassist
+ * uses, so it inherits every bypass trick that engine has (the mouse-count lattice with its carried
+ * residual, `GcdDither`, the frame interpolation of a tick's step, the silent rotation through
+ * `RotationManager` with `MoveFix`, and LiquidBounce's already-trained combat model under
+ * `Engine = AI`).
  *
- * Presets are full profiles, not just a speed: picking one writes every slider below, so the
- * ClickGUI always shows what the module is really doing. `Custom` leaves the sliders alone.
- * `Undetectable` is the profile tuned for Vulcan "Aim (Rotation)" / packet "perfectrotation".
+ * What is different is that it aims **on its own**: the settings are not the assist's
+ * ([AimbotValues]) and the engine is told to pick the target itself ([AimbotValues.autoAim]). The
+ * cone around the crosshair stops filtering, the pull no longer fades with the distance from where
+ * you are looking, and there is no reaction pause, no fade-in and no idle beat — while a target is
+ * in `Range` and inside `Fov` (360° by default, i.e. all around you) the aim goes to it and stays
+ * on it until it is dead or out of reach.
+ *
+ * The aimbot never clicks: it only aims. Use a KillAura/clicker for the hits, or click yourself —
+ * and when you do, the click is synchronised with the aim: it is held until the rotation the server
+ * has is on the entity you hit, then sent (see [AimassistCore.onAttack]). An aimbot rotates a lot,
+ * so this is the difference between an attack that arrives *with* its rotation and the
+ * attack-then-snap pattern Vulcan calls `Killaura (Post)`.
+ *
+ * How it gets there is still the assist's maths, so the numbers mean the same thing:
+ *  - `AimSpeed` is the hard cap of one tick, `Strength` the share of the remaining angle,
+ *    `Smoothing` the curve (`Linear`, `Bezier`, `Sigmoid`) — bigger error, faster correction, never
+ *    a teleport;
+ *  - `AimPoint` picks the part of the hitbox, `Predict`/`PredictSize` lead the target;
+ *  - `Engine = AI` swaps the curve for the model LiquidBounce already trained on recorded human
+ *    fights, completed by `AICorrection`;
+ *  - `Silent = true` (default) sends the rotation only to the server, so the camera stays yours and
+ *    the hits land anyway; `Silent = false` turns the camera with it, `FrameInterpolation` spreading
+ *    the step over the frames of the tick.
+ *
+ * The blue circle under the current target is LiquidBounce's own [TargetRenderer] (the one KillAura
+ * draws), configured in the `TargetRendering` group.
+ *
+ * Do not run this and [ModuleAimassist] together: they are the same engine, and enabling one turns
+ * the other off.
  */
 object ModuleAimbotAI : ClientModule("Aimbot AI", Categories.LIQUIDADDON) {
 
-    /** How far (in mouse counts) the rounding boundary may wobble when [gcdDither] is on. */
-    private const val DITHER_WOBBLE = 0.18
+    /** The aimbot's own settings (see [AimbotValues]): same engine, different list. */
+    private val values = AimbotValues(this)
 
-    /** Steps below this many mouse counts (~3 degrees) are too slow for the "constant" counter. */
-    private const val FAST_STEP_COUNTS = 20
-
-    enum class Priority(override val tag: String) : Tagged {
-        DISTANCE("Distance"), HEALTH("Health"), FOV("Fov"), ANGLE("Angle"), ARMOR("Armor")
-    }
-    enum class RotationMode(override val tag: String) : Tagged {
-        SMOOTH("Smooth"), AI("AI"), SNAP("Snap")
-    }
-    enum class Smoothing(override val tag: String) : Tagged {
-        BEZIER("Bezier"), SIGMOID("Sigmoid"), LINEAR("Linear")
-    }
-    enum class MoveFix(override val tag: String) : Tagged {
-        OFF("Off"), STRICT("Strict"), SILENT("Silent")
-    }
-    enum class AimPoint(override val tag: String) : Tagged {
-        HEAD("Head"), CHEST("Chest"), CLOSEST("Closest"), RANDOMIZED("Randomized")
-    }
-    enum class AiModel(override val tag: String) : Tagged {
-        MODEL_19KC8KP("19KC8KP"), MODEL_21KC11KP("21KC11KP")
-    }
-    enum class Preset(override val tag: String) : Tagged {
-        CUSTOM("Custom"), BLATANT("Blatant"), LEGIT("Legit"), GHOST("Ghost"), CLOSET("Closet"),
-
-        /**
-         * Tuned against servers that run Vulcan's "Aim (Rotation)" and the packet
-         * "perfectrotation" check: the aim never sits on the exact hitbox centre, it drifts,
-         * it ignores sub-degree corrections and it sometimes does not move at all.
-         */
-        UNDETECTABLE("Undetectable")
-    }
+    /** The engine the Aimassist runs, told to aim on its own through [AimbotValues.autoAim]. */
+    private val core = AimassistCore(this, values)
 
     /**
-     * A preset is a full set of settings, not just a speed. Picking one writes the values below
-     * into the module's own values, so what you see in the ClickGUI is what the module does.
-     * [Preset.CUSTOM] changes nothing and leaves your sliders alone.
+     * The circle under the target, exactly what KillAura and Aimassist draw: LiquidBounce's own
+     * [TargetRenderer] — the blue ring (`Circle` / `GlowingCircle`, outline `0x007CFF`) with its
+     * radius, inner radius, height mode and colours configurable in the GUI. It follows the target
+     * the engine picked and draws nothing while there is none.
+     *
+     * It is only a renderer: it never touches the aim.
      */
-    @Suppress("LongParameterList")
-    private class Profile(
-        val rotationMode: RotationMode,
-        val smoothing: Smoothing,
-        val smoothSpeed: Float,
-        val maxStep: Float,
-        val aimPoint: AimPoint,
-        val aimRandomize: Float,
-        val predict: Float,
-        val predictSize: Int,
-        val overshoot: Float,
-        val jitterYaw: Float,
-        val jitterPitch: Float,
-        val tremor: Float,
-        val perlinScale: Float,
-        val randomizeOffset: Float,
-        val aimBias: Float,
-        val drift: Float,
-        val deadZone: Float,
-        val idleChance: Int,
-        val gcdFix: Boolean,
-        val gcdDither: Boolean,
-        val reactionDelay: Int,
-        val reactionRandom: Int,
-        val switchDelay: Int,
-        val range: Float,
-        val fov: Float,
-        val silent: Boolean,
-        val moveFix: MoveFix,
-        val silentFov: Boolean,
-        val throughWalls: Boolean,
-        val checkVisible: Boolean,
-        val antiBot: Boolean
-    )
+    @Suppress("unused")
+    private val targetRendering = tree(TargetRenderer(this) { core.target })
 
-    private val rangeValue = float("Range", 3.3f, 1f..6f, "blocks")
-    private val range by rangeValue
-    private val fovValue = float("FOV", 70f, 10f..180f, "°")
-    private val fov by fovValue
-    private val priority by enumChoice("Priority", Priority.DISTANCE)
-    private val throughWallsValue = boolean("ThroughWalls", false)
-    private val throughWalls by throughWallsValue
-    private val targetFriends by boolean("TargetFriends", false)
-    private val targetInvisible by boolean("TargetInvisible", false)
-    private val targetDead by boolean("TargetDead", false)
-    private val minHealth by int("MinHealth", 0, 0..20, "HP")
-    private val antiBotValue = boolean("AntiBot", true)
-    private val antiBot by antiBotValue
-    private val lockTarget by boolean("LockTarget", true)
-    private val switchDelayValue = int("SwitchDelay", 600, 0..2000, "ms")
-    private val switchDelay by switchDelayValue
+    /** Friction: unused by the aimbot (`Friction` is fixed to 0), kept for the shared engine. */
+    @Suppress("unused")
+    private val mouseHandler = handler<MouseRotationEvent> { core.onMouseRotation(it) }
 
-    private val presetValue = enumChoice("Preset", Preset.UNDETECTABLE)
-    private val preset by presetValue
+    /** Attack synchronisation: a click is held until the rotation the server has is on the entity. */
+    @Suppress("unused")
+    private val attackHandler = handler<AttackEntityEvent> { core.onAttack(it) }
 
-    private val rotationModeValue = enumChoice("RotationMode", RotationMode.SMOOTH)
-    private val rotationMode by rotationModeValue
-    private val smoothingValue = enumChoice("Smoothing", Smoothing.BEZIER)
-    private val smoothing by smoothingValue
-    private val aimPointValue = enumChoice("AimPoint", AimPoint.CLOSEST)
-    private val aimPoint by aimPointValue
-    private val aimRandomizeValue = float("AimRandomize", 0.05f, 0f..1f)
-    private val aimRandomize by aimRandomizeValue
-    private val predictValue = float("Predict", 0.2f, 0f..1f)
-    private val predict by predictValue
-    private val predictSizeValue = int("PredictSize", 2, 0..10, "ticks")
-    private val predictSize by predictSizeValue
+    /** The tick: pick the target, aim at it, hand the rotation out. */
+    @Suppress("unused")
+    private val tickHandler = handler<GameTickEvent> { core.tick() }
 
-    private val smoothSpeedValue = float("SmoothSpeed", 0.85f, 0.1f..3f)
-    private val smoothSpeed by smoothSpeedValue
-
-    /**
-     * Hard cap on how much the aim may turn in a single tick, in degrees.
-     * This is what keeps every movement packet smooth: a jump like Vulcan's "packet diff=25"
-     * becomes impossible, the turn is spread over several ticks instead.
-     */
-    private val maxStepValue = float("MaxStep", 4.5f, 0.5f..30f, "°")
-    private val maxStep by maxStepValue
-    private val flickTicks by int("FlickTicks", 3, 1..10, "ticks")
-    private val aiModel by enumChoice("AIModel", AiModel.MODEL_19KC8KP)
-    private val aiYawMultiplier by float("AIYawMultiplier", 1.5f, 0.5f..3f)
-    private val aiPitchMultiplier by float("AIPitchMultiplier", 1f, 0.5f..3f)
-    private val aiCorrection by int("AICorrection", 3, 0..30, "%")
-    private val aiMaxTicks by int("AIMaxTicks", 8, 1..20, "ticks")
-
-    private val reactionDelayValue = int("ReactionDelay", 180, 0..300, "ms")
-    private val reactionDelay by reactionDelayValue
-    private val reactionRandomValue = int("ReactionRandom", 100, 0..200, "ms")
-    private val reactionRandom by reactionRandomValue
-    private val overshootValue = float("Overshoot", 0.03f, 0f..0.5f)
-    private val overshoot by overshootValue
-    private val jitterYawValue = float("JitterYaw", 0.3f, 0f..2f, "°")
-    private val jitterYaw by jitterYawValue
-    private val jitterPitchValue = float("JitterPitch", 0.2f, 0f..2f, "°")
-    private val jitterPitch by jitterPitchValue
-    private val tremorValue = float("Tremor", 0.05f, 0f..1f, "°")
-    private val tremor by tremorValue
-    private val perlinScaleValue = float("PerlinScale", 0.15f, 0f..1f)
-    private val perlinScale by perlinScaleValue
-    private val gcdFixValue = boolean("GCDFix", true)
-    private val gcdFix by gcdFixValue
-    private val gcdDitherValue = boolean("GCDDither", true)
-    private val gcdDither by gcdDitherValue
-    private val randomizeOffsetValue = float("RandomizeOffset", 0.03f, 0f..0.5f)
-    private val randomizeOffset by randomizeOffsetValue
-    // Human-looking aim: a real crosshair never sits on the exact hitbox centre and its error
-    // moves slowly instead of being white noise around zero.
-    private val aimBiasValue = float("AimBias", 2f, 0f..5f, "°")
-    private val aimBias by aimBiasValue
-    private val driftAmountValue = float("Drift", 0.8f, 0f..3f, "°")
-    private val driftAmount by driftAmountValue
-    private val deadZoneValue = float("DeadZone", 0.4f, 0f..3f, "°")
-    private val deadZone by deadZoneValue
-    private val idleChanceValue = int("IdleChance", 15, 0..40, "%")
-    private val idleChance by idleChanceValue
-    private val keepSprint by boolean("KeepSprint", true)
-
-    private val silentValue = boolean("Silent", true)
-    private val silent by silentValue
-    private val moveFixValue = enumChoice("MoveFix", MoveFix.SILENT)
-    private val moveFix by moveFixValue
-    private val silentFovValue = boolean("SilentFOV", true)
-    private val silentFov by silentFovValue
-    private val onSneak by boolean("OnSneak", true)
-    private val onSprint by boolean("OnSprint", true)
-    private val checkVisibleValue = boolean("CheckVisible", true)
-    private val checkVisible by checkVisibleValue
-
-    private val autoBlock by boolean("AutoBlock", false)
-    private val pauseOnInventory by boolean("PauseOnInventory", true)
-    private val pauseOnUse by boolean("PauseOnUse", false)
-    private val chatLog by boolean("ChatLog", false)
-    private val debug by boolean("Debug", false)
-
-    /** The values each preset writes. Add or tweak here; the GUI follows automatically. */
-    private fun profileOf(preset: Preset): Profile? = when (preset) {
-        // No profile: the sliders stay as they are.
-        Preset.CUSTOM -> null
-
-        // Fast and obvious, only for testing on your own world.
-        Preset.BLATANT -> Profile(
-            rotationMode = RotationMode.SNAP, smoothing = Smoothing.LINEAR, smoothSpeed = 3f, maxStep = 30f,
-            aimPoint = AimPoint.CLOSEST, aimRandomize = 0.25f, predict = 0.35f, predictSize = 3,
-            overshoot = 0.1f, jitterYaw = 0.4f, jitterPitch = 0.3f, tremor = 0.15f, perlinScale = 0.3f,
-            randomizeOffset = 0.15f, aimBias = 0.2f, drift = 0.1f, deadZone = 0.05f, idleChance = 0,
-            gcdFix = true, gcdDither = false, reactionDelay = 60, reactionRandom = 40,
-            switchDelay = 150, range = 4.2f, fov = 90f, silent = true, moveFix = MoveFix.SILENT,
-            silentFov = false, throughWalls = false, checkVisible = true, antiBot = true
-        )
-
-        // Playable on normal servers, noticeably assisted.
-        Preset.LEGIT -> Profile(
-            rotationMode = RotationMode.AI, smoothing = Smoothing.BEZIER, smoothSpeed = 1.2f, maxStep = 6f,
-            aimPoint = AimPoint.CLOSEST, aimRandomize = 0.1f, predict = 0.25f, predictSize = 2,
-            overshoot = 0.06f, jitterYaw = 0.35f, jitterPitch = 0.25f, tremor = 0.1f, perlinScale = 0.2f,
-            randomizeOffset = 0.06f, aimBias = 1.2f, drift = 0.5f, deadZone = 0.25f, idleChance = 8,
-            gcdFix = true, gcdDither = true, reactionDelay = 140, reactionRandom = 80,
-            switchDelay = 400, range = 3.6f, fov = 80f, silent = true, moveFix = MoveFix.SILENT,
-            silentFov = true, throughWalls = false, checkVisible = true, antiBot = true
-        )
-
-        // Slow and soft: for servers with strict rotation statistics.
-        Preset.GHOST -> Profile(
-            rotationMode = RotationMode.SMOOTH, smoothing = Smoothing.BEZIER, smoothSpeed = 0.6f, maxStep = 3f,
-            aimPoint = AimPoint.CLOSEST, aimRandomize = 0.05f, predict = 0.15f, predictSize = 2,
-            overshoot = 0.02f, jitterYaw = 0.25f, jitterPitch = 0.2f, tremor = 0.05f, perlinScale = 0.15f,
-            randomizeOffset = 0.03f, aimBias = 2.5f, drift = 1f, deadZone = 0.5f, idleChance = 20,
-            gcdFix = true, gcdDither = true, reactionDelay = 220, reactionRandom = 120,
-            switchDelay = 800, range = 3.2f, fov = 65f, silent = true, moveFix = MoveFix.SILENT,
-            silentFov = true, throughWalls = false, checkVisible = true, antiBot = true
-        )
-
-        // Only the final correction is assisted, everything else is yours.
-        Preset.CLOSET -> Profile(
-            rotationMode = RotationMode.SMOOTH, smoothing = Smoothing.SIGMOID, smoothSpeed = 0.8f, maxStep = 4.5f,
-            aimPoint = AimPoint.CLOSEST, aimRandomize = 0.05f, predict = 0.1f, predictSize = 2,
-            overshoot = 0.03f, jitterYaw = 0.3f, jitterPitch = 0.2f, tremor = 0.05f, perlinScale = 0.15f,
-            randomizeOffset = 0.03f, aimBias = 1.8f, drift = 0.8f, deadZone = 0.4f, idleChance = 15,
-            gcdFix = true, gcdDither = true, reactionDelay = 200, reactionRandom = 110,
-            switchDelay = 650, range = 3.3f, fov = 70f, silent = true, moveFix = MoveFix.SILENT,
-            silentFov = true, throughWalls = false, checkVisible = true, antiBot = true
-        )
-
-        // The configuration for Vulcan "Aim (Rotation)" / packet "perfectrotation".
-        Preset.UNDETECTABLE -> Profile(
-            rotationMode = RotationMode.SMOOTH, smoothing = Smoothing.BEZIER, smoothSpeed = 0.85f, maxStep = 4.5f,
-            aimPoint = AimPoint.CLOSEST, aimRandomize = 0.05f, predict = 0.15f, predictSize = 2,
-            overshoot = 0.03f, jitterYaw = 0.3f, jitterPitch = 0.2f, tremor = 0.05f, perlinScale = 0.15f,
-            randomizeOffset = 0.03f, aimBias = 2f, drift = 0.8f, deadZone = 0.4f, idleChance = 15,
-            gcdFix = true, gcdDither = true, reactionDelay = 180, reactionRandom = 100,
-            switchDelay = 600, range = 3.3f, fov = 70f, silent = true, moveFix = MoveFix.SILENT,
-            silentFov = true, throughWalls = false, checkVisible = true, antiBot = true
-        )
-    }
-
-    /**
-     * Writes [Preset] into the module's values, so the GUI always shows what is actually being
-     * used. Called whenever the preset changes; [Preset.CUSTOM] does nothing.
-     */
-    private fun applyPreset(preset: Preset) {
-        val p = profileOf(preset) ?: return
-
-        rotationModeValue.set(p.rotationMode)
-        smoothingValue.set(p.smoothing)
-        smoothSpeedValue.set(p.smoothSpeed)
-        maxStepValue.set(p.maxStep)
-        aimPointValue.set(p.aimPoint)
-        aimRandomizeValue.set(p.aimRandomize)
-        predictValue.set(p.predict)
-        predictSizeValue.set(p.predictSize)
-        overshootValue.set(p.overshoot)
-        jitterYawValue.set(p.jitterYaw)
-        jitterPitchValue.set(p.jitterPitch)
-        tremorValue.set(p.tremor)
-        perlinScaleValue.set(p.perlinScale)
-        randomizeOffsetValue.set(p.randomizeOffset)
-        aimBiasValue.set(p.aimBias)
-        driftAmountValue.set(p.drift)
-        deadZoneValue.set(p.deadZone)
-        idleChanceValue.set(p.idleChance)
-        gcdFixValue.set(p.gcdFix)
-        gcdDitherValue.set(p.gcdDither)
-        reactionDelayValue.set(p.reactionDelay)
-        reactionRandomValue.set(p.reactionRandom)
-        switchDelayValue.set(p.switchDelay)
-        rangeValue.set(p.range)
-        fovValue.set(p.fov)
-        silentValue.set(p.silent)
-        moveFixValue.set(p.moveFix)
-        silentFovValue.set(p.silentFov)
-        throughWallsValue.set(p.throughWalls)
-        checkVisibleValue.set(p.checkVisible)
-        antiBotValue.set(p.antiBot)
-
-        if (debug && mc.player != null) {
-            chat("§7[Aimbot] §fpreset ${preset.tag} applied")
-        }
-    }
-
-    init {
-        // Switching preset rewrites the sliders; CUSTOM leaves them alone. Nothing is applied here:
-        // the declared defaults below already are the UNDETECTABLE profile, and firing value events
-        // while the module object is still being constructed is not safe.
-        presetValue.onChanged { applyPreset(it) }
-    }
-
-    /**
-     * The rotation that was actually handed to the server on the previous tick. Every step is
-     * measured from here (not from the camera and not from the manager), so the sequence of
-     * sent rotations is continuous even in silent mode.
-     */
-    private var lastSent: Rotation? = null
-
-    // Angular velocity of the aim in degrees per tick. The stepper accelerates towards the wanted
-    // speed instead of jumping to it, which gives the turn an ease-in / ease-out profile.
-    private var velYaw = 0f
-    private var velPitch = 0f
-
-    // Per-target response multiplier: two engagements should never share the same speed profile.
-    private var responseJitter = 1f
-
-    // Phase of the "breathing" motion used while the aim sits on the target.
-    private var swayPhase = 0f
-
-    // Consecutive ticks in which an axis did not move at all. Matrix scores the ratio between
-    // the yaw and pitch jiff values: a pitch that stays exactly still for a whole window makes
-    // that ratio infinite on every sample (AimStatisticsCheck "Aim IQR").
-    private var stillYawTicks = 0
-    private var stillPitchTicks = 0
-
-    // Direction of the "keep moving" nudge. A hand that rests does not alternate +1/-1: it drifts
-    // in one direction and reverses now and then. Alternating would itself be a pattern
-    // (Matrix AimBasicCheck "pattern(random)" counts small increases and decreases).
-    private var nudgeYawSign = 1f
-    private var nudgePitchSign = 1f
-
-    // Magnitude of the last sent step, in mouse counts, and the "gust" that modulates the speed.
-    // The RNN scores the sequence of speeds (sqrt(yaw^2 + pitch^2)) and counts how often a fast
-    // movement keeps almost the same speed as the tick before (< 0.02 degrees while turning more
-    // than 3): that count is one of its "robot" counters.
-    private var lastStepCounts = 0
-    private var speedGust = 1f
-    private var repeatedSpeed = 0
-
-    // How much of the step limit is currently unlocked (0 = corrective, 1 = full flick).
-    private var flickAmount = 0f
-
-    // Chaotic source for the speed modulation (logistic map) and the current "flinch" countdown.
-    // Its job is that no two steps have the same size, so the sequence of magnitudes never
-    // repeats a pattern.
-    private var chaos = 0.37f
-    private var flinchLeft = 0
-
-    // Last yaw deltas that were actually sent, used to reproduce Matrix's rank metric locally.
-    private val recentYawDeltas = ArrayDeque<Float>()
-
-    private var currentTarget: LivingEntity? = null
-    private var lastTargetSwitch = 0L
-    private var reactionUntil = 0L
-    private var lastYaw = 0f
-    private var lastPitch = 0f
-    private var beforeYaw = 0f
-    private var beforePitch = 0f
-    private var perlinTick = 0
-    private var hitCount = 0
-
-    // --- debug bookkeeping (only used when the "Debug" setting is on) ---
-    // rounding residual carried between ticks so the aim never stalls on a sub-count difference
-    private var yawCarry = 0.0
-    private var pitchCarry = 0.0
-
-    // Per-target aim bias (re-rolled on every target switch) and the slow hand drift.
-    private var biasFor: LivingEntity? = null
-    private var biasYaw = 0f
-    private var biasPitch = 0f
-    private var driftYaw = 0f
-    private var driftPitch = 0f
-    // "micro-pauses": ticks in which a human simply does not move the mouse
-    private var idleLeft = 0
-
-    private var debugTick = 0
-    private var scanCount = 0
-    private var validCount = 0
-    private var lastGate = "start"
-    private var lastDebugMessage = ""
+    /** Frame interpolation: the tick's step drawn slice by slice. */
+    @Suppress("unused")
+    private val renderHandler = handler<GameRenderEvent> { core.onRender() }
 
     override val tag: String
-        get() = currentTarget?.let { "${it.name.string.take(8)} ${String.format("%.1f", it.health)}" } ?: ""
+        get() = core.targetTag
 
     override fun onEnabled() {
-        currentTarget = null
-        lastTargetSwitch = 0L
-        reactionUntil = 0L
-        hitCount = 0
-        perlinTick = 0
-        debugTick = 0
-        lastGate = "start"
-        yawCarry = 0.0
-        pitchCarry = 0.0
-        lastSent = null
-        velYaw = 0f
-        velPitch = 0f
-        swayPhase = Random.nextFloat() * 6.283f
-        stillYawTicks = 0
-        stillPitchTicks = 0
-        nudgeYawSign = if (Random.nextBoolean()) 1f else -1f
-        nudgePitchSign = if (Random.nextBoolean()) 1f else -1f
-        lastStepCounts = 0
-        speedGust = 1f
-        repeatedSpeed = 0
-        flickAmount = 0f
-        chaos = 0.2f + Random.nextFloat() * 0.6f
-        flinchLeft = 0
-        recentYawDeltas.clear()
-        biasFor = null
-        biasYaw = 0f
-        biasPitch = 0f
-        driftYaw = 0f
-        driftPitch = 0f
-        idleLeft = 0
-        resetRotationMemory()
+        // The two modules are the same engine: letting both write the rotation would double it.
+        if (ModuleAimassist.enabled) ModuleAimassist.enabled = false
+        core.onEnable()
+        super.onEnabled()
     }
 
     override fun onDisabled() {
