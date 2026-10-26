@@ -31,6 +31,7 @@ import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl
 import net.minecraft.world.item.Items
 import net.minecraft.world.level.block.SupportType
+import net.minecraft.world.phys.BlockHitResult
 import net.minecraft.world.phys.HitResult
 import net.minecraft.world.phys.Vec3
 import kotlin.math.round
@@ -56,12 +57,14 @@ import kotlin.random.Random
  *
  * Same pipeline as the Aimassist module, because the throw is a rotation like any other:
  *
- *  1. [solveThrow] — the throw rotation is **fitted to the physics**, not computed with a
+ *  1. [throwCandidates] — the throw rotation is **fitted to the physics**, not computed with a
  *     closed-form solver: those assume you stand still, while a pearl inherits your own velocity
  *     (and while you are falling that is most of the throw). Both the pitch and the yaw are
- *     searched until the simulated arc passes through the target; [verify] then replays the winning
- *     arc with LiquidBounce's collision-aware simulation, so a pearl that would end in the void is
- *     never thrown;
+ *     searched until the arc passes through the target, and only the *descending* part of the arc
+ *     counts: a pearl that crosses the spot while still rising flies on and hits the side of the
+ *     platform. That fit is only a guess — [verify] then judges it and a few variants of it with
+ *     LiquidBounce's collision-aware simulation, which is the only thing that knows what is in
+ *     between, and the first arc that lands on a block *top* wins;
  *  2. [humanize] — the rotation is stepped towards with [maxTurn] degrees per tick and quantized to
  *     whole mouse counts ([gcdFix] + [gcdDither]), so every throw is a rotation a real mouse could
  *     have produced;
@@ -84,7 +87,7 @@ import kotlin.random.Random
  *   VoidScan        how many blocks below are scanned for ground: none = you are over the void
  *   SafeMemory      how long (ms) the remembered safe spot stays valid
  *   SafeSearch      radius (blocks) searched for another landing spot
- *   LandingTolerance  how close the simulated landing must be to the intended spot
+ *   LandingTolerance  how far the arc may drift from the spot between two ticks
  *   EnemyRange      max distance of the target in Enemy mode
  *   EnemyTolerance  how close to the enemy the pearl has to land
  *   EnemyTrigger    Always, or only while you are in the air
@@ -95,7 +98,7 @@ import kotlin.random.Random
  *   Silent          only the UseItem packet carries the rotation, the camera stays still
  *   MoveFix         movement correction used with Silent
  *   GcdFix / GcdDither  put the throw rotation on the mouse lattice, with a human rounding boundary
- *   Simulate        verify the arc before throwing (never throw into the void)
+ *   Simulate        judge every candidate with LiquidBounce's simulation (never throw into the void)
  *   WaitForPearl    do not throw while one of your pearls is still in flight
  *   Cooldown        minimum ms between two throws
  *   Chance          chance (%) that an attempt actually throws
@@ -120,8 +123,11 @@ object ModuleAutoPearlAI : ClientModule(
     /** How many candidate landing spots are solved (each one costs a ballistic sweep). */
     private const val MAX_CANDIDATES = 16
 
-    /** How many of those candidates are actually solved per attempt. */
-    private const val MAX_SOLVED = 6
+    /**
+     * How many candidates get a full solve, i.e. how many times a fit plus its verified variants are
+     * tried per attempt. Every variant costs one real simulation, so this stays low.
+     */
+    private const val MAX_SOLVED = 4
 
     // --- vanilla physics of a thrown pearl, as LiquidBounce's simulation models it ---------------
 
@@ -148,6 +154,26 @@ object ModuleAutoPearlAI : ClientModule(
 
     /** The arc is only followed while it stays this far below the throw point. */
     private const val ARC_DROP_LIMIT = 48.0
+
+    /** How far the aim may wander while re-fitting a target that has not moved. */
+    private const val YAW_TWEAK = 2f
+
+    /**
+     * Offsets (degrees) applied around a fit when it is checked against the real simulation. A cheap
+     * ballistic fit can pass centimetres from the target and still clip the edge of the platform on
+     * the way, which only the collision-aware simulation knows.
+     */
+    private val NUDGE_STEPS = floatArrayOf(1.5f, 3f)
+
+    /** A fit worse than this is not worth a simulation: it is not even close to the target. */
+    private const val MAX_FIT_ERROR = 3.0
+
+    /**
+     * How long (ms) to wait after a plan failed before planning again. Planning is the expensive part
+     * — a dozen collision-aware simulations per candidate — and a failed plan would otherwise be
+     * retried on every single tick.
+     */
+    private const val PLAN_RETRY = 150
 
     enum class Mode(override val tag: String) : Tagged {
         SAVE("Save"), ENEMY("Enemy")
@@ -248,6 +274,7 @@ object ModuleAutoPearlAI : ClientModule(
     private var plannedTicks = 0
 
     private var lastThrow = 0L
+    private var lastPlanFail = 0L
     private var thrown = 0
 
     /**
@@ -272,6 +299,7 @@ object ModuleAutoPearlAI : ClientModule(
         safeSpot = null
         safeSpotAt = 0L
         lastThrow = 0L
+        lastPlanFail = 0L
         thrown = 0
         yawCarry = 0.0
         pitchCarry = 0.0
@@ -317,13 +345,17 @@ object ModuleAutoPearlAI : ClientModule(
         if (rollPassed != true) return
 
         if (Util.getMillis() - lastThrow < cooldown) return
+        if (Util.getMillis() - lastPlanFail < PLAN_RETRY) return
         if (!hasPearl()) return
         if (waitForPearl && pearlInFlight(me)) return
 
         val solution = when (mode) {
             Mode.SAVE -> solveSave(me)
             Mode.ENEMY -> solveEnemy(me)
-        } ?: return
+        } ?: run {
+            lastPlanFail = Util.getMillis()
+            return
+        }
 
         // No turning wanted: the throw happens right now, with the solved rotation (still put on the
         // mouse lattice, so it is a rotation a mouse could have produced) and with the same gate.
@@ -350,27 +382,38 @@ object ModuleAutoPearlAI : ClientModule(
             return
         }
 
-        // While falling, both the spawn point and the inherited velocity change every tick, so the
-        // arc is re-solved each tick instead of being frozen at the moment the plan was made.
+        // The target is taken from the plan, so it does not move between ticks: a new landing spot
+        // every tick means a new rotation every tick and the aim never converges. In Enemy mode the
+        // enemy is re-read, because that is the only thing that can move on purpose.
         val target = when (mode) {
             Mode.SAVE -> solution.landing
             Mode.ENEMY -> nearestEnemy(me)?.boundingBox?.center ?: run {
+                if (debug) chat("§7[AutoPearl] §cthe target is gone")
                 cancelPlan()
                 return
             }
         }
         val tolerance = tolerance()
+        val descending = mode == Mode.SAVE
 
-        val rotation = solveThrow(me, target, tolerance) ?: run {
-            if (debug) chat("§7[AutoPearl] §cthe arc stopped reaching the target")
-            cancelPlan()
-            return
-        }
+        // The spawn point and the inherited fall velocity change every tick, so the arc still has to
+        // be re-fitted — but locally, around a rotation that was already verified, not from scratch.
+        val rotation = refineThrow(me, solution.rotation, target, tolerance, descending)
+            ?: throwCandidates(me, target, descending, 1).firstOrNull()?.rotation
+            ?: run {
+                if (debug) chat("§7[AutoPearl] §cthe arc stopped reaching the target")
+                cancelPlan()
+                return
+            }
+
+        planned = solution.copy(rotation = rotation)
 
         val aim = humanize(currentRotation(me), rotation)
         handToManager(aim)
 
-        if (RotationManager.serverRotation.directionAngleTo(aim) > aimTolerance) return
+        // The aim gate is skipped on the last tick: at the ranges a pearl is thrown at, one or two
+        // degrees is a handful of centimetres, while losing the throw means losing the round.
+        if (plannedTicks > 0 && RotationManager.serverRotation.directionAngleTo(aim) > aimTolerance) return
 
         if (!landsWhereWanted(aim, target, tolerance)) return
 
@@ -385,22 +428,22 @@ object ModuleAutoPearlAI : ClientModule(
     private fun landsWhereWanted(rotation: Rotation, target: Vec3, tolerance: Double): Boolean {
         if (!simulate) return true
 
-        val landing = verify(rotation) ?: run {
+        val hit = verify(rotation) ?: run {
             if (debug) chat("§7[AutoPearl] §cthe simulated arc hits nothing")
             return false
         }
 
         return when (mode) {
-            Mode.SAVE -> isSafeLanding(landing) || run {
-                if (debug) chat("§7[AutoPearl] §7would land at ${format(landing)}, not safe")
+            Mode.SAVE -> isSafeLanding(hit) || run {
+                if (debug) chat("§7[AutoPearl] §7would land at ${format(hit.location)}, not safe")
                 false
             }
 
-            Mode.ENEMY -> landing.distanceTo(target) <= tolerance || run {
+            Mode.ENEMY -> hit.location.distanceTo(target) <= tolerance || run {
                 if (debug) {
                     chat(
-                        "§7[AutoPearl] §7would land at ${format(landing)}, %.2f from the target"
-                            .format(landing.distanceTo(target))
+                        "§7[AutoPearl] §7would land at ${format(hit.location)}, %.2f from the target"
+                            .format(hit.location.distanceTo(target))
                     )
                 }
                 false
@@ -426,7 +469,12 @@ object ModuleAutoPearlAI : ClientModule(
             return
         }
 
-        val (yaw, pitch) = solution.rotation.normalize()
+        // normalize() keeps the rotation on the mouse lattice but can push the yaw outside -180..180,
+        // and a yaw beyond that range is exactly what Grim's AimModulo360 check reports.
+        val normalized = solution.rotation.normalize()
+        val yaw = normalizeYaw(normalized.yaw)
+        val pitch = normalized.pitch
+
         SilentHotbar.selectSlotSilently(this, slot, slotReset)
         val result = useItem(slot.useHand, yaw, pitch, swing)
 
@@ -511,9 +559,8 @@ object ModuleAutoPearlAI : ClientModule(
             return null
         }
 
-        // Solved one candidate at a time and stopping at the first arc that survives the simulation:
-        // solving all of them would be a dozen times the work for a result the first one usually
-        // already gives, and this runs on the client thread while falling.
+        // Solved one candidate at a time, stopping at the first arc the real simulation accepts: this
+        // runs on the client thread while falling, so it must not solve all of them up front.
         var solved = 0
         var simulated = 0
 
@@ -521,25 +568,39 @@ object ModuleAutoPearlAI : ClientModule(
             if (solved >= MAX_SOLVED) break
             solved++
 
-            val rotation = solveThrow(me, candidate, landingTolerance.toDouble()) ?: continue
+            // The arc has to come *down* onto the spot: one that passes through it while still
+            // rising flies on and hits the side of the platform it was meant to land on. Two fits are
+            // kept per spot, because the flat throw and the lob both reach it but only one may clear
+            // the edge.
+            val fits = throwCandidates(me, candidate, descending = true, limit = 2)
+            if (fits.isEmpty()) continue
 
-            if (simulate) {
-                simulated++
-                val landing = verify(rotation) ?: continue
-                if (!isSafeLanding(landing)) {
-                    if (debug) chat("§7[AutoPearl] §7simulated landing at ${format(landing)} is not safe")
-                    continue
-                }
+            if (!simulate) {
+                if (debug) chat("§7[AutoPearl] §fplan §asave§f → ${format(candidate)}")
+                return Solution(fits.first().rotation, "save", candidate)
             }
 
-            if (debug) chat("§7[AutoPearl] §fplan §asave§f → ${format(candidate)}")
-            return Solution(rotation, "save", candidate)
+            simulated++
+            for (fit in fits) {
+                // the fit itself first, then small offsets: a cheap fit can pass centimetres from the
+                // target and still clip the edge of the platform on the way
+                for (rotation in variants(fit.rotation)) {
+                    val hit = verify(rotation) ?: continue
+                    if (!isSafeLanding(hit)) {
+                        if (debug) chat("§7[AutoPearl] §7simulated landing at ${format(hit.location)} is not safe")
+                        continue
+                    }
+
+                    if (debug) chat("§7[AutoPearl] §fplan §asave§f → ${format(hit.location)}")
+                    return Solution(rotation, "save", hit.location)
+                }
+            }
         }
 
         if (debug) {
             val why = when {
                 solved == 0 -> "no candidate could be solved"
-                simulate && simulated > 0 -> "no arc survived the simulation"
+                simulated > 0 -> "no arc survived the simulation"
                 else -> "no arc reaches the available spots"
             }
             chat("§7[AutoPearl] §cno safe landing found ($why, ${solved}/${candidates.size} tried)")
@@ -556,7 +617,7 @@ object ModuleAutoPearlAI : ClientModule(
         val result = ArrayList<Vec3>()
 
         val remembered = safeSpot
-        if (remembered != null && Util.getMillis() - safeSpotAt <= safeMemory && isSafeLanding(remembered)) {
+        if (remembered != null && Util.getMillis() - safeSpotAt <= safeMemory && isSafeSpot(remembered)) {
             result += remembered
         }
 
@@ -569,7 +630,7 @@ object ModuleAutoPearlAI : ClientModule(
         for (pos in BlockPos.betweenClosed(center.offset(-radius, -2, -radius), center.offset(radius, 2, radius))) {
             val top = Vec3(pos.x + 0.5, pos.y + 1.0, pos.z + 0.5)
             if (top.distanceTo(me.position()) < 0.8) continue
-            if (!isSafeLanding(top)) continue
+            if (!isSafeSpot(top)) continue
             around += top
         }
 
@@ -580,21 +641,32 @@ object ModuleAutoPearlAI : ClientModule(
     }
 
     /**
-     * A landing point is safe when the block right under it has a solid top and the space it lands
-     * in is free. That is all a floating sumo platform can offer.
+     * A spot is usable when the block right under it has a solid top and the space it lands in is
+     * free. That is all a floating sumo platform can offer.
      */
-    private fun isSafeLanding(point: Vec3): Boolean {
+    private fun isSafeSpot(point: Vec3): Boolean {
         val block = BlockPos.containing(point.x, point.y - 0.05, point.z)
-
-        // A pearl that hits the side of a block is not saved, however solid that block is: only a
-        // point sitting on the top surface counts.
-        if (point.y < block.y + 1.0 - 0.35) return false
-
         val state = world.getBlockState(block)
         if (!state.isFaceSturdy(world, block, Direction.UP, SupportType.CENTER)) return false
 
-        val above = block.above()
-        val aboveState = world.getBlockState(above)
+        val aboveState = world.getBlockState(block.above())
+        return aboveState.isAir || !aboveState.fluidState.isEmpty
+    }
+
+    /**
+     * Whether a simulated impact is a landing at all. The face matters: a pearl that hits the side or
+     * the underside of a block does not put you back on the platform, however solid that block is —
+     * only the top face does, and that is exactly what the hit result says.
+     */
+    private fun isSafeLanding(hit: HitResult?): Boolean {
+        if (hit !is BlockHitResult) return false
+        if (hit.direction != Direction.UP) return false
+
+        val block = hit.blockPos
+        val state = world.getBlockState(block)
+        if (!state.isFaceSturdy(world, block, Direction.UP, SupportType.CENTER)) return false
+
+        val aboveState = world.getBlockState(block.above())
         return aboveState.isAir || !aboveState.fluidState.isEmpty
     }
 
@@ -609,24 +681,31 @@ object ModuleAutoPearlAI : ClientModule(
 
         val landing = target.boundingBox.center
 
-        // Same sweep as the save mode, so the fall velocity is taken into account here too.
-        val rotation = solveThrow(me, landing, enemyTolerance.toDouble())
-            ?: run {
-                if (debug) chat("§7[AutoPearl] §cthe arc does not reach ${target.name.string}")
-                return null
-            }
+        // Same fit as the save mode, so the fall velocity is taken into account here too. A pearl may
+        // hit the enemy on the way up, so any part of the arc counts there.
+        val fits = throwCandidates(me, landing, descending = false, limit = 2)
+        if (fits.isEmpty()) {
+            if (debug) chat("§7[AutoPearl] §cthe arc does not reach ${target.name.string}")
+            return null
+        }
 
         if (simulate) {
-            // verify() already returns the impact position, not the hit result
-            val impact = verify(rotation)
-            if (impact == null || impact.distanceTo(landing) > enemyTolerance.toDouble()) {
-                if (debug) chat("§7[AutoPearl] §cthe simulated arc misses ${target.name.string}")
-                return null
+            for (fit in fits) {
+                for (rotation in variants(fit.rotation)) {
+                    val impact = verify(rotation) ?: continue
+                    if (impact.location.distanceTo(landing) > enemyTolerance.toDouble()) continue
+
+                    if (debug) chat("§7[AutoPearl] §fplan §cpearl §f→ §7${target.name.string}")
+                    return Solution(rotation, target.name.string, landing)
+                }
             }
+
+            if (debug) chat("§7[AutoPearl] §cthe simulated arc misses ${target.name.string}")
+            return null
         }
 
         if (debug) chat("§7[AutoPearl] §fplan §cpearl §f→ §7${target.name.string}")
-        return Solution(rotation, target.name.string, landing)
+        return Solution(fits.first().rotation, target.name.string, landing)
     }
 
     private fun nearestEnemy(me: LocalPlayer): LivingEntity? = world.entitiesForRendering()
@@ -665,14 +744,18 @@ object ModuleAutoPearlAI : ClientModule(
      * The arc mirrors `TrajectoryInfoRenderer.runSimulation` tick for tick — one physics tick on the
      * velocity before the first move, then `pos += velocity` followed by `velocity *= 0.99` and
      * `velocity.y -= 0.03` — but without block collisions, because this is the evaluator the search
-     * calls a few hundred times per tick. It is written with plain doubles on purpose: allocating a
+     * calls hundreds of times per tick. It is written with plain doubles on purpose: allocating a
      * list of positions here would show up in the frame time.
      *
-     * The distance is taken to the whole polyline, not to the point where the arc crosses the
-     * target's height. Near the player the pearl crosses that plane within a tick or two, so a
-     * crossing-based error jumps around and hides the angles that actually work.
+     * Two things about the metric matter more than they look:
+     *  - the distance is taken to the whole polyline, not to the point where the arc crosses the
+     *    target's height: near the player that crossing happens within a tick or two and the error
+     *    jumps around;
+     *  - with [descending] only the part of the arc that is coming down counts. A pearl that passes
+     *    through the spot while still rising does not land there — it flies on and hits the side of
+     *    the platform it was supposed to land on.
      */
-    private fun arcDistance(me: LocalPlayer, rotation: Rotation, point: Vec3): Double {
+    private fun arcDistance(me: LocalPlayer, rotation: Rotation, point: Vec3, descending: Boolean): Double {
         val start = throwStart(me)
         val initial = throwVelocity(me, rotation)
 
@@ -693,19 +776,21 @@ object ModuleAutoPearlAI : ClientModule(
             val nz = pz + vz
 
             // distance from the point to the segment (p → n)
-            val abx = nx - px
-            val aby = ny - py
-            val abz = nz - pz
-            val lengthSqr = abx * abx + aby * aby + abz * abz
+            if (!descending || ny < py) {
+                val abx = nx - px
+                val aby = ny - py
+                val abz = nz - pz
+                val lengthSqr = abx * abx + aby * aby + abz * abz
 
-            val along = (point.x - px) * abx + (point.y - py) * aby + (point.z - pz) * abz
-            val t = if (lengthSqr < 1.0e-12) 0.0 else (along / lengthSqr).coerceIn(0.0, 1.0)
+                val along = (point.x - px) * abx + (point.y - py) * aby + (point.z - pz) * abz
+                val t = if (lengthSqr < 1.0e-12) 0.0 else (along / lengthSqr).coerceIn(0.0, 1.0)
 
-            val dx = px + abx * t - point.x
-            val dy = py + aby * t - point.y
-            val dz = pz + abz * t - point.z
-            val distance = sqrt(dx * dx + dy * dy + dz * dz)
-            if (distance < best) best = distance
+                val dx = px + abx * t - point.x
+                val dy = py + aby * t - point.y
+                val dz = pz + abz * t - point.z
+                val distance = sqrt(dx * dx + dy * dy + dz * dz)
+                if (distance < best) best = distance
+            }
 
             px = nx
             py = ny
@@ -721,51 +806,55 @@ object ModuleAutoPearlAI : ClientModule(
         return best
     }
 
+    /** A throw rotation, and how far its collision-free arc gets from the point it was fitted to. */
+    private data class Throw(val rotation: Rotation, val error: Double)
+
     /**
-     * The throw rotation whose arc passes closest to [point].
+     * The rotations whose arc passes closest to [point], best first, at most [limit] of them.
      *
      * Neither the yaw nor the pitch can be computed geometrically: the pearl inherits the player's
      * movement, so a throw made while falling is dragged down and sideways and the arc that reaches
-     * the target is nowhere near the one that points at it. Instead both angles are fitted against
-     * the physics: a coarse sweep of the whole pitch circle, a coarse sweep of the yaw around the
-     * geometric value, then a local refinement of the two, alternating. Returns null when the best
-     * arc still misses by more than [tolerance].
+     * the target is nowhere near the one that points at it. So the pitch is swept over its whole
+     * range at the geometric yaw and the local minima are refined (pitch, then yaw, then pitch
+     * again).
+     *
+     * More than one minimum is kept because this problem usually has several solutions — a flat
+     * throw and a lob reach the same spot — and the collision-free arc cannot tell which one clears
+     * what is in between. That is a question for the simulation, so it gets a handful of candidates
+     * instead of a single answer.
      */
-    private fun solveThrow(me: LocalPlayer, point: Vec3, tolerance: Double): Rotation? {
+    private fun throwCandidates(
+        me: LocalPlayer,
+        point: Vec3,
+        descending: Boolean,
+        limit: Int
+    ): List<Throw> {
         val geometric = Rotation.lookingAt(point, me.eyePosition)
 
-        var yaw = geometric.yaw
-        var pitch = geometric.pitch
-        var best = arcDistance(me, Rotation(yaw, pitch), point)
+        fun errorAt(yaw: Float, pitch: Float) = arcDistance(me, Rotation(yaw, pitch), point, descending)
 
-        // coarse pass: the pitch decides the range, so it is swept over its whole range first
-        var candidate = -89f
-        while (candidate <= 89f) {
-            val error = arcDistance(me, Rotation(yaw, candidate), point)
-            if (error < best) {
-                best = error
-                pitch = candidate
-            }
-            candidate += COARSE_STEP
+        val count = ((89f - (-89f)) / COARSE_STEP).toInt() + 1
+        val pitches = FloatArray(count) { -89f + it * COARSE_STEP }
+        val errors = DoubleArray(count) { errorAt(geometric.yaw, pitches[it]) }
+
+        val minima = ArrayList<Int>()
+        for (index in 1 until count - 1) {
+            if (errors[index] <= errors[index - 1] && errors[index] <= errors[index + 1]) minima += index
         }
+        minima.sortBy { errors[it] }
 
-        // ... then the yaw is allowed to drift away from the geometric one
-        candidate = yaw - YAW_SPAN
-        while (candidate <= yaw + YAW_SPAN) {
-            val error = arcDistance(me, Rotation(candidate, pitch), point)
-            if (error < best) {
-                best = error
-                yaw = candidate
-            }
-            candidate += COARSE_STEP
-        }
+        val result = ArrayList<Throw>()
 
-        // refinement of both angles around the coarse winner, twice, so a yaw move can be paid back
-        // by a pitch move
-        repeat(2) {
-            candidate = pitch - REFINE_SPAN
+        for (index in minima) {
+            if (result.size >= limit) break
+
+            var yaw = geometric.yaw
+            var pitch = pitches[index]
+            var best = errors[index]
+
+            var candidate = pitch - REFINE_SPAN
             while (candidate <= pitch + REFINE_SPAN) {
-                val error = arcDistance(me, Rotation(yaw, candidate), point)
+                val error = errorAt(yaw, candidate)
                 if (error < best) {
                     best = error
                     pitch = candidate
@@ -773,19 +862,95 @@ object ModuleAutoPearlAI : ClientModule(
                 candidate += FINE_STEP
             }
 
-            candidate = yaw - REFINE_SPAN
-            while (candidate <= yaw + REFINE_SPAN) {
-                val error = arcDistance(me, Rotation(candidate, pitch), point)
+            candidate = yaw - YAW_SPAN
+            while (candidate <= yaw + YAW_SPAN) {
+                val error = errorAt(candidate, pitch)
                 if (error < best) {
                     best = error
                     yaw = candidate
                 }
+                candidate += COARSE_STEP
+            }
+
+            candidate = pitch - REFINE_SPAN
+            while (candidate <= pitch + REFINE_SPAN) {
+                val error = errorAt(yaw, candidate)
+                if (error < best) {
+                    best = error
+                    pitch = candidate
+                }
                 candidate += FINE_STEP
             }
+
+            if (best > MAX_FIT_ERROR) continue
+            result += Throw(Rotation(normalizeYaw(yaw), pitch.coerceIn(-89f, 89f)), best)
+        }
+
+        result.sortBy { it.error }
+        return result
+    }
+
+    /**
+     * Re-fits [start] against a target that has not moved. The fall changes the required pitch by a
+     * few degrees per tick, so a small window around the previous answer is enough — and it is what
+     * makes the aim converge, because the answer does not jump around between ticks.
+     */
+    private fun refineThrow(
+        me: LocalPlayer,
+        start: Rotation,
+        point: Vec3,
+        tolerance: Double,
+        descending: Boolean
+    ): Rotation? {
+        fun errorAt(yaw: Float, pitch: Float) = arcDistance(me, Rotation(yaw, pitch), point, descending)
+
+        var yaw = start.yaw
+        var pitch = start.pitch
+        var best = errorAt(yaw, pitch)
+
+        var candidate = pitch - REFINE_SPAN
+        while (candidate <= pitch + REFINE_SPAN) {
+            val error = errorAt(yaw, candidate)
+            if (error < best) {
+                best = error
+                pitch = candidate
+            }
+            candidate += FINE_STEP
+        }
+
+        candidate = yaw - YAW_TWEAK
+        while (candidate <= yaw + YAW_TWEAK) {
+            val error = errorAt(candidate, pitch)
+            if (error < best) {
+                best = error
+                yaw = candidate
+            }
+            candidate += FINE_STEP
         }
 
         if (best > tolerance) return null
         return Rotation(normalizeYaw(yaw), pitch.coerceIn(-89f, 89f))
+    }
+
+    /**
+     * The rotations worth checking against the real simulation, nearest to [fit] first: the fit
+     * itself, then small offsets in pitch and yaw. Only the collision-aware simulation knows whether
+     * an arc that passes right through the target also clears whatever is in front of it.
+     */
+    private fun variants(fit: Rotation): List<Rotation> {
+        val result = ArrayList<Rotation>()
+        result += fit
+
+        for (step in NUDGE_STEPS) {
+            val up = (fit.pitch + step).coerceIn(-89f, 89f)
+            val down = (fit.pitch - step).coerceIn(-89f, 89f)
+            result += Rotation(normalizeYaw(fit.yaw), up)
+            result += Rotation(normalizeYaw(fit.yaw), down)
+            result += Rotation(normalizeYaw(fit.yaw + step), fit.pitch)
+            result += Rotation(normalizeYaw(fit.yaw - step), fit.pitch)
+        }
+
+        return result
     }
 
     /** Brings a yaw back into -180..180, where every other rotation in the module lives. */
@@ -797,10 +962,11 @@ object ModuleAutoPearlAI : ClientModule(
     }
 
     /**
-     * Runs LiquidBounce's own simulation (block collisions included) and returns where the pearl
-     * would land, or null when it hits nothing.
+     * Runs LiquidBounce's own simulation (block collisions included) and returns what the pearl hits,
+     * or null when it hits nothing. The hit result matters, not just its position: whether the pearl
+     * landed on top of a block or on its side is the difference between being saved and not.
      */
-    private fun verify(rotation: Rotation): Vec3? {
+    private fun verify(rotation: Rotation): HitResult? {
         val hit = TrajectoryInfoRenderer.getHypotheticalTrajectory(
             simulationOwner = player,
             trajectoryInfo = TrajectoryInfo.GENERIC,
@@ -811,7 +977,7 @@ object ModuleAutoPearlAI : ClientModule(
         ).runSimulation(MAX_SIM_TICKS).hitResult ?: return null
 
         if (hit.type == HitResult.Type.MISS) return null
-        return hit.location
+        return hit
     }
 
     /** The rotation the aim is at: what the server sees when silent, the camera otherwise. */
@@ -829,7 +995,10 @@ object ModuleAutoPearlAI : ClientModule(
         if (limitTurn && maxTurn > 0f) {
             val deltaYaw = RotationUtil.angleDifference(desired.yaw, from.yaw).coerceIn(-maxTurn, maxTurn)
             val deltaPitch = (desired.pitch - from.pitch).coerceIn(-maxTurn, maxTurn)
-            next = Rotation(from.yaw + deltaYaw, (from.pitch + deltaPitch).coerceIn(-89.9f, 89.9f))
+            next = Rotation(
+                normalizeYaw(from.yaw + deltaYaw),
+                (from.pitch + deltaPitch).coerceIn(-89.9f, 89.9f)
+            )
         }
 
         return if (gcdFix) quantizeToMouseCounts(from, next) else next
@@ -858,7 +1027,9 @@ object ModuleAutoPearlAI : ClientModule(
             countsPitch = round(rawPitch).toInt()
         }
 
-        val yaw = from.yaw + (countsYaw * step).toFloat()
+        // counted from the current rotation, so the result can overflow the -180..180 range: wrapping
+        // it changes nothing about where the crosshair points, but keeps it a legal rotation
+        val yaw = normalizeYaw(from.yaw + (countsYaw * step).toFloat())
         val pitch = (from.pitch + (countsPitch * step).toFloat()).coerceIn(-89.9f, 89.9f)
         return Rotation(yaw, pitch, isNormalized = true)
     }
