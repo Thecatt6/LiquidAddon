@@ -52,11 +52,23 @@ import kotlin.random.Random
  * the module can never click faster than the weapon allows, and the camera is never touched: this
  * module does not aim, it only decides *when* to swing.
  *
- * **The click is still validated by the server.** Anything beyond the server-side reach is thrown
- * away there, and the client has already reset the attack cooldown — that is why [early] should be
- * kept small, and why [chatLog] prints the distance and the cushion of every pre-trigger, so a
- * value that is too greedy is visible instead of being guessed. Combining it with `Reach`
- * (`Entity.RangeIncrease`) is the way to make the extra distance count.
+ * ### Reach, and why anticheats flag pre-triggers
+ *
+ * A pre-trigger is a click on an enemy that is **not in range yet**, so a server that validates the
+ * distance of an attack (Grim's `Reach` check, for example) flags it — that is the feature working,
+ * not a bug in it. Two consequences:
+ *
+ *  - [serverSafe] (default on) clamps the trigger distance to `reach - [safetyGap]`: the module can
+ *    still beat your reaction time inside your real reach, but it never clicks from outside it. The
+ *    early behaviour only lives in the headroom between [range] and the real reach, so set [range]
+ *    *below* your reach (e.g. `2.8`) and let the cushion fill the rest;
+ *  - with [serverSafe] off the module does what the name says — clicks while the enemy is still
+ *    outside the reach. That is what a Grim `Reach` flag is made of. Every pre-trigger of this kind
+ *    is validated server-side, so a rejected one still burns the client attack cooldown.
+ *
+ * The distance is measured exactly like the server does it ([serverDistance]): from the eyes to the
+ * hitbox, **without** the client pick-radius slack. Using the usual boxed distance (which inflates
+ * the hitbox by 0.1) is enough on its own to push a "3.0 blocks" click over the limit.
  *
  * Settings:
  *   Preset            ready-made configs (Custom = the sliders below)
@@ -65,6 +77,8 @@ import kotlin.random.Random
  *   Early             slider range `min..max` of the random cushion, in blocks
  *   Fov               0 = the enemy must be under the crosshair ray, >0 = a cone around it
  *   EarlyChance       chance (%) that an encounter uses a cushion at all
+ *   ServerSafe        never click beyond the reach the server measures (default on)
+ *   SafetyGap         how much of the reach is left unused while ServerSafe is on
  *   Predict           lead the enemy's movement
  *   PredictTicks      how many ticks ahead the distance is evaluated
  *   Reaction          random hesitation at the start of an encounter, in ticks
@@ -115,7 +129,9 @@ object ModuleTriggerBotPlus : ClientModule(
         val minCooldown: Float,
         val clickDelay: IntRange,
         val throughWalls: Boolean,
-        val keepSprint: Boolean
+        val keepSprint: Boolean,
+        val serverSafe: Boolean = true,
+        val safetyGap: Float = 0.05f
     )
 
     enum class Preset(override val tag: String, val profile: Profile?) : Tagged {
@@ -127,7 +143,8 @@ object ModuleTriggerBotPlus : ClientModule(
             Profile(
                 range = 3.0f, matchVanilla = true, early = 0.10f..0.30f, earlyChance = 40,
                 predict = true, predictTicks = 1, reaction = 0..1, minCooldown = 1.0f,
-                clickDelay = 0..1, throughWalls = false, keepSprint = false
+                clickDelay = 0..1, throughWalls = false, keepSprint = false,
+                serverSafe = true, safetyGap = 0.08f
             )
         ),
 
@@ -137,7 +154,8 @@ object ModuleTriggerBotPlus : ClientModule(
             Profile(
                 range = 3.0f, matchVanilla = true, early = 0.20f..0.55f, earlyChance = 75,
                 predict = true, predictTicks = 2, reaction = 0..0, minCooldown = 1.0f,
-                clickDelay = 0..0, throughWalls = false, keepSprint = false
+                clickDelay = 0..0, throughWalls = false, keepSprint = false,
+                serverSafe = true, safetyGap = 0.05f
             )
         ),
 
@@ -147,7 +165,8 @@ object ModuleTriggerBotPlus : ClientModule(
             Profile(
                 range = 3.2f, matchVanilla = false, early = 0.35f..0.90f, earlyChance = 100,
                 predict = true, predictTicks = 2, reaction = 0..0, minCooldown = 0.90f,
-                clickDelay = 0..0, throughWalls = true, keepSprint = false
+                clickDelay = 0..0, throughWalls = true, keepSprint = false,
+                serverSafe = false, safetyGap = 0.05f
             )
         )
     }
@@ -185,6 +204,22 @@ object ModuleTriggerBotPlus : ClientModule(
      */
     private val fovValue = float("Fov", 0f, 0f..30f, "°")
     private val fov by fovValue
+
+    /**
+     * Never click outside the reach the server is going to measure. The pre-trigger then only lives
+     * in the headroom between [range] and your real reach, so it can beat your reaction time but can
+     * never be a Reach flag. Turn this off to get the real "click before the enemy is in range"
+     * behaviour — Grim's Reach check will flag it, there is no way around that.
+     */
+    private val serverSafeValue = boolean("ServerSafe", true)
+    private val serverSafe by serverSafeValue
+
+    /**
+     * How much of the reach is left unused while [serverSafe] is on. Grim tolerates a small latency
+     * drift; 0.05 is the value that survives a normal connection, 0.10 a bad one.
+     */
+    private val safetyGapValue = float("SafetyGap", 0.05f, 0.0f..0.30f, "blocks")
+    private val safetyGap by safetyGapValue
 
     // --- timing / humanisation ----------------------------------------------------------------
 
@@ -274,6 +309,13 @@ object ModuleTriggerBotPlus : ClientModule(
         lastMargin = 0.0
         clickDelay = 0
 
+        if (!serverSafe) {
+            chat(
+                "§7[TriggerBotPlus] §cServerSafe is off: the pre-trigger clicks beyond your reach, " +
+                    "so Grim's Reach check will flag it. That is the feature, not a bug."
+            )
+        }
+
         if (pauseWithAutoClicker && ModuleAutoClicker.enabled) {
             chat(
                 "§7[TriggerBotPlus] §cAutoClicker is enabled — this module stays paused. " +
@@ -329,15 +371,17 @@ object ModuleTriggerBotPlus : ClientModule(
 
         if (!throughWalls && !hasLineOfSight(me.eyePosition, target.boundingBox.center, me)) return
 
-        val distance = triggerDistance(me, target)
         val base = baseDistance(me)
-        if (distance > base + earlyMargin) return
+        val measured = serverDistance(me, target)
+        val limit = triggerLimit(me, base)
+        val distance = if (serverSafe) measured else predictedDistance(me, target, measured)
+        if (distance > limit) return
 
         if (!weapon.matchesAny(me.mainHandItem)) return
         if (skipInvulnerable && target.hurtTime > 0) return
         if (!isCooldownReady(me)) return
 
-        val isEarly = distance > base
+        val isEarly = measured > base
 
         if (!attackEntity(target, swing, keepSprint)) {
             // Cancelled (e.g. by HitSelect) — try again next tick instead of spinning on it.
@@ -352,7 +396,7 @@ object ModuleTriggerBotPlus : ClientModule(
         }
         clickDelay = nextIn(clickDelayRange)
 
-        report(me, target, distance, base, isEarly)
+        report(me, target, measured, base, isEarly)
     }
 
     // --- target acquisition -------------------------------------------------------------------
@@ -374,7 +418,7 @@ object ModuleTriggerBotPlus : ClientModule(
             .asSequence()
             .filterIsInstance<LivingEntity>()
             .filter { it !== me && it.shouldBeAttacked() }
-            .filter { sqrt(it.squaredBoxedDistanceTo(me)) <= range }
+            .filter { serverDistance(me, it) <= range }
             .filter { RotationUtil.crosshairAngleToEntity(it) <= fov }
             .minByOrNull { it.squaredBoxedDistanceTo(me) }
     }
@@ -404,22 +448,42 @@ object ModuleTriggerBotPlus : ClientModule(
         if (matchVanilla) me.entityInteractionRange() else range.toDouble()
 
     /**
-     * Distance from the player's eyes to the hitbox, minus the part of the relative movement that
-     * closes it within [predictTicks] ticks. Only the closing part counts: an enemy running away is
-     * never clicked earlier than the base distance.
+     * The distance an attack packet is measured with on the server side: attacker's eyes to the
+     * target's hitbox, with no extra slack.
+     *
+     * [squaredBoxedDistanceTo] must not be used for this: it measures from `boundingBox.inflate(pickRadius)`,
+     * i.e. 0.1 blocks short. Clicks that look like "3.0 blocks" would land at 3.1 and be a Reach flag
+     * on their own.
      */
-    private fun triggerDistance(me: LocalPlayer, target: LivingEntity): Double {
-        val raw = sqrt(target.squaredBoxedDistanceTo(me))
-        if (!predict || predictTicks <= 0) return raw
+    private fun serverDistance(me: LocalPlayer, target: LivingEntity): Double =
+        sqrt(target.boundingBox.distanceToSqr(me.eyePosition))
+
+    /**
+     * The distance the click may happen at: base plus the cushion drawn for this encounter and, while
+     * [serverSafe] is on, never more than what the server is willing to accept.
+     */
+    private fun triggerLimit(me: LocalPlayer, base: Double): Double {
+        val wanted = base + earlyMargin
+        if (!serverSafe) return wanted
+        return minOf(wanted, me.entityInteractionRange() - safetyGap)
+    }
+
+    /**
+     * [serverDistance] minus the part of the relative movement that closes it within [predictTicks]
+     * ticks. Only the closing part counts: an enemy running away is never clicked earlier than the
+     * base distance. This is the out-of-reach lead, so it is only used with [serverSafe] off.
+     */
+    private fun predictedDistance(me: LocalPlayer, target: LivingEntity, measured: Double): Double {
+        if (!predict || predictTicks <= 0) return measured
 
         val toTarget = target.boundingBox.center.subtract(me.eyePosition)
-        if (toTarget.lengthSqr() < 1.0e-5) return raw
+        if (toTarget.lengthSqr() < 1.0e-5) return measured
 
         val relative = target.deltaMovement.subtract(me.deltaMovement)
         val closing = -relative.dot(toTarget.normalize()) // + while the enemy comes towards us
         val lead = (closing * predictTicks).coerceIn(0.0, MAX_LEAD)
 
-        return (raw - lead).coerceAtLeast(0.0)
+        return (measured - lead).coerceAtLeast(0.0)
     }
 
     // --- encounter ----------------------------------------------------------------------------
@@ -475,6 +539,8 @@ object ModuleTriggerBotPlus : ClientModule(
         clickDelayValue.set(p.clickDelay)
         throughWallsValue.set(p.throughWalls)
         keepSprintValue.set(p.keepSprint)
+        serverSafeValue.set(p.serverSafe)
+        safetyGapValue.set(p.safetyGap)
 
         if (debug || chatLog) {
             chat("§7[TriggerBotPlus] §fpreset §7${preset.tag}§f applied")
@@ -488,7 +554,7 @@ object ModuleTriggerBotPlus : ClientModule(
                     .format(distance, earlyMargin, base)
             )
             val reach = me.entityInteractionRange()
-            if (distance > reach) {
+            if (!serverSafe && distance > reach) {
                 chat(
                     "§7[TriggerBotPlus] §c%.2f > real reach %.2f — the server may reject this hit"
                         .format(distance, reach)
