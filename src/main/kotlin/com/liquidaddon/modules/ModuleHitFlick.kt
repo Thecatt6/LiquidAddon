@@ -36,6 +36,7 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 import kotlin.random.Random
 
 /**
@@ -289,9 +290,9 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
             return input
         }
         val meant = realYaw + Math.toDegrees(atan2(-strafe.toDouble(), forward.toDouble()))
-        val relative = Math.toRadians(Math.round(Mth.wrapDegrees(meant - sentYaw) / 45.0) * 45.0)
-        val newForward = Math.round(cos(relative)).toInt()
-        val newStrafe = Math.round(-sin(relative)).toInt()
+        val relative = Math.toRadians((Mth.wrapDegrees(meant - sentYaw) / 45.0).roundToLong() * 45.0)
+        val newForward = cos(relative).roundToLong().toInt()
+        val newStrafe = (-sin(relative)).roundToLong().toInt()
         return DirectionalInput(newForward > 0, newForward < 0, newStrafe > 0, newStrafe < 0)
     }
 
@@ -363,8 +364,8 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
             val dropLeft = getDropDepth(target, leftYaw)
 
             when {
-                dropRight >= smartDepth && dropLeft < smartDepth -> chosenSide = 1   // forza destra
-                dropLeft >= smartDepth && dropRight < smartDepth -> chosenSide = -1  // forza sinistra
+                smartDepth in (dropLeft + 1)..dropRight -> chosenSide = 1   // forza destra
+                smartDepth in (dropRight + 1)..dropLeft -> chosenSide = -1  // forza sinistra
                 dropRight >= smartDepth && dropLeft >= smartDepth -> chosenSide = side // entrambi vuoti: alterna
                 else -> {
                     // nessun vantaggio (pavimento piatto)
@@ -387,11 +388,11 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         val signedAngle = chosenSide * angle
 
         if (alternate) {
-            if (!smartAim || chosenSide == side) {
-                side = -side
+            side = if (!smartAim || chosenSide == side) {
+                -side
             } else {
                 // sincronizza l'alternanza col lato forzato da SmartAim
-                side = -chosenSide
+                -chosenSide
             }
         }
 
@@ -674,7 +675,7 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
 
     private fun turn(me: LocalPlayer, yawCounts: Int, pitchCounts: Int) {
         if (yawCounts != 0) {
-            me.yRot = me.yRot + stepOf(yawCounts)
+            me.yRot += stepOf(yawCounts)
         }
         if (pitchCounts != 0) {
             me.xRot = (me.xRot + stepOf(pitchCounts)).coerceIn(-90f, 90f)
