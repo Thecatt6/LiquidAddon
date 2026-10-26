@@ -28,6 +28,7 @@ import net.minecraft.util.Util
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.phys.EntityHitResult
 import net.minecraft.world.entity.LivingEntity
+import net.minecraft.world.entity.player.Player
 import kotlin.math.max
 import kotlin.math.sqrt
 import kotlin.random.Random
@@ -155,7 +156,10 @@ object ModuleTriggerBotPlus : ClientModule(
     private const val MIN_TRIGGER = 0.4
 
     /** Upper bound on the latency allowance, in blocks. Beyond this it is a lag spike, not drift. */
-    private const val MAX_DESYNC = 0.8
+    private const val MAX_DESYNC = 1.0
+
+    /** How fast the remembered closing speed decays per tick (0.8 = mostly the last few ticks). */
+    private const val CLOSING_DECAY = 0.8
 
     /**
      * How long a lost target keeps its drawn cushion. The crosses of a mouse sitting on the edge of
@@ -184,7 +188,9 @@ object ModuleTriggerBotPlus : ClientModule(
         val prePress: PrePress = PrePress.SWING,
         val serverReach: Float = 3.0f,
         val desync: Boolean = true,
-        val desyncPercent: Int = 100
+        val desyncPercent: Int = 100,
+        val pauseInVehicle: Boolean = true,
+        val vehicleExtra: Float = 0.25f
     )
 
     enum class Preset(override val tag: String, val profile: Profile?) : Tagged {
@@ -329,6 +335,21 @@ object ModuleTriggerBotPlus : ClientModule(
     private val desyncPercent by desyncPercentValue
 
     /**
+     * Do not attack while riding a vehicle. A boat is not a small detail: the client *predicts* it,
+     * the server simulates it, and the two positions drift apart by half a block and more — which is
+     * exactly what a `type=acacia_boat` reach flag is. The player's own `deltaMovement` is not the
+     * boat's movement either, so there is no honest way to compensate it from the client.
+     */
+    private val pauseInVehicleValue = boolean("PauseInVehicle", true)
+    private val pauseInVehicle by pauseInVehicleValue
+
+    /**
+     * Extra margin kept while riding a vehicle, when [pauseInVehicle] is off.
+     */
+    private val vehicleExtraValue = float("VehicleExtra", 0.25f, 0.0f..0.60f, "blocks")
+    private val vehicleExtra by vehicleExtraValue
+
+    /**
      * What the early click actually is. [PrePress.SWING] and [PrePress.KEY] both press the left
      * button while the enemy is still out of range **without attacking them** — the hit is left to
      * the moment they come in range, which is why nothing here can be a Reach flag.
@@ -418,6 +439,16 @@ object ModuleTriggerBotPlus : ClientModule(
 
     /** Ticks without a target under the crosshair, used by [LOST_GRACE]. */
     private var lostTicks = 0
+
+    /**
+     * Closing speed of both sides, in blocks per tick, decaying. The measurement that flags is taken
+     * on the server with *older* positions, so the speed of the previous ticks is what matters, not
+     * the instantaneous one.
+     */
+    private var selfClosing = 0.0
+    private var targetClosing = 0.0
+
+    private var warnedVehicle = false
 
     private var triggers = 0
     private var preTriggers = 0
@@ -522,6 +553,7 @@ object ModuleTriggerBotPlus : ClientModule(
         if (target !== trackedTarget) {
             beginEncounter(target)
         }
+        updateClosing(me, target)
 
         // Hesitation of a fresh encounter, spent before anything else is looked at.
         if (reactionTicks > 0) {
@@ -649,6 +681,20 @@ object ModuleTriggerBotPlus : ClientModule(
         if (interaction.isDestroying) return false
         if (pauseWithAutoClicker && ModuleAutoClicker.enabled) return false
         if (holdAttack && !mc.options.keyAttack.isPressedOnAny) return false
+
+        if (pauseInVehicle && me.vehicle != null) {
+            if (!warnedVehicle) {
+                warnedVehicle = true
+                chat(
+                    "§7[TriggerBotPlus] §ePaused while riding ${me.vehicle!!.name.string}: " +
+                        "a vehicle desyncs far more than a ping estimate can cover, and that is what a " +
+                        "reach flag looks like. Turn PauseInVehicle off to force it."
+                )
+            }
+            return false
+        }
+        warnedVehicle = false
+
         return true
     }
 
@@ -715,21 +761,51 @@ object ModuleTriggerBotPlus : ClientModule(
      * and the moment both of you walk in it appears.
      */
     private fun desyncAllowance(me: LocalPlayer, target: LivingEntity): Double {
-        if (!desync) return 0.0
+        val vehicle = if (me.vehicle != null) vehicleExtra.toDouble() else 0.0
+        val estimate = if (!desync) 0.0 else pingDrift(me, target)
+        return (estimate + vehicle).coerceIn(0.0, MAX_DESYNC)
+    }
 
-        val latency = me.ping.coerceIn(0, 500)
-        if (latency <= 0) return 0.0
+    /**
+     * The drift caused by latency, in blocks.
+     *
+     * The server has **two** stale positions, not one: ours is `ping/2` old (our packets need half a
+     * round trip to arrive) and the enemy's is `their ping/2` old, so the separation it computes is
+     * larger than the one on our screen by
+     *
+     *     ownClosing × ping/100 + theirClosing × their ping/100      (in ticks, 1 tick = 50 ms)
+     *
+     * Both speeds are the decaying maximum of the last ticks ([updateClosing]): the attack is
+     * evaluated on positions from *before* the click, so a target that stopped a tick ago still has
+     * to be paid for.
+     */
+    private fun pingDrift(me: LocalPlayer, target: LivingEntity): Double {
+        val ownDelay = me.ping.coerceIn(0, 500) / 100.0
+        val theirDelay = ((target as? Player)?.ping ?: 0).coerceIn(0, 500) / 100.0
+        if (ownDelay <= 0.0 && theirDelay <= 0.0) return 0.0
 
+        val drift = selfClosing * ownDelay + targetClosing * theirDelay
+        return drift * (desyncPercent / 100.0)
+    }
+
+    /**
+     * Keeps the closing speeds of both sides, as a maximum that decays instead of a snapshot: one
+     * tick of standing still must not erase the speed the server still sees in its older position.
+     */
+    private fun updateClosing(me: LocalPlayer, target: LivingEntity) {
         val toTarget = target.boundingBox.center.subtract(me.eyePosition)
-        if (toTarget.lengthSqr() < 1.0e-5) return 0.0
-
+        if (toTarget.lengthSqr() < 1.0e-5) return
         val direction = toTarget.normalize()
-        val ownClosing = me.deltaMovement.dot(direction).coerceAtLeast(0.0)
-        val theirClosing = (-target.deltaMovement.dot(direction)).coerceAtLeast(0.0)
 
-        // half the round trip, in ticks (one tick = 50 ms)
-        val ticks = latency / 100.0 * (desyncPercent / 100.0)
-        return ((ownClosing + theirClosing) * ticks).coerceIn(0.0, MAX_DESYNC)
+        // While riding, the player's own delta is the vehicle's, and a boat's movement is predicted
+        // by the client: take the larger of the two so the margin is never optimistic.
+        val ownMovement = maxOf(me.deltaMovement.length(), me.vehicle?.deltaMovement?.length() ?: 0.0)
+        val ownTowards = me.deltaMovement.dot(direction).coerceAtLeast(0.0)
+        val own = max(ownTowards, if (me.vehicle != null) ownMovement else 0.0)
+        val their = (-target.deltaMovement.dot(direction)).coerceAtLeast(0.0)
+
+        selfClosing = max(own, selfClosing * CLOSING_DECAY)
+        targetClosing = max(their, targetClosing * CLOSING_DECAY)
     }
 
     /**
@@ -772,6 +848,8 @@ object ModuleTriggerBotPlus : ClientModule(
 
     private fun resetEncounter() {
         trackedTarget = null
+        selfClosing = 0.0
+        targetClosing = 0.0
         earlyArmed = false
         earlyMargin = 0.0
         reactionTicks = 0
@@ -819,6 +897,8 @@ object ModuleTriggerBotPlus : ClientModule(
         serverReachValue.set(p.serverReach)
         desyncValue.set(p.desync)
         desyncPercentValue.set(p.desyncPercent)
+        pauseInVehicleValue.set(p.pauseInVehicle)
+        vehicleExtraValue.set(p.vehicleExtra)
 
         if (debug || chatLog) {
             chat("§7[TriggerBotPlus] §fpreset §7${preset.tag}§f applied")
@@ -843,8 +923,11 @@ object ModuleTriggerBotPlus : ClientModule(
 
         if (debug) {
             chat(
-                "§7[TriggerBotPlus] §ftrigger #$triggers §7(pre $preTriggers, presses $presses) §fdist=%.2f base=%.2f attackAt=%.2f cps=%d%s"
-                    .format(measured, base, attackLimit(me, base, target), nextIn(cps), if (isEarly) " §6early" else "")
+                ("§7[TriggerBotPlus] §ftrigger #$triggers §7(pre $preTriggers, presses $presses) §fdist=%.2f " +
+                    "base=%.2f attackAt=%.2f drift=%.2f ping=%d/%d%s").format(
+                    measured, base, attackLimit(me, base, target), desyncAllowance(me, target),
+                    me.ping, (target as? Player)?.ping ?: 0, if (isEarly) " §6early" else ""
+                )
             )
         }
     }
