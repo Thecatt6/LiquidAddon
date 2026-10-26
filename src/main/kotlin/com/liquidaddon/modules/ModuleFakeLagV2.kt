@@ -21,6 +21,7 @@ import net.ccbluex.liquidbounce.utils.client.notification
 import net.ccbluex.liquidbounce.utils.combat.getEntitiesBoxInRange
 import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
 import net.ccbluex.liquidbounce.utils.entity.box
+import net.ccbluex.liquidbounce.utils.entity.getBoundingBoxAt
 import net.ccbluex.liquidbounce.utils.entity.ping
 import net.ccbluex.liquidbounce.utils.entity.rotation
 import net.ccbluex.liquidbounce.utils.entity.squaredBoxedDistanceTo
@@ -428,7 +429,9 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
             threat *= 0.35f
         }
 
-        val frozenBox = player.dimensions.makeBoundingBox(serverPos)
+        // getBoundingBoxAt, not dimensions.makeBoundingBox: Entity.dimensions is private and
+        // LiquidBounce's access widener does not propagate to add-ons.
+        val frozenBox = player.getBoundingBoxAt(serverPos)
         if (found.any { it.box.intersects(frozenBox) }) {
             threat = 0f
         }
