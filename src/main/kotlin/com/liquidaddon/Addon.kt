@@ -3,6 +3,7 @@ package com.liquidaddon
 import com.liquidaddon.modules.ModuleHitFlick
 import com.liquidaddon.modules.ModuleHitSelect
 import com.liquidaddon.modules.ModuleAimbotAI
+import com.liquidaddon.modules.ModuleBlockHit
 import com.liquidaddon.modules.ModuleAimassist
 import com.liquidaddon.modules.ModuleAutoPearlAI
 import com.liquidaddon.modules.ModuleJumpReset
@@ -23,7 +24,7 @@ class Addon : LiquidBounceAddon() {
 
         // Registra i moduli. CommandExample è opzionale — se non c'è il file, commenta la riga sotto
         registerModules(
-            ModuleHitFlick, ModuleHitSelect, ModuleAimbotAI, ModuleAimassist, ModuleScaffoldLegit, ModuleFakeLagV2, ModuleTriggerBotPlus, ModuleJumpReset, ModuleAutoPearlAI
+            ModuleHitFlick, ModuleHitSelect, ModuleAimbotAI, ModuleAimassist, ModuleScaffoldLegit, ModuleFakeLagV2, ModuleTriggerBotPlus, ModuleJumpReset, ModuleAutoPearlAI, ModuleBlockHit
         )
 
         // Prova a registrare il comando se esiste
