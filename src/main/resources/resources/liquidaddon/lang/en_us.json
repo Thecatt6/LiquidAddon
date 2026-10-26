@@ -133,5 +133,13 @@
   "liquidbounce.module.autoPearl AI.value.pauseInVehicle.description": "Do not throw while riding a vehicle.",
   "liquidbounce.module.autoPearl AI.value.chatLog.description": "Print every throw with the distance of the landing.",
   "liquidbounce.module.autoPearl AI.value.debug.description": "Print the plan, the solved rotation and the simulation result.",
-  "liquidbounce.module.blockHit.description": "The block hit, done for you."
+  "liquidbounce.module.blockHit.description": "The block hit, done for you: every click opens a block on the server for a couple of ticks and closes it again, so the hit that lands inside that window is cut while yours still lands. The block is opened on the server only - the client must not be the one using the item, or it would release the block itself and throw away your clicks.",
+  "liquidbounce.module.blockHit.value.chance.description": "Chance that a click becomes a block hit.",
+  "liquidbounce.module.blockHit.value.requireMouseDown.description": "Only work while the right mouse button is held, by you or by an AutoClicker's use button.",
+  "liquidbounce.module.blockHit.value.mode.description": "Manual = just the block hit. Lag = the block hit, then hold the outgoing packets for LagTicks so the block stays up longer on the server.",
+  "liquidbounce.module.blockHit.value.delay.description": "Ticks between the click and the block. A block can only open on a tick, so 0 and 1 both mean the next tick.",
+  "liquidbounce.module.blockHit.value.blockTicks.description": "How long the block stays up, in ticks. Two ticks cover the window around one click.",
+  "liquidbounce.module.blockHit.value.lagTicks.description": "Lag mode only: how many ticks the packets sent after the block opened are held back.",
+  "liquidbounce.module.blockHit.value.chatLog.description": "Print the running total every ten block hits.",
+  "liquidbounce.module.blockHit.value.debug.description": "Print what the module decides on every click and every tick."
 }
