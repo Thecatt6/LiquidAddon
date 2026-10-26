@@ -14,9 +14,10 @@ import net.ccbluex.liquidbounce.utils.render.TargetRenderer
  * Aimassist — an aim **assist**, not an aimbot.
  *
  * The module is a thin entry point: everything that aims lives in [AimassistCore], the engine it
- * shares with [ModuleAimbotAI]. The two modules declare the same settings ([AimValues]: same
- * sliders, same ranges, same presets, same defaults) and run the same code, so a capability added
- * here is a capability of the aimbot and vice versa.
+ * shares with [ModuleAimbotAI]. The code is the same one the aimbot runs, so a bypass trick added
+ * here is a trick of the aimbot too; the settings are not ([AimValues]), because an assist and an
+ * aimbot want different things from the same maths: this module helps a hand that is already on the
+ * target, [ModuleAimbotAI] picks the target and goes there by itself.
  *
  * The engine never clicks, never picks the target for you and never takes the view away from your
  * hand: it only helps while the crosshair is already near an enemy, and it only covers a *share* of
@@ -52,7 +53,7 @@ import net.ccbluex.liquidbounce.utils.render.TargetRenderer
  */
 object ModuleAimassist : ClientModule("Aimassist", Categories.LIQUIDADDON) {
 
-    /** The values and presets, shared with [ModuleAimbotAI] (see [AimValues]). */
+    /** The assist's values and presets (see [AimValues]); the aimbot has its own list. */
     private val values = AimValues(this)
 
     /** The engine: target selection, the gates, the maths, the mouse lattice, the rotation. */

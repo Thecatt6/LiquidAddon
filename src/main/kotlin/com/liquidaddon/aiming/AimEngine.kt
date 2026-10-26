@@ -34,18 +34,24 @@ import kotlin.math.tanh
 import kotlin.random.Random
 
 /**
- * The aiming engine behind `Aimassist` and `AimbotAI` — one implementation, one set of settings.
+ * The aiming engine behind `Aimassist` and `AimbotAI` — one implementation, two settings lists.
  *
- * Both modules are the same thing seen from two entries in the ClickGUI: they declare the very same
- * values ([AimValues] — same sliders, same ranges, same presets, same defaults) and both drive an
- * [AimassistCore]. There is no second aiming implementation any more: whatever the assist does, the
- * aimbot does, because it is the same code, running under another name in the chat and in
- * `RotationManager`'s request log.
+ * There is no second aiming implementation: both modules drive an [AimassistCore], so every bypass
+ * trick the assist has (the mouse-count lattice and its carried residual, the dither, the frame
+ * interpolation, the silent rotation through `RotationManager`, the trained model) is the one the
+ * aimbot uses too, running under another name in the chat and in `RotationManager`'s request log.
+ *
+ * What they do not share is the configuration. The assist reads [AimValues] — the whole humanization
+ * toolbox, because every knob there is what keeps it a nudge. The aimbot reads [AimbotValues], a
+ * shorter list with the values an aimbot wants fixed (`autoAim`, full pull, no reaction pause, no
+ * idle beat), so it picks the target by itself instead of helping the hand that is already on it.
+ * Both satisfy [AimSettings], which is all the engine knows about them.
  *
  * The pipeline, once per tick: [findTarget] -> [bubble] -> [shape] (or [aiStep]) -> [quantizeDelta]
  * -> the step is granted to the camera, or handed to `RotationManager` when `silent`.
  *
- *  - [findTarget] only looks inside a narrow cone around where you are already pointing ([fov]);
+ *  - [findTarget] only looks inside a narrow cone around where you are already pointing ([fov]),
+ *    unless the module aims by itself (`autoAim`), in which case the cone is just the reach;
  *  - [bubble] is the weight of the help: 1.0 while the crosshair is on the hitbox, falling to 0 at
  *    the edge of the cone — strongest where it cannot be seen, gone where it would be a snap;
  *  - [shape] bends the response (Linear/Bezier/Sigmoid), while [strength] is the share of the
@@ -128,6 +134,78 @@ enum class Preset(override val tag: String) : Tagged {
 }
 
 /**
+ * What the aiming engine reads, and the only thing the two modules share.
+ *
+ * The engine itself (target selection, gates, the step maths, the mouse lattice, the rotation) is
+ * one implementation, and both [AimValues] (Aimassist) and [AimbotValues] (AimbotAI) drive it. The
+ * two *setting lists* are deliberately not the same: the assist exposes the whole humanization
+ * toolbox because every one of those knobs is what keeps it a nudge, while the aimbot exposes the
+ * few that describe how it aims (speed, curve, model) and fixes the rest to the values an aimbot
+ * wants — full pull, no reaction pause, no idle beat, no friction, and a target that is picked by
+ * the engine instead of by where the crosshair happens to point ([autoAim]).
+ */
+internal interface AimSettings {
+
+    // --- target selection ---
+    val range: Float
+    val fov: Float
+    val priority: Priority
+    val throughWalls: Boolean
+    val antiBot: Boolean
+    val minHealth: Int
+    val lockTarget: Boolean
+    val switchDelay: Int
+
+    // --- how much the aim is helped ---
+    val mode: Mode
+    val strength: Float
+    val maxSpeed: Float
+    val smoothing: Smoothing
+    val engine: Engine
+    val aiModel: AiModel
+    val aiYawMultiplier: Float
+    val aiPitchMultiplier: Float
+    val aiCorrection: Float
+    val pitchAssist: Float
+    val aimPoint: AimPoint
+    val predict: Float
+    val predictSize: Int
+    val onlyOnCrosshair: Boolean
+    val turnCheck: Boolean
+    val friction: Float
+    val deadZone: Float
+    val reactionDelay: Int
+    val reactionRandom: Int
+    val fadeIn: Int
+    val idleChance: Int
+    val jitterYaw: Float
+    val jitterPitch: Float
+    val gcdFix: Boolean
+    val gcdDither: Boolean
+
+    // --- how the rotation reaches the server ---
+    val silent: Boolean
+    val moveFix: MoveFix
+    val frameInterpolation: Boolean
+
+    // --- misc ---
+    val pauseOnInventory: Boolean
+    val pauseOnUse: Boolean
+    val chatLog: Boolean
+    val debug: Boolean
+
+    /** Name of the active preset, only used in the chat/debug lines (empty when there is none). */
+    val presetName: String
+
+    /**
+     * The engine chooses the target on its own: the cone around the crosshair stops filtering, and
+     * the pull does not fade with the distance from the aim, so the module aims at whoever it
+     * picked instead of helping the hand that is already there.
+     */
+    val autoAim: Boolean
+}
+
+/**
  * Every setting the engine reads, declared once for both modules: `Aimassist` and `AimbotAI` build
  * one of these over themselves, so the two ClickGUIs are the same list, with the same defaults, the
  * same ranges and the same presets. Changing a slider here changes it in both.
@@ -138,26 +216,26 @@ enum class Preset(override val tag: String) : Tagged {
 @Suppress("TooManyFunctions", "LongParameterList")
 internal class AimValues(
     val group: ValueGroup,
-) : MinecraftShortcuts {
+) : MinecraftShortcuts, AimSettings {
 
     // --- target selection -------------------------------------------------------------------
 
     val rangeValue = group.float("Range", 3.4f, 1f..6f, "blocks")
-    val range by rangeValue
+    override val range by rangeValue
 
     /** Radius of the assist cone, measured from where the player is already pointing. */
     val fovValue = group.float("Fov", 24f, 5f..120f, "°")
-    val fov by fovValue
+    override val fov by fovValue
 
-    val priority by group.enumChoice("Priority", Priority.FOV)
+    override val priority by group.enumChoice("Priority", Priority.FOV)
     val throughWallsValue = group.boolean("ThroughWalls", false)
-    val throughWalls by throughWallsValue
+    override val throughWalls by throughWallsValue
     val antiBotValue = group.boolean("AntiBot", true)
-    val antiBot by antiBotValue
-    val minHealth by group.int("MinHealth", 0, 0..20, "HP")
-    val lockTarget by group.boolean("LockTarget", true)
+    override val antiBot by antiBotValue
+    override val minHealth by group.int("MinHealth", 0, 0..20, "HP")
+    override val lockTarget by group.boolean("LockTarget", true)
     val switchDelayValue = group.int("SwitchDelay", 350, 0..2000, "ms")
-    val switchDelay by switchDelayValue
+    override val switchDelay by switchDelayValue
 
     // --- how much the aim is helped ---------------------------------------------------------
 
@@ -165,99 +243,99 @@ internal class AimValues(
     val preset by presetValue
 
     val modeValue = group.enumChoice("Mode", Mode.BOTH)
-    val mode by modeValue
+    override val mode by modeValue
 
     /** Share of the remaining angle covered per tick. 100 = the aim lands on the target at once. */
     val strengthValue = group.float("Strength", 35f, 1f..100f, "%")
-    val strength by strengthValue
+    override val strength by strengthValue
 
     /** Hard cap on a single tick, in degrees. It is what keeps a correction a nudge, never a flick. */
     val maxSpeedValue = group.float("MaxSpeed", 7f, 0.5f..40f, "°")
-    val maxSpeed by maxSpeedValue
+    override val maxSpeed by maxSpeedValue
 
     val smoothingValue = group.enumChoice("Smoothing", Smoothing.BEZIER)
-    val smoothing by smoothingValue
+    override val smoothing by smoothingValue
 
     /**
      * Who computes the step, see [Engine]. [Engine.MATH] is the curve, [Engine.AI] is the model
      * LiquidBounce already trained; the rest of the module is identical for both.
      */
     val engineValue = group.enumChoice("Engine", Engine.MATH)
-    val engine by engineValue
+    override val engine by engineValue
 
     /** Which bundled LiquidBounce model answers while [engine] is [Engine.AI]. */
     val aiModelValue = group.enumChoice("AIModel", AiModel.MODEL_19KC8KP)
-    val aiModel by aiModelValue
+    override val aiModel by aiModelValue
 
     /** The per-axis gain of the model's answer, the same knob LiquidBounce's AI smooth has. */
     val aiYawMultiplierValue = group.float("AIYawMultiplier", 1.5f, 0.5f..2f)
-    val aiYawMultiplier by aiYawMultiplierValue
+    override val aiYawMultiplier by aiYawMultiplierValue
     val aiPitchMultiplierValue = group.float("AIPitchMultiplier", 1f, 0.5f..2f)
-    val aiPitchMultiplier by aiPitchMultiplierValue
+    override val aiPitchMultiplier by aiPitchMultiplierValue
 
     /**
      * Share of the remaining angle added on top of the model's answer, so the assist still
      * converges when the model under-shoots. It is what LiquidBounce calls "Correction".
      */
     val aiCorrectionValue = group.float("AICorrection", 12f, 0f..100f, "%")
-    val aiCorrection by aiCorrectionValue
+    override val aiCorrection by aiCorrectionValue
 
     /** Share of the vertical correction, relative to the horizontal one (humans track yaw better). */
     val pitchAssistValue = group.float("PitchAssist", 55f, 0f..100f, "%")
-    val pitchAssist by pitchAssistValue
+    override val pitchAssist by pitchAssistValue
 
     val aimPointValue = group.enumChoice("AimPoint", AimPoint.CLOSEST)
-    val aimPoint by aimPointValue
+    override val aimPoint by aimPointValue
     val predictValue = group.float("Predict", 0.1f, 0f..1f)
-    val predict by predictValue
+    override val predict by predictValue
     val predictSizeValue = group.int("PredictSize", 2, 0..10, "ticks")
-    val predictSize by predictSizeValue
+    override val predictSize by predictSizeValue
 
     /** Assist only while the crosshair ray crosses the hitbox ([onCrosshair]). */
     val onlyOnCrosshairValue = group.boolean("OnlyOnCrosshair", false)
-    val onlyOnCrosshair by onlyOnCrosshairValue
+    override val onlyOnCrosshair by onlyOnCrosshairValue
 
     /** Do not fight the player: the pull fades out while the mouse is pushed away from the target. */
     val turnCheckValue = group.boolean("TurnCheck", true)
-    val turnCheck by turnCheckValue
+    override val turnCheck by turnCheckValue
 
     /** How much of the cursor movement is eaten while it glides over a hitbox ([Mode.FRICTION]). */
     val frictionValue = group.float("Friction", 20f, 0f..90f, "%")
-    val friction by frictionValue
+    override val friction by frictionValue
 
     /** Inside this angle nothing is corrected: the aim is already where it should be. */
     val deadZoneValue = group.float("DeadZone", 0.12f, 0f..3f, "°")
-    val deadZone by deadZoneValue
+    override val deadZone by deadZoneValue
 
     val reactionDelayValue = group.int("ReactionDelay", 140, 0..500, "ms")
-    val reactionDelay by reactionDelayValue
+    override val reactionDelay by reactionDelayValue
     val reactionRandomValue = group.int("ReactionRandom", 70, 0..300, "ms")
-    val reactionRandom by reactionRandomValue
+    override val reactionRandom by reactionRandomValue
 
     /** Time over which the help ramps back in after a reaction pause or a switch: no initial kick. */
     val fadeInValue = group.int("FadeIn", 220, 0..800, "ms")
-    val fadeIn by fadeInValue
+    override val fadeIn by fadeInValue
 
     val idleChanceValue = group.int("IdleChance", 8, 0..40, "%")
-    val idleChance by idleChanceValue
+    override val idleChance by idleChanceValue
 
     val jitterYawValue = group.float("JitterYaw", 0.12f, 0f..2f, "°")
-    val jitterYaw by jitterYawValue
+    override val jitterYaw by jitterYawValue
     val jitterPitchValue = group.float("JitterPitch", 0.08f, 0f..2f, "°")
-    val jitterPitch by jitterPitchValue
+    override val jitterPitch by jitterPitchValue
 
     val gcdFixValue = group.boolean("GcdFix", true)
-    val gcdFix by gcdFixValue
+    override val gcdFix by gcdFixValue
     val gcdDitherValue = group.boolean("GcdDither", true)
-    val gcdDither by gcdDitherValue
+    override val gcdDither by gcdDitherValue
 
     // --- how the rotation reaches the server ------------------------------------------------
 
     /** Only the server sees the assist; the camera stays exactly where the player points it. */
     val silentValue = group.boolean("Silent", false)
-    val silent by silentValue
+    override val silent by silentValue
     val moveFixValue = group.enumChoice("MoveFix", MoveFix.SILENT)
-    val moveFix by moveFixValue
+    override val moveFix by moveFixValue
 
     /**
      * Not silent: draw the tick's step slice by slice on every frame instead of all at once on the
@@ -265,13 +343,19 @@ internal class AimValues(
      * by exactly the quantized step the tick decided on, so turning this off only brings the 20 Hz
      * staircase back, it does not make anything safer.
      */
-    val frameInterpolation by group.boolean("FrameInterpolation", true)
+    override val frameInterpolation by group.boolean("FrameInterpolation", true)
 
-    val pauseOnInventory by group.boolean("PauseOnInventory", true)
-    val pauseOnUse by group.boolean("PauseOnUse", false)
+    override val pauseOnInventory by group.boolean("PauseOnInventory", true)
+    override val pauseOnUse by group.boolean("PauseOnUse", false)
 
-    val chatLog by group.boolean("ChatLog", false)
-    val debug by group.boolean("Debug", false)
+    override val chatLog by group.boolean("ChatLog", false)
+    override val debug by group.boolean("Debug", false)
+
+    /** The assist is not an aimbot: the target comes from the crosshair, not from the module. */
+    override val autoAim get() = false
+
+    /** Only used in the chat/debug lines: the preset the values were written by. */
+    override val presetName get() = preset.tag
 
     // --- presets and the values they write --------------------------------------------------
 
@@ -436,7 +520,7 @@ internal class AimValues(
 }
 
 /**
- * The engine itself: all of the state and all of the maths behind [AimValues], for one module.
+ * The engine itself: all of the state and all of the maths behind [AimSettings], for one module.
  *
  * A module only registers its three event handlers, forwards them here ([tick], [onMouseRotation],
  * [onRender]) and calls [onEnable]/[onDisable] from its lifecycle. Everything else — target
@@ -446,7 +530,7 @@ internal class AimValues(
 @Suppress("TooManyFunctions", "LargeClass")
 internal class AimassistCore(
     private val owner: ClientModule,
-    private val values: AimValues,
+    private val values: AimSettings,
 ) : MinecraftShortcuts {
 
     // --- the values, read as if they were fields of the engine -------------------------------
@@ -459,7 +543,7 @@ internal class AimassistCore(
     private val minHealth get() = values.minHealth
     private val lockTarget get() = values.lockTarget
     private val switchDelay get() = values.switchDelay
-    private val preset get() = values.preset
+    private val presetName get() = values.presetName
     private val mode get() = values.mode
     private val strength get() = values.strength
     private val maxSpeed get() = values.maxSpeed
@@ -1223,6 +1307,9 @@ internal class AimassistCore(
      * target — and vanishes at the distance at which it would become a snap.
      */
     private fun bubble(me: LocalPlayer, target: LivingEntity): Float {
+        // The aimbot picked the target itself, so there is no "the crosshair is already on it"
+        // to reward and no distance from the aim to fade over: the pull is full, always.
+        if (values.autoAim) return 1f
         if (onCrosshair(me, target)) return 1f
 
         val offset = crosshairOffset(target)
@@ -1430,14 +1517,16 @@ internal class AimassistCore(
     private fun report(me: LocalPlayer, aimed: Rotation, target: LivingEntity) {
         assisted++
         if (chatLog && assisted % 100 == 0) {
-            chat("§7[" + owner.name + "] §f$assisted corrections (preset ${preset.tag})")
+            chat("§7[" + owner.name + "] §f$assisted corrections" +
+                    (if (presetName.isEmpty()) "" else " (preset $presetName)"))
         }
         if (!debug) return
 
         debugLine(
             "assisting %s dist=%.2f offset=%.2f° bubble=%.2f → yaw=%.1f pitch=%.1f (silent=%s, preset=%s) ".format(
                 target.name.string, target.distanceTo(me), crosshairOffset(target),
-                bubble(me, target), aimed.yaw, aimed.pitch, silent, preset.tag
+                bubble(me, target), aimed.yaw, aimed.pitch, silent,
+                if (presetName.isEmpty()) "-" else presetName
             ) + "§7strength=%.0f%% max=%.1f° own=%.2f°".format(
                 strength, maxSpeed, lastOwnYaw
             ) + (if (engine == Engine.AI) " §7$lastAiNote" else "") + warnings()

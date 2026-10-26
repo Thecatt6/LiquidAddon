@@ -1,7 +1,7 @@
 package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
-import com.liquidaddon.aiming.AimValues
+import com.liquidaddon.aiming.AimbotValues
 import com.liquidaddon.aiming.AimassistCore
 import net.ccbluex.liquidbounce.event.events.GameRenderEvent
 import net.ccbluex.liquidbounce.event.events.GameTickEvent
@@ -11,30 +11,33 @@ import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.utils.render.TargetRenderer
 
 /**
- * AimbotAI — the aim bot, running the **Aimassist engine**.
+ * AimbotAI — aims by itself, with the Aimassist's engine.
  *
- * It used to have its own aiming implementation (and therefore its own, smaller, set of bypass
- * tricks); now the aiming logic *is* the assist's: this module is a second entry point over the
- * same [AimassistCore] and the same settings ([AimValues]). Same sliders, same ranges, same
- * presets, same defaults, same code path per tick — whatever the assist survives, this survives,
- * because nothing is duplicated.
+ * The aiming logic is not duplicated: this module drives the same [AimassistCore] the Aimassist
+ * uses, so it inherits every bypass trick that engine has (the mouse-count lattice with its carried
+ * residual, `GcdDither`, the frame interpolation of a tick's step, the silent rotation through
+ * `RotationManager` with `MoveFix`, and LiquidBounce's already-trained combat model under
+ * `Engine = AI`).
  *
- * The engine: targets only inside the cone around where you already point (`Fov`), sticky while
- * valid; the pull is full while the crosshair is on the hitbox and fades to nothing at the edge of
- * the cone; `Strength` is the share of the remaining angle per tick, `MaxSpeed` the hard cap,
- * `Smoothing` the curve, so the aim converges instead of snapping. `Engine = AI` swaps the curve for
- * the combat model LiquidBounce already trained on recorded human fights (`AICorrection` finishes
- * the approach). Every step is snapped to whole mouse counts with the residual carried over
- * (`GcdFix`, `GcdDither`), `FrameInterpolation` spreads it over the frames of the tick, and
- * `TurnCheck`, `FadeIn`, `OnlyOnCrosshair`, `ReactionDelay`/`ReactionRandom`, `IdleChance`,
- * `DeadZone` and `Jitter*` keep the motion human.
+ * What is different is that it aims **on its own**: the settings are not the assist's
+ * ([AimbotValues]) and the engine is told to pick the target itself ([AimbotValues.autoAim]). The
+ * cone around the crosshair stops filtering, the pull no longer fades with the distance from where
+ * you are looking, and there is no reaction pause, no fade-in and no idle beat — while a target is
+ * in `Range` and inside `Fov` (360° by default, i.e. all around you) the aim goes to it and stays
+ * on it until it is dead or out of reach.
  *
- * For an aimbot-like behaviour pick the `Blatant` preset (wide cone, high strength, silent) or `AI`
- * (the model, silent); for a profile built to pass rotation statistics, `Ghost` or `Closet`.
+ * The aimbot never clicks: it only aims. Use a KillAura/clicker for the hits, or click yourself.
  *
- * `Silent = true` (the presets above) sends the rotation only to the server, through LiquidBounce's
- * `RotationManager` at `IMPORTANT_FOR_USAGE_1`: below KillAura/Aimbot, so a real aura always keeps
- * the rotation it wants. `Silent = false` aims the camera itself.
+ * How it gets there is still the assist's maths, so the numbers mean the same thing:
+ *  - `AimSpeed` is the hard cap of one tick, `Strength` the share of the remaining angle,
+ *    `Smoothing` the curve (`Linear`, `Bezier`, `Sigmoid`) — bigger error, faster correction, never
+ *    a teleport;
+ *  - `AimPoint` picks the part of the hitbox, `Predict`/`PredictSize` lead the target;
+ *  - `Engine = AI` swaps the curve for the model LiquidBounce already trained on recorded human
+ *    fights, completed by `AICorrection`;
+ *  - `Silent = true` (default) sends the rotation only to the server, so the camera stays yours and
+ *    the hits land anyway; `Silent = false` turns the camera with it, `FrameInterpolation` spreading
+ *    the step over the frames of the tick.
  *
  * The blue circle under the current target is LiquidBounce's own [TargetRenderer] (the one KillAura
  * draws), configured in the `TargetRendering` group.
@@ -44,28 +47,28 @@ import net.ccbluex.liquidbounce.utils.render.TargetRenderer
  */
 object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
 
-    /** The values and presets, shared with [ModuleAimassist] (see [AimValues]). */
-    private val values = AimValues(this)
+    /** The aimbot's own settings (see [AimbotValues]): same engine, different list. */
+    private val values = AimbotValues(this)
 
-    /** The engine: the same one the assist runs (see [AimassistCore]). */
+    /** The engine the Aimassist runs, told to aim on its own through [AimbotValues.autoAim]. */
     private val core = AimassistCore(this, values)
 
     /**
      * The circle under the target, exactly what KillAura and Aimassist draw: LiquidBounce's own
      * [TargetRenderer] — the blue ring (`Circle` / `GlowingCircle`, outline `0x007CFF`) with its
      * radius, inner radius, height mode and colours configurable in the GUI. It follows the target
-     * the engine is aiming at and draws nothing while there is none.
+     * the engine picked and draws nothing while there is none.
      *
      * It is only a renderer: it never touches the aim.
      */
     @Suppress("unused")
     private val targetRendering = tree(TargetRenderer(this) { core.target })
 
-    /** Friction: damped cursor deltas while the cursor glides over the hitbox. */
+    /** Friction: unused by the aimbot (`Friction` is fixed to 0), kept for the shared engine. */
     @Suppress("unused")
     private val mouseHandler = handler<MouseRotationEvent> { core.onMouseRotation(it) }
 
-    /** The tick: pick the target, apply the gates, compute and hand out the rotation. */
+    /** The tick: pick the target, aim at it, hand the rotation out. */
     @Suppress("unused")
     private val tickHandler = handler<GameTickEvent> { core.tick() }
 
