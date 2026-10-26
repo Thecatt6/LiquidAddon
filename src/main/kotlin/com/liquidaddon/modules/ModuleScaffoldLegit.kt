@@ -25,38 +25,7 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 /**
- * Why timing is enough: with the view still, looking down at about 80 degrees towards the bridge, the crosshair falls
- * on the SIDE face of the block under the feet while standing at its edge (the ray passes beyond the edge), so a
- * click there places a block behind at the same level; at the top of a jump the eyes are 1.25 blocks higher and the
- * same ray falls on the TOP face of that block, so a click places a block on top of it. Edge click, step back onto
- * it, jump, click at the top, land one block higher: the staircase two blocks thick.
- *
- * Mode Stairs (hold space; your own jumps are held back, the module jumps):
- *  1. on the ground, Eagle sneaks at the edge; there, once the crosshair's face would place a block behind under the
- *     feet's level, it right-clicks (after MinDelay..MaxDelay ticks);
- *  2. it waits until the player has walked back onto that block, past its middle by JumpAt, then jumps straight up:
- *     shift and the walking keys are released for the whole jump (walking on, the player would drift almost one
- *     block back in the air, the crosshair would no longer reach the top face and the step would fall into the void);
- *  3. in the air, at PlaceTiming (Early = first tick the block fits under the feet, 3rd tick of the jump; Peak = top of
- *     the jump) plus the delay, if the crosshair's face would place a block on top of the one jumped from, it
- *     right-clicks; the player lands one block higher and it starts again from 1.
- * Mode Step: Eagle while walking; each space press is one jump with the click of point 3 (one block up).
- *
- * Every click is a click: one more press queued on the use key (KeyMapping.clickCount) at the HEAD of Minecraft.tick,
- * after refreshing the crosshair (Minecraft.pick, private); vanilla startUseItem places it with the player's aim, the
- * normal USE_ITEM_ON packet and swing. A click is only queued when the block under the crosshair's face would really
- * go where the bridge needs it (free cell, under the feet's level, next to the player, not inside the player).
- *
- * Settings:
- *   Mode             Stairs (hold space = the whole staircase) or Step (space = one block up)
- *   Eagle            sneak at the edge on the ground
- *   EdgeDistance     how far ahead (blocks, along the movement keys) the edge is looked for
- *   JumpAt           Stairs: how far past the middle of the new block (blocks, along the walk) the jump starts
- *   PlaceTiming      Early or Peak: when the block goes under the feet during the jump
- *   MinDelay         ticks to wait, at least, before each click once its moment came
- *   MaxDelay         ticks to wait, at most (random in between, every click)
- *   ChatLog          every 5 steps: how many, misses, and at which tick of the jump the block went down
- *   Debug            writes in chat what the module waits for, whenever it changes
+ * ModuleScaffoldLegit con Range Sliders (stile LiquidBounce Nextgen UI).
  */
 object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDON) {
 
@@ -75,11 +44,17 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
 
     private val mode by enumChoice("Mode", Mode.STAIRS)
     private val eagle by boolean("Eagle", true)
-    private val edgeDistance by float("EdgeDistance", 0.2f, 0.05f..0.5f)
+
+    // Range Slider per la distanza dal bordo (come nello screenshot: es. 0.38 - 0.6)
+    private val edgeDistance by floatRange("Edge Distance", 0.38f..0.6f, 0.05f..1.0f)
+
     private val jumpAt by float("JumpAt", 0.1f, -0.3f..0.45f)
     private val placeTiming by enumChoice("PlaceTiming", Timing.PEAK)
-    private val minDelay by int("MinDelay", 0, 0..8, "ticks")
-    private val maxDelay by int("MaxDelay", 1, 0..8, "ticks")
+
+    // Range Sliders con la doppia pallina per i Delay
+    private val shiftDelay by intRange("Shift Delay", 0..2, 0..20, "ticks")
+    private val jumpDelay by intRange("Jump Delay", 0..1, 0..20, "ticks")
+
     private val chatLog by boolean("ChatLog", true)
     private val debug by boolean("Debug", false)
 
@@ -167,7 +142,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
             airTicks = 0
             readyTicks = 0
             placedInAir = false
-            delay = drawDelay()
+            delay = drawJumpDelay()
         } else if (eagle && me.onGround() && phase != Phase.AIR && atEdge(me, event.directionalInput)) {
             event.sneak = true
         }
@@ -206,7 +181,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         }
         debug(me, "piano: clic sulla faccia laterale")
         if (readyTicks == 0) {
-            delay = drawDelay()
+            delay = drawShiftDelay()
         }
         if (readyTicks++ < delay) {
             return
@@ -278,11 +253,14 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
             return
         }
         if (!placedInAir) {
-            me.sendSystemMessage(Component.literal("§7[EagleUpTest] gradino mancato: tieni la visuale ferma, in basso "
+            me.sendSystemMessage(Component.literal("ยง7[EagleUpTest] gradino mancato: tieni la visuale ferma, in basso "
                     + "verso il ponte (circa 80 gradi)"))
         } else if (steps % 5 == 0) {
-            me.sendSystemMessage(Component.literal("§7[EagleUpTest] gradini $steps (mancati $misses), tick del salto medio "
-                    + "%.2f, %s, ritardo %d-%d".format(airTickSum.toDouble() / steps, placeTiming.tag, minDelay, maxDelay)))
+            me.sendSystemMessage(Component.literal("ยง7[EagleUpTest] gradini $steps (mancati $misses), tick salto medio "
+                    + "%.2f, %s, shift %d-%d, jump %d-%d".format(
+                airTickSum.toDouble() / steps, placeTiming.tag,
+                shiftDelay.first, shiftDelay.last, jumpDelay.first, jumpDelay.last
+            )))
         }
     }
 
@@ -324,7 +302,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     private fun debug(me: LocalPlayer, text: String) {
         if (debug && text != lastDebug) {
             lastDebug = text
-            me.sendSystemMessage(Component.literal("§8[EagleUpTest D] §7$text"))
+            me.sendSystemMessage(Component.literal("ยง8[EagleUpTest D] ยง7$text"))
         }
     }
 
@@ -347,7 +325,25 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         clickCount.setInt(key, clickCount.getInt(key) + 1)
     }
 
-    private fun drawDelay(): Int = minDelay + if (maxDelay > minDelay) Random.nextInt(maxDelay - minDelay + 1) else 0
+    // Estrae un ritardo casuale nell'intervallo dello slider
+    private fun drawShiftDelay(): Int {
+        val min = shiftDelay.first
+        val max = shiftDelay.last
+        return if (max > min) Random.nextInt(min, max + 1) else min
+    }
+
+    private fun drawJumpDelay(): Int {
+        val min = jumpDelay.first
+        val max = jumpDelay.last
+        return if (max > min) Random.nextInt(min, max + 1) else min
+    }
+
+    // Estrae un valore casuale di EdgeDistance nell'intervallo dello slider
+    private fun getEdgeDistance(): Float {
+        val min = edgeDistance.start
+        val max = edgeDistance.endInclusive
+        return if (max > min) Random.nextDouble(min.toDouble(), max.toDouble()).toFloat() else min
+    }
 
     private fun holdingBlock(me: LocalPlayer): Boolean = me.mainHandItem.item is BlockItem
 
@@ -359,12 +355,12 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         if (length < 1e-6) {
             return false
         }
-        // Entity.moveRelative: forward along the yaw, left = the yaw minus 90 degrees
         val yaw = Math.toRadians(me.yRot.toDouble())
         val dx = (strafe * cos(yaw) - forward * sin(yaw)) / length
         val dz = (forward * cos(yaw) + strafe * sin(yaw)) / length
         val level = mc.level ?: return false
-        val below = BlockPos.containing(me.x + dx * edgeDistance, me.y - 0.5, me.z + dz * edgeDistance)
+        val currentDistance = getEdgeDistance()
+        val below = BlockPos.containing(me.x + dx * currentDistance, me.y - 0.5, me.z + dz * currentDistance)
         return level.getBlockState(below).isAir
     }
 }

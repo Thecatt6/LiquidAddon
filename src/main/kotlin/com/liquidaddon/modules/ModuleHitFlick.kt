@@ -20,6 +20,7 @@ import net.ccbluex.liquidbounce.utils.movement.DirectionalInput
 import net.minecraft.client.KeyMapping
 import net.minecraft.client.Minecraft
 import net.minecraft.client.player.LocalPlayer
+import net.minecraft.core.BlockPos
 import net.minecraft.network.chat.Component
 import net.minecraft.util.Mth
 import net.minecraft.world.entity.LivingEntity
@@ -31,76 +32,37 @@ import java.lang.reflect.Method
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
 /**
- * HitFlick "mode 2", with the normal movement packets:
- *  - tick k: a click with a living entity under the crosshair is taken BEFORE Minecraft reads it (GameTickEvent is
- *    fired at the HEAD of Minecraft.tick, before handleKeybinds): no hit and no swing this tick. The view starts
- *    turning away from the target;
- *  - Rotation Smooth: the view turns FlickAngle degrees away in FlickTicks ticks (1 = a single flick, 2-5 = a smooth
- *    turn that accelerates and brakes like a hand);
- *    Rotation AI: the view turns with LiquidBounce's own AI aim (the AngleSmooth "AI" of KillAura: the same model
- *    and the same inputs, CombatSample) towards a point FlickAngle degrees off the player's view, until it arrives
- *    (2 degrees) or AIMaxTicks;
- *  - the hit tick: Return Instant = at the start of the tick the view comes back onto the target in ONE tick and the
- *    click is given back to Minecraft. On 26.3 Minecraft.tick runs pick() after this event and before handleKeybinds,
- *    so the crosshair already sees the restored view and startAttack does the vanilla hit: range check,
- *    ServerboundAttackPacket, swing, ServerboundPunchPacket, all before the movement packet. The server processes the
- *    hit with the yaw of the tick before (turned) -> the knockback is turned. The hit tick's rotation is on the
- *    target: hitbox accepts the hit.
- *    Return AI = the AI brings the view back too, and the click is given back in the first tick with the target
- *    under the crosshair (Minecraft.pick, private, called a moment before the tick's own pick): the knockback turns
- *    only by the AI's last step.
- *
- * Every rotation is a whole number of mouse counts (MouseHandler.turnPlayer + Entity.turn: sensitivity * 0.6f + 0.2f,
- * cubed, * 8, then float * 0.15f), so the quantization checks see a real mouse; the AI's steps too (like the GCD fix
- * LiquidBounce applies to its own rotations).
- *
- * Silent (default): the camera never moves, only the server sees the flick, like LiquidBounce's silent rotations.
- * The flick is an offset over the player's own view, put on the real rotation only while the player ticks and sends
- * its movement packet (PlayerMovementTickEvent at the HEAD of aiStep, or PlayerNetworkMovementTickEvent PRE at the
- * HEAD of sendPosition) and taken off right after (PlayerNetworkMovementTickEvent POST): the frames are drawn with
- * the real rotation. The hit is unchanged: the crosshair (the real view) is on the target, and the hit tick's
- * movement packet carries the real rotation. MoveFix decides what the movement does meanwhile (LiquidBounce's
- * MovementCorrection): Off = it follows the real view (the server sees a movement that does not match the yaw it
- * got), Strict = it follows the sent yaw (the keys push along the turned view), Silent = like Strict, with the keys
- * changed to the direction (of the 8) closest to where the player was going.
- *
- * Only the EXTRA knockback turns: Minecraft pushes the target 0.4 along the positions (attacker -> target) and adds a
- * push along the attacker's yaw only for a sprint hit (sprinting, attack strength above 0.9) or with Knockback /
- * attack_knockback (Player.causeExtraKnockback). OnlyExtraKnockback flicks only those hits, like the real modules.
+ * HitFlick "mode 2", with the normal movement packets.
+ * Includes "Smart Aim": calculates knockback trajectory to push enemies into the void/off bridges.
  *
  * Settings:
- *   Preset           ready configs (Custom = the sliders below): Blatant (one-tick flick), AIQuick (AI, short),
- *                    AILegit (AI, smaller and not on every hit), Ghost (AI, small, rare). The presets set Rotation,
- *                    Return, FlickAngle, FlickTicks, the AI sliders, RandomizeOffset, ReturnError, Chance, FlickDelay
- *   OnlyExtraKnockback  flick only hits with extra knockback (sprint hit or Knockback weapon); the others stay normal
- *   Silent           the camera stays still, only the server sees the flick (off: the view turns on screen too)
- *   MoveFix          Silent only: Off, Strict or Silent (see above)
- *   Rotation         Smooth (FlickTicks, smoothstep) or AI (LiquidBounce's AI aim model)
- *   Return           Instant (one tick, the hit tick) or AI (the AI comes back, the hit when the crosshair is on)
- *   FlickAngle       how many degrees it turns away; the extra knockback turns by as much
- *   FlickTicks       Smooth: in how many ticks it turns away (1 = a single flick)
- *   AIModel          AI: the model (19KC8KP or 21KC11KP, the two LiquidBounce ships)
- *   AIYawMultiplier  AI: yaw output multiplier (LiquidBounce's OutputMultiplier, default 1.5)
- *   AICorrection     AI: share (%) of what is left that is added after the model's step (LiquidBounce corrects the
- *                    AI with a second AngleSmooth, Interpolation 2-5% in the usual configs)
- *   AIMaxTicks       AI: longest turn away (and longest way back), in ticks
- *   AIHitAt          AI: the hit leaves as soon as the turn away reached this share (%) of the angle: the knockback
- *                    uses the yaw of the tick before, so the turn need not arrive, and a short turn keeps the
- *                    target in reach (knockback displacement: flick right before the hit)
- *   WaitTicks        Silent: if at the hit the crosshair is not on the target (it moved), the flick is held up to
- *                    this many ticks waiting for it, then the click leaves anyway
- *   RandomizeOffset  random range around FlickAngle: 10 = FlickAngle plus or minus 5 degrees at each flick
- *   ReturnError      maximum error of the instant way back, in degrees (4 = up to 2 degrees either side)
- *   PitchNoise       how much the pitch moves during the flick, in degrees (0 = still); the knockback ignores it
- *   Chance           chance (%) that a valid hit becomes a flick; the others are normal hits
- *   FlickDelay       minimum time (ms) between two flicks; meanwhile the hits are normal
- *   Alternate        alternate right and left at each flick (off: always right)
+ *   Preset           ready configs (Custom = the sliders below)
+ *   OnlyExtraKnockback  flick only hits with extra knockback (sprint hit or Knockback weapon)
+ *   SmartAim         decide the flick side based on where the target would fall
+ *   SmartOnly        if true, skip the flick when there is no drop advantage (normal hit)
+ *   SmartDepth       how many air blocks below count as a useful drop
+ *   SmartDistance    how far ahead (blocks) the knockback landing is estimated
+ *   Silent           the camera stays still, only the server sees the flick
+ *   MoveFix          Silent only: Off, Strict or Silent
+ *   Rotation         Smooth or AI
+ *   Return           Instant or AI
+ *   FlickAngle       degrees turned away
+ *   FlickTicks       Smooth: ticks to turn away
+ *   AIModel / AI*    AI aim parameters
+ *   WaitTicks        Silent: wait for crosshair back on target
+ *   RandomizeOffset  random range around FlickAngle
+ *   ReturnError      max error of the instant way back
+ *   PitchNoise       pitch movement during the flick
+ *   Chance           chance (%) that a valid hit becomes a flick
+ *   FlickDelay       minimum ms between two flicks
+ *   Alternate        alternate right and left (overridden by SmartAim when useful)
  *   ChatLog          write every turned hit in chat
  */
 object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
@@ -121,7 +83,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         SILENT("Silent")
     }
 
-    /** What a preset sets (Custom: nothing, the sliders count). */
     class Params(
         val rotation: RotationMode, val ret: ReturnMode, val angle: Int, val ticks: Int, val yawMultiplier: Float,
         val correction: Int, val maxTicks: Int, val hitAt: Int, val randomize: Int, val returnError: Int,
@@ -143,6 +104,13 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
 
     private val preset by enumChoice("Preset", Preset.AI_QUICK)
     private val onlyExtraKnockback by boolean("OnlyExtraKnockback", true)
+
+    // --- SMART AIM ---
+    private val smartAim by boolean("SmartAim", true)
+    private val smartOnly by boolean("SmartOnly", true)
+    private val smartDepth by int("SmartDepth", 3, 1..10, "blocks")
+    private val smartDistance by float("SmartDistance", 1.5f, 1f..3f, "blocks")
+
     private val silent by boolean("Silent", true)
     private val moveFix by enumChoice("MoveFix", MoveFix.SILENT)
     private val rotationValue by enumChoice("Rotation", RotationMode.AI)
@@ -161,7 +129,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
     private val chanceValue by int("Chance", 100, 1..100, "%")
     private val flickDelayValue by int("FlickDelay", 0, 0..10000, "ms")
 
-    // the values in use: the preset's, or the sliders' with Custom
     private val rotationMode: RotationMode get() = preset.params?.rotation ?: rotationValue
     private val returnMode: ReturnMode get() = preset.params?.ret ?: returnValue
     private val flickAngle: Int get() = preset.params?.angle ?: flickAngleValue
@@ -177,10 +144,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
     private val alternate by boolean("Alternate", true)
     private val chatLog by boolean("ChatLog", true)
 
-    /**
-     * The flick in progress: the target, the steps still to apply (mouse counts per tick, Smooth only), the counts
-     * applied. AI: the point to reach (degrees off the player's own view), the phase and the two last rotations.
-     */
     private class Flick(val target: LivingEntity, val yawSteps: IntArray, val pitchSteps: IntArray, val reason: String) {
         var next = 0
         var yawDone = 0
@@ -204,10 +167,8 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
     private var lastFlickAt = 0L
     private var aiWarned = false
 
-    /** Silent: the offset (mouse counts) of the instant way back's tick, used once and cleared at the next tick. */
     private var hitYawCounts = 0
     private var hitPitchCounts = 0
-    /** Silent: the real rotation while the sent one is on the player (between aiStep / sendPosition and its end). */
     private var spoofing = false
     private var spoofedMovement = false
     private var realYaw = 0f
@@ -216,12 +177,10 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
     private var realPitchO = 0f
     private var realHeadYawO = 0f
 
-    /** KeyMapping.clickCount: the clicks queued for handleKeybinds (private; 26.x names are not obfuscated). */
     private val clickCount: Field by lazy {
         KeyMapping::class.java.getDeclaredField("clickCount").apply { isAccessible = true }
     }
 
-    /** Minecraft.pick(float) is private; Return AI calls it to know whether the crosshair is back on the target. */
     private val pickMethod: Method? by lazy {
         runCatching {
             Minecraft::class.java.getDeclaredMethod("pick", Float::class.javaPrimitiveType).apply { isAccessible = true }
@@ -245,7 +204,7 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         if (me != null) {
             endSpoof(me)
             if (flick != null && !silent) {
-                turn(me, -flick.yawDone, -flick.pitchDone) // never leave the view turned
+                turn(me, -flick.yawDone, -flick.pitchDone)
             }
         }
         pending = null
@@ -254,7 +213,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         super.onDisabled()
     }
 
-    /** Silent, MoveFix Strict/Silent: the sent rotation goes on the player before the movement (HEAD of aiStep). */
     @Suppress("unused")
     private val movementHandler = handler<PlayerMovementTickEvent> {
         val me = mc.player ?: return@handler
@@ -263,7 +221,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         }
     }
 
-    /** MoveFix Silent: the keys that, along the sent yaw, push closest to where the player was going. */
     @Suppress("unused")
     private val inputHandler = handler<MovementInputEvent> { event ->
         if (spoofing && moveFix == MoveFix.SILENT) {
@@ -272,7 +229,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         }
     }
 
-    /** Silent: on at the HEAD of sendPosition (MoveFix Off), off at its RETURN in every mode. */
     @Suppress("unused")
     private val networkHandler = handler<PlayerNetworkMovementTickEvent> { event ->
         val me = mc.player ?: return@handler
@@ -285,13 +241,11 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         }
     }
 
-    /** The offset of this tick: the flick in progress, or the instant way back's error in the hit tick. */
     private fun spoofCounts(): Pair<Int, Int> {
         val flick = pending
         return if (flick != null) flick.yawDone to flick.pitchDone else hitYawCounts to hitPitchCounts
     }
 
-    /** [movement] = from the HEAD of aiStep (the movement, the hand bob and the head see the sent rotation too). */
     private fun beginSpoof(me: LocalPlayer, movement: Boolean) {
         if (spoofing) {
             return
@@ -304,7 +258,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         spoofedMovement = movement
         realYaw = me.yRot
         realPitch = me.xRot
-        // set before the tick (setOldPosAndRot): LivingEntity.tick shifts them by 360 when the sent yaw is 180+ away
         realYawO = me.yRotO
         realPitchO = me.xRotO
         realHeadYawO = me.yHeadRotO
@@ -312,11 +265,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         me.xRot = (realPitch + stepOf(pitchCounts)).coerceIn(-90f, 90f)
     }
 
-    /**
-     * The real rotation back on the player before the frames are drawn, with what followed the sent one meanwhile:
-     * the old rotations, the head (Player.aiStep puts it on the yaw) and the hand bob of the first person view
-     * (LocalPlayer.applyInput: bob += (rotation - bob) * 0.5, done again with the real rotation).
-     */
     private fun endSpoof(me: LocalPlayer) {
         if (!spoofing) {
             return
@@ -334,17 +282,12 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         }
     }
 
-    /**
-     * MovementCorrection Silent: [input] means a direction relative to the real yaw; along [sentYaw] the same keys
-     * would push elsewhere, so they become the direction (of the 8) closest to the one meant.
-     */
     private fun silentInput(input: DirectionalInput, realYaw: Float, sentYaw: Float): DirectionalInput {
         val forward = (if (input.forwards) 1 else 0) - (if (input.backwards) 1 else 0)
         val strafe = (if (input.left) 1 else 0) - (if (input.right) 1 else 0)
         if (forward == 0 && strafe == 0) {
             return input
         }
-        // relative angle of the keys: 0 = forwards, -90 = left (Entity.moveRelative), +90 = right
         val meant = realYaw + Math.toDegrees(atan2(-strafe.toDouble(), forward.toDouble()))
         val relative = Math.toRadians(Math.round(Mth.wrapDegrees(meant - sentYaw) / 45.0) * 45.0)
         val newForward = Math.round(cos(relative)).toInt()
@@ -360,15 +303,15 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
             spoofing = false
             return@handler
         }
-        endSpoof(me) // a tick without sendPosition: never leave the sent rotation on the camera
+        endSpoof(me)
         hitYawCounts = 0
         hitPitchCounts = 0
-        
+
         val flick = pending
         if (flick != null) {
-            dropClicks() // clicks during the flick would be extra hits
+            dropClicks()
             if (flick.waited > 0) {
-                finishInstant(me, flick, flick.totalTicks + flick.waited) // still waiting for the crosshair
+                finishInstant(me, flick, flick.totalTicks + flick.waited)
                 return@handler
             }
             if (flick.ai) {
@@ -386,35 +329,80 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         if (mc.gui.screen() != null) {
             return@handler
         }
-        // living entities only: boats, minecarts and crystals are left to Minecraft
+
         val target = mc.crosshairPickEntity as? LivingEntity ?: return@handler
         if (!target.isAlive) {
             return@handler
         }
+
         val reason = extraKnockback(me)
         if (onlyExtraKnockback && reason == null) {
-            return@handler // no extra knockback: the flick would change nothing, the click stays a normal hit
+            return@handler
         }
+
         val now = System.currentTimeMillis()
         if (now - lastFlickAt < flickDelay || Random.nextInt(100) >= chance) {
-            return@handler // Flick Delay / Chance: this click stays a normal vanilla hit
+            return@handler
         }
+
         if (!mc.options.keyAttack.consumeClick()) {
-            return@handler // no click this tick
+            return@handler
         }
         dropClicks()
-        lastFlickAt = now
+
+        // --- SMART AIM: sceglie dove buttare l'avversario ---
         val angle = max(1.0, flickAngle + uniform(randomizeOffset))
-        val signedAngle = side * angle
-        if (alternate) {
-            side = -side
+        var chosenSide = side
+        var shouldFlick = true
+
+        if (smartAim) {
+            val rightYaw = me.yRot + angle.toFloat()
+            val leftYaw = me.yRot - angle.toFloat()
+
+            val dropRight = getDropDepth(target, rightYaw)
+            val dropLeft = getDropDepth(target, leftYaw)
+
+            when {
+                dropRight >= smartDepth && dropLeft < smartDepth -> chosenSide = 1   // forza destra
+                dropLeft >= smartDepth && dropRight < smartDepth -> chosenSide = -1  // forza sinistra
+                dropRight >= smartDepth && dropLeft >= smartDepth -> chosenSide = side // entrambi vuoti: alterna
+                else -> {
+                    // nessun vantaggio (pavimento piatto)
+                    if (smartOnly) {
+                        shouldFlick = false
+                    } else {
+                        chosenSide = side
+                    }
+                }
+            }
         }
+
+        if (!shouldFlick) {
+            // hit normale, senza flick
+            queueClick()
+            return@handler
+        }
+
+        lastFlickAt = now
+        val signedAngle = chosenSide * angle
+
+        if (alternate) {
+            if (!smartAim || chosenSide == side) {
+                side = -side
+            } else {
+                // sincronizza l'alternanza col lato forzato da SmartAim
+                side = -chosenSide
+            }
+        }
+
         val model = if (rotationMode == RotationMode.AI || returnMode == ReturnMode.AI) model() else null
         if (model == null && (rotationMode == RotationMode.AI || returnMode == ReturnMode.AI) && !aiWarned) {
             aiWarned = true
-            me.sendSystemMessage(Component.literal("§c[HitFlick] AI non disponibile (il motore deep learning di "
-                    + "LiquidBounce non e' avviato o il modello manca): uso Smooth e ritorno Instant"))
+            me.sendSystemMessage(Component.literal(
+                "§c[HitFlick] AI non disponibile (il motore deep learning di LiquidBounce non e' avviato o il modello manca): uso Smooth e ritorno Instant"
+            ))
         }
+
         if (model != null && rotationMode == RotationMode.AI) {
             val newFlick = Flick(target, IntArray(0), IntArray(0), reason ?: "nessun extra")
             newFlick.ai = true
@@ -425,22 +413,27 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
             newFlick.lastYaw = me.yRot
             newFlick.lastPitch = me.xRot
             pending = newFlick
-            tickAi(me, newFlick) // tick k: the first step goes out with this tick's movement packet
+            tickAi(me, newFlick)
             return@handler
         }
+
         var total = countsFor(signedAngle)
         if (total == 0) {
-            total = side
+            total = chosenSide
         }
-        val newFlick = Flick(target, smoothSteps(total, flickTicks), smoothSteps(countsFor(uniform(pitchNoise)), flickTicks),
-            reason ?: "nessun extra")
-        newFlick.ai = model != null && returnMode == ReturnMode.AI // Smooth away, AI way back
+
+        val newFlick = Flick(
+            target,
+            smoothSteps(total, flickTicks),
+            smoothSteps(countsFor(uniform(pitchNoise)), flickTicks),
+            reason ?: "nessun extra"
+        )
+        newFlick.ai = model != null && returnMode == ReturnMode.AI
         newFlick.lastYaw = me.yRot
         newFlick.lastPitch = me.xRot
         newFlick.beforeYaw = me.yRotO
         newFlick.beforePitch = me.xRotO
         pending = newFlick
-        // tick k: the first step goes out with this tick's movement packet
         apply(me, newFlick, newFlick.yawSteps[0], newFlick.pitchSteps[0])
         newFlick.next = 1
         newFlick.totalTicks = 1
@@ -448,26 +441,54 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         remember(me, newFlick)
     }
 
-    /** The player's own view: the camera, without what the flick added to it when not Silent. */
-    private fun viewYaw(me: LocalPlayer, flick: Flick): Float = if (silent) me.yRot else me.yRot - stepOf(flick.yawDone)
+    /**
+     * SmartAim: quanti blocchi di vuoto ci sono sotto il punto in cui il target verrebbe spinto
+     * lungo [yaw], a distanza SmartDistance.
+     */
+    private fun getDropDepth(target: LivingEntity, yaw: Float): Int {
+        val level = mc.level ?: return 0
+        val dist = smartDistance.toDouble()
+        val rad = Math.toRadians(yaw.toDouble())
+
+        // Minecraft: +Z Sud, +X Est; direzione look = (-sin(yaw), cos(yaw))
+        val dx = -sin(rad) * dist
+        val dz = cos(rad) * dist
+
+        val checkX = target.x + dx
+        val checkZ = target.z + dz
+        val startY = floor(target.y).toInt()
+
+        var depth = 0
+        for (i in 0..smartDepth) {
+            val pos = BlockPos.containing(checkX, (startY - i).toDouble(), checkZ)
+            val state = level.getBlockState(pos)
+            if (state.isAir || state.getCollisionShape(level, pos).isEmpty) {
+                depth++
+            } else {
+                break
+            }
+        }
+        return depth
+    }
+
+    private fun viewYaw(me: LocalPlayer, flick: Flick): Float =
+        if (silent) me.yRot else me.yRot - stepOf(flick.yawDone)
 
     private fun viewPitch(me: LocalPlayer, flick: Flick): Float =
         if (silent) me.xRot else me.xRot - stepOf(flick.pitchDone)
 
-    /** The rotation the server gets with the offset applied so far. */
-    private fun sentYaw(me: LocalPlayer, flick: Flick): Float = viewYaw(me, flick) + stepOf(flick.yawDone)
+    private fun sentYaw(me: LocalPlayer, flick: Flick): Float =
+        viewYaw(me, flick) + stepOf(flick.yawDone)
 
     private fun sentPitch(me: LocalPlayer, flick: Flick): Float =
         (viewPitch(me, flick) + stepOf(flick.pitchDone)).coerceIn(-90f, 90f)
 
-    /** One tick of an AI flick (or of the AI way back after a Smooth turn away). */
     private fun tickAi(me: LocalPlayer, flick: Flick) {
         val baseYaw = viewYaw(me, flick)
         val basePitch = viewPitch(me, flick)
         flick.totalTicks++
         if (!flick.returning) {
             if (flick.next < flick.yawSteps.size) {
-                // Smooth turn away followed by the AI way back
                 apply(me, flick, flick.yawSteps[flick.next], flick.pitchSteps[flick.next])
                 flick.next++
                 flick.returning = flick.next >= flick.yawSteps.size
@@ -477,7 +498,7 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
             val goalYaw = baseYaw + flick.yawOff
             val goalPitch = (basePitch + flick.pitchOff).coerceIn(-90f, 90f)
             val step = aiStep(me, flick, goalYaw, goalPitch) ?: run {
-                finishInstant(me, flick, flick.totalTicks) // the model failed: back now
+                finishInstant(me, flick, flick.totalTicks)
                 return
             }
             apply(me, flick, step.first, step.second)
@@ -499,21 +520,16 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
             finishInstant(me, flick, flick.totalTicks - 1)
             return
         }
-        val turned = abs(stepOf(flick.yawDone)) // where the yaw of the tick before the hit was
+        val turned = abs(stepOf(flick.yawDone))
         apply(me, flick, step.first, step.second)
         flick.aiTicks++
         remember(me, flick)
         if (backOnTarget(me, flick)) {
-            // the AI brought the crosshair back on the target: the hit leaves now, with this rotation
             pending = null
             hit(me, flick, flick.totalTicks, turned)
         }
     }
 
-    /**
-     * Return AI: the hit can leave. Not Silent: the crosshair (Minecraft.pick a moment before the tick's own) is on the
-     * target. Silent: the crosshair always is, so the rotation the server will get must hit the target's box.
-     */
     private fun backOnTarget(me: LocalPlayer, flick: Flick): Boolean {
         if (!silent) {
             pickMethod?.let { method -> runCatching { method.invoke(mc, 1.0f) } }
@@ -521,16 +537,13 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         }
         val eyes = me.eyePosition
         val box = flick.target.boundingBox
-        val reach = eyes.add(Rotation(sentYaw(me, flick), sentPitch(me, flick)).directionVector
-            .scale(me.entityInteractionRange()))
+        val reach = eyes.add(
+            Rotation(sentYaw(me, flick), sentPitch(me, flick)).directionVector
+                .scale(me.entityInteractionRange())
+        )
         return box.contains(eyes) || box.clip(eyes, reach).isPresent
     }
 
-    /**
-     * The instant way back: ONE tick, with the configured error, then the click goes back to Minecraft. Silent: if
-     * the target moved away from the crosshair the flick is held (the server keeps getting the turned yaw) up to
-     * WaitTicks, until the player aims at it again; then the click leaves anyway.
-     */
     private fun finishInstant(me: LocalPlayer, flick: Flick, ticks: Int) {
         if (silent && flick.waited < waitTicks && flick.target.isAlive && !crosshairOn(flick)) {
             flick.waited++
@@ -542,7 +555,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         val errorYaw = countsFor(uniform(returnError))
         val errorPitch = countsFor(uniform(pitchNoise))
         if (silent) {
-            // the camera never moved: only this tick's packet carries the error, the next one is the real view
             hitYawCounts = errorYaw
             hitPitchCounts = errorPitch
         } else {
@@ -551,13 +563,11 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         hit(me, flick, ticks, turned)
     }
 
-    /** The real crosshair (Minecraft.pick a moment before the tick's own) is on the flick's target. */
     private fun crosshairOn(flick: Flick): Boolean {
         pickMethod?.let { method -> runCatching { method.invoke(mc, 1.0f) } }
         return mc.crosshairPickEntity === flick.target
     }
 
-    /** The click goes back to Minecraft; [turned] = degrees the yaw of the tick before the hit was off the view. */
     private fun hit(me: LocalPlayer, flick: Flick, ticks: Int, turned: Float) {
         if (!flick.target.isAlive) {
             return
@@ -567,14 +577,16 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         if (chatLog) {
             val away = if (flick.yawSteps.isEmpty()) "AI" else "smooth"
             val back = if (flick.ai && returnMode == ReturnMode.AI && model() != null) "AI" else "instant"
-            val view = (if (silent) ", silent" else "") + (if (flick.waited > 0) ", atteso ${flick.waited} tick" else "") +
-                ", preset ${preset.tag}"
-            me.sendSystemMessage(Component.literal("§7[HitFlick] colpo $count (${flick.reason}), yaw girato di "
-                    + "%.2f gradi in %d tick (andata %s, ritorno %s%s)".format(turned, ticks, away, back, view)))
+            val view = (if (silent) ", silent" else "") +
+                    (if (flick.waited > 0) ", atteso ${flick.waited} tick" else "") +
+                    ", preset ${preset.tag}"
+            me.sendSystemMessage(Component.literal(
+                "§7[HitFlick] colpo $count (${flick.reason}), yaw girato di " +
+                        "%.2f gradi in %d tick (andata %s, ritorno %s%s)".format(turned, ticks, away, back, view)
+            ))
         }
     }
 
-    /** The rotations sent in the last two ticks, for the model's velocity input. */
     private fun remember(me: LocalPlayer, flick: Flick) {
         flick.beforeYaw = flick.lastYaw
         flick.beforePitch = flick.lastPitch
@@ -582,7 +594,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         flick.lastPitch = sentPitch(me, flick)
     }
 
-    /** The model LiquidBounce loaded with this name, or the active one; null if its deep learning engine is off. */
     private fun model(): TwoDimensionalRegressionModel? = runCatching {
         if (!DeepLearningEngine.isInitialized) {
             return@runCatching null
@@ -591,11 +602,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         group.modes.firstOrNull { it.tag.equals(aiModel.tag, ignoreCase = true) } ?: group.activeMode
     }.getOrNull()
 
-    /**
-     * One step of LiquidBounce's AiAngleSmooth.process towards [goalYaw]/[goalPitch], in mouse counts: the same
-     * CombatSample (current, previous and target direction, last tick's turn, both movements, boxed distance,
-     * hurt time), the model's output times the multiplier, then a share of what is left (the correction).
-     */
     private fun aiStep(me: LocalPlayer, flick: Flick, goalYaw: Float, goalPitch: Float): Pair<Int, Int>? {
         val model = model() ?: return null
         val current = Rotation(sentYaw(me, flick), sentPitch(me, flick))
@@ -603,10 +609,12 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         val goal = Rotation(goalYaw, goalPitch)
         val target = flick.target
         val output = runCatching {
-            val sample = CombatSample(current.directionVector, previous.directionVector, goal.directionVector,
+            val sample = CombatSample(
+                current.directionVector, previous.directionVector, goal.directionVector,
                 previous.rotationDeltaTo(current).toVec2f(), me.position().subtract(me.lastPos),
                 target.position().subtract(target.lastPos), me.squaredBoxedDistanceTo(target).toFloat(),
-                target.hurtTime, 0)
+                target.hurtTime, 0
+            )
             model.predict(sample.asInput)
         }.getOrNull() ?: return null
         if (output.size < 2 || !output[0].isFinite() || !output[1].isFinite()) {
@@ -618,20 +626,17 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         yaw += Mth.wrapDegrees(goalYaw - yaw) * share
         pitch += (goalPitch - pitch) * share
         pitch = pitch.coerceIn(-90f, 90f)
-        return countsFor(Mth.wrapDegrees(yaw - current.yaw).toDouble()) to countsFor((pitch - current.pitch).toDouble())
+        return countsFor(Mth.wrapDegrees(yaw - current.yaw).toDouble()) to
+                countsFor((pitch - current.pitch).toDouble())
     }
 
-    /**
-     * Why this hit gets the extra knockback that follows the yaw, or null: a sprint hit (sprinting and attack strength
-     * above 0.9, as Player.attack checks it), or a weapon with a knockback enchantment effect / attack_knockback.
-     * The hit leaves some ticks later: the attack strength only grows meanwhile, the sprint must still be held.
-     */
     private fun extraKnockback(me: LocalPlayer): String? {
         if (me.isSprinting && me.getAttackStrengthScale(0.5f) > 0.9f) {
             return "sprint"
         }
         if (EnchantmentHelper.has(me.mainHandItem, EnchantmentEffectComponents.KNOCKBACK)
-            || me.getAttributeValue(Attributes.ATTACK_KNOCKBACK) > 0.0) {
+            || me.getAttributeValue(Attributes.ATTACK_KNOCKBACK) > 0.0
+        ) {
             return "contraccolpo"
         }
         return null
@@ -639,17 +644,15 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
 
     private fun dropClicks() {
         while (mc.options.keyAttack.consumeClick()) {
-            // eaten: Minecraft will neither attack nor swing for these clicks
+            // eaten
         }
     }
 
-    /** One click for this tick's handleKeybinds, as if the player had just pressed the attack key. */
     private fun queueClick() {
         val key = mc.options.keyAttack
         clickCount.setInt(key, clickCount.getInt(key) + 1)
     }
 
-    /** Adds to the flick's offset; not Silent, the camera turns by as much. */
     private fun apply(me: LocalPlayer, flick: Flick, yawCounts: Int, pitchCounts: Int) {
         if (!silent) {
             turn(me, yawCounts, pitchCounts)
@@ -658,19 +661,17 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         flick.pitchDone += pitchCounts
     }
 
-    /** MouseHandler.turnPlayer: degrees per mouse count before the * 0.15 (no spyglass, no cinematic camera). */
     private fun mouseFactor(): Double {
         val d = mc.options.sensitivity().get() * 0.6f.toDouble() + 0.2f.toDouble()
         return d * d * d * 8.0
     }
 
-    /** Whole mouse counts closest to [degrees]. */
-    private fun countsFor(degrees: Double): Int = (degrees / (mouseFactor() * 0.15f.toDouble())).roundToInt()
+    private fun countsFor(degrees: Double): Int =
+        (degrees / (mouseFactor() * 0.15f.toDouble())).roundToInt()
 
-    /** Entity.turn: the rotation of [counts] mouse counts in one frame, with the client's float rounding. */
-    private fun stepOf(counts: Int): Float = (counts * mouseFactor()).toFloat() * 0.15f
+    private fun stepOf(counts: Int): Float =
+        (counts * mouseFactor()).toFloat() * 0.15f
 
-    /** Turns the real view by whole mouse counts. */
     private fun turn(me: LocalPlayer, yawCounts: Int, pitchCounts: Int) {
         if (yawCounts != 0) {
             me.yRot = me.yRot + stepOf(yawCounts)
@@ -680,7 +681,6 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         }
     }
 
-    /** [total] counts split over [ticks] ticks, accelerating and braking (smoothstep). */
     private fun smoothSteps(total: Int, ticks: Int): IntArray {
         val steps = IntArray(ticks)
         var done = 0
