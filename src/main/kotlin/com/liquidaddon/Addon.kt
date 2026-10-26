@@ -4,6 +4,7 @@ import com.liquidaddon.modules.ModuleHitFlick
 import com.liquidaddon.modules.ModuleHitSelect
 import com.liquidaddon.modules.ModuleAimbotAI
 import com.liquidaddon.modules.ModuleAimassist
+import com.liquidaddon.modules.ModuleJumpReset
 import com.liquidaddon.modules.ModuleScaffoldLegit
 import net.ccbluex.liquidbounce.features.addon.LiquidBounceAddon
 
@@ -18,7 +19,10 @@ class Addon : LiquidBounceAddon() {
         logger.info("LiquidAddon starting up")
 
         // Registra i moduli. CommandExample è opzionale — se non c'è il file, commenta la riga sotto
-        registerModules(ModuleHitSelect, ModuleHitFlick, ModuleAimbotAI, ModuleAimassist, ModuleScaffoldLegit)
+        registerModules(
+            ModuleHitSelect, ModuleHitFlick, ModuleAimbotAI, ModuleAimassist, ModuleJumpReset,
+            ModuleScaffoldLegit
+        )
 
         // Prova a registrare il comando se esiste
         try {
