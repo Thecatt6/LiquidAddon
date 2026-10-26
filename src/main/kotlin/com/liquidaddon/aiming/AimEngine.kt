@@ -80,6 +80,12 @@ private const val STILL = 0.02f
 /** How far (in mouse counts) the rounding boundary may wobble when `gcdDither` is on. */
 private const val DITHER_WOBBLE = 0.18
 
+/** How far the response of the pull walks per tick (see [AimassistCore.speedDrift]). */
+private const val SPEED_DRIFT_STEP = 0.07f
+
+/** Chance (in %) that a resting hand does not move at all on a tick inside the dead zone. */
+private const val REST_CHANCE = 35
+
 /**
  * The share of the step an "idle" tick still applies when the camera is ours: a skipped tick would
  * freeze the view for 50 ms and then catch up with a bigger step, which is the stutter the engine
@@ -191,6 +197,24 @@ internal interface AimSettings {
     val jitterPitch: Float
     val gcdFix: Boolean
     val gcdDither: Boolean
+
+    // --- the hand on the mouse lattice (see [AimassistCore.handOnLattice]) --------------------
+
+    /**
+     * Jitter added **after** the quantisation, in whole mouse counts.
+     *
+     * This is the one that matters. The lattice itself was never the problem — a real mouse is on
+     * the same one — and a jitter expressed in degrees is swallowed by it: 0.12° on a 0.15° lattice
+     * is `round(0.8) = 1`, i.e. nothing. In counts it is what a hand really adds: the numbers a
+     * script produces twice in a row are almost never produced twice by a person.
+     */
+    val mouseNoise: Int
+
+    /** Chance (in %) that a step lands one count past the goal and takes it back on the next tick. */
+    val overshoot: Int
+
+    /** Per-target spread of [strength] (in %): the speed of the pull is not a constant. */
+    val strengthSpread: Int
 
     // --- how the rotation reaches the server ---
     val silent: Boolean
@@ -343,6 +367,28 @@ internal class AimValues(
     override val gcdFix by gcdFixValue
     val gcdDitherValue = group.boolean("GcdDither", true)
     override val gcdDither by gcdDitherValue
+
+    /**
+     * Whole mouse counts of noise on every step, on top of [jitterYaw]/[jitterPitch].
+     *
+     * `JitterYaw` is in degrees and is smaller than one mouse count on most sensitivities, so on its
+     * own it does not reach the packets at all. This one is added after the quantisation, so it
+     * always does: it is what turns a handful of repeated deltas into a spread of them, and that is
+     * exactly what the "machine-like rotations" checks (`distinct`, `min`/`max`, `sum`) measure.
+     */
+    val mouseNoiseValue = group.int("MouseNoise", 1, 0..4, "counts")
+    override val mouseNoise by mouseNoiseValue
+
+    /** How often (in %) the hand lands one count past the goal; the next tick takes it back. */
+    val overshootValue = group.int("Overshoot", 8, 0..30, "%")
+    override val overshoot by overshootValue
+
+    /**
+     * Spread of [strength] drawn per target: two engagements never pull at exactly the same speed,
+     * and a pull whose ratio is constant is a straight line, i.e. a pathfinder, not a hand.
+     */
+    val strengthSpreadValue = group.int("StrengthSpread", 15, 0..50, "%")
+    override val strengthSpread by strengthSpreadValue
 
     // --- how the rotation reaches the server ------------------------------------------------
 
@@ -521,6 +567,11 @@ internal class AimValues(
         jitterPitchValue.set(p.jitterPitch)
         gcdFixValue.set(p.gcdFix)
         gcdDitherValue.set(p.gcdDither)
+        // A blatant profile is the reference machine: the lattice is still handled, the hand is not.
+        val blatant = preset == Preset.BLATANT
+        mouseNoiseValue.set(if (blatant) 0 else 1)
+        overshootValue.set(if (blatant) 0 else 8)
+        strengthSpreadValue.set(if (blatant) 0 else 15)
         switchDelayValue.set(p.switchDelay)
         rangeValue.set(p.range)
         fovValue.set(p.fov)
@@ -593,6 +644,12 @@ internal class AimassistCore(
     private val jitterPitch get() = values.jitterPitch
     private val gcdFix get() = values.gcdFix
     private val gcdDither get() = values.gcdDither
+    private val mouseNoise get() = values.mouseNoise
+    private val overshoot get() = values.overshoot
+    private val strengthSpread get() = values.strengthSpread
+
+    /** Share of the remaining angle a step covers: [strength], spread per target ([strengthSpread]). */
+    private val pull get() = (strength / 100f) * strengthScale
     private val silent get() = values.silent
     private val moveFix get() = values.moveFix
     private val frameInterpolation get() = values.frameInterpolation
@@ -644,10 +701,30 @@ internal class AimassistCore(
 
     /** Ticks the aim spent inside [deadZone]; used to keep a silent request alive. */
     private var stillTicks = 0
-    private var nudgeSign = 1f
+
+    /** Which way the resting hand drifts, and how many counts that drift currently is. */
+    private var driftSign = 1
+    private var driftCounts = 1
 
     /** Per-target response multiplier: two engagements never share the same speed profile. */
     private var responseJitter = 1f
+
+    /** Per-target spread of the pull (see [strengthSpread]), drawn once when the target changes. */
+    private var strengthScale = 1f
+
+    /**
+     * Slow walk of the response over the engagement, 0.85..1.15.
+     *
+     * A hand does not pull at a constant fraction of the error: it accelerates, overshoots a little
+     * and settles. With [responseJitter] fixed for the whole fight every step is the same share of
+     * what is left, so the deltas form a geometric progression — a perfectly regular curve, which
+     * is the "Baritone" half of the same flag.
+     */
+    private var speedDrift = 1f
+
+    /** Counts of the last step that reached the packets, for the no-repeat rule in [handOnLattice]. */
+    private var lastCountsYaw: Int? = null
+    private var lastCountsPitch: Int? = null
 
     /** Rounding residual carried between ticks, so the aim never stalls on a sub-count difference. */
     private var yawCarry = 0.0
@@ -697,8 +774,13 @@ internal class AimassistCore(
         idleLeft = 0
         assisted = 0
         stillTicks = 0
-        nudgeSign = if (Random.nextBoolean()) 1f else -1f
+        driftSign = if (Random.nextBoolean()) 1 else -1
+        driftCounts = 1
         responseJitter = 1f
+        strengthScale = 1f
+        speedDrift = 1f
+        lastCountsYaw = null
+        lastCountsPitch = null
         yawCarry = 0.0
         pitchCarry = 0.0
         tickStepYaw = 0f
@@ -904,6 +986,8 @@ internal class AimassistCore(
             reactionUntil = if (target === pendingAttack) now else now + reactionDelay +
                 Random.nextInt(reactionRandom + 1)
             responseJitter = 0.85f + Random.nextFloat() * 0.3f
+            strengthScale = 1f + (Random.nextFloat() - 0.5f) * 2f * (strengthSpread / 100f)
+            speedDrift = 1f
             stillTicks = 0
         }
 
@@ -984,7 +1068,11 @@ internal class AimassistCore(
             // Everything the assist hands out is gated the same way for both engines: [strength]
             // says how much help is granted, the bubble/turn/fade/idle gates say whether it is
             // granted at all.
-            val allowance = weight * responseJitter * gate * glide * fade
+            // The speed of the pull walks over the engagement instead of sitting on one value.
+            speedDrift = (speedDrift + (Random.nextFloat() - 0.5f) * SPEED_DRIFT_STEP)
+                .coerceIn(0.85f, 1.15f)
+
+            val allowance = weight * responseJitter * speedDrift * gate * glide * fade
             val ai = if (engine == Engine.AI) aiStep(me, aim, goal, target) else null
 
             if (ai != null) {
@@ -993,7 +1081,7 @@ internal class AimassistCore(
                 // copies". On top of it a fraction of what is left ([aiCorrection]) keeps the aim
                 // converging even when the model under-shoots, exactly like LiquidBounce's own AI
                 // smooth does with its correction step.
-                val trust = (strength / 100f) * allowance
+                val trust = pull * allowance
                 val correction = (aiCorrection / 100f) * allowance
                 var aiYaw = ai.first * trust + deltaYaw * correction
                 var aiPitch = ai.second * trust * (pitchAssist / 100f) +
@@ -1008,7 +1096,7 @@ internal class AimassistCore(
                 stepPitch = if (abs(aiPitch) > abs(deltaPitch)) deltaPitch else aiPitch
             } else {
                 // [Engine.MATH], or the AI falling back to it: the share of the remaining angle.
-                val share = (strength / 100f) * shape(deltaYaw) * allowance
+                val share = pull * shape(deltaYaw) * allowance
                 stepYaw = deltaYaw * share
                 stepPitch = deltaPitch * share * (pitchAssist / 100f)
             }
@@ -1095,10 +1183,16 @@ internal class AimassistCore(
 
     /**
      * The aim is already inside [deadZone]. Not silent nothing is written: the camera simply does
-     * not move, which is what a resting hand does. Silent the request would go stale
-     * (`ticksUntilReset`) and the manager would snap the rotation back to the camera, so it is
-     * re-sent unchanged, and every other tick nudged by one mouse count, because a movement packet
-     * whose rotation is identical to the previous one is a flag.
+     * not move, which is what a resting hand does, and an unchanged rotation is a perfectly normal
+     * packet (vanilla sends one every tick). Silent the request would go stale (`ticksUntilReset`)
+     * and the manager would snap the rotation back to the camera, so it is re-sent.
+     *
+     * A resting hand is not a metronome: it drifts. The old version nudged exactly **one** mouse
+     * count every other tick and flipped the sign one time in five, which is a *periodic* signal —
+     * three deltas (`-0.15°, 0, +0.15°`) for as long as the target stood still. That is precisely
+     * the `distinct: 4, minY: -0.15, maxY: +0.151` of the "machine-like rotations" flag, so the
+     * drift is now a small random walk: a random number of counts, a sign that turns when it likes,
+     * and ticks of complete rest in between.
      */
     private fun stillTick(me: LocalPlayer, aim: Rotation, target: LivingEntity) {
         if (!silent) {
@@ -1110,8 +1204,33 @@ internal class AimassistCore(
             return
         }
         stillTicks = 0
-        if (Random.nextInt(100) < 20) nudgeSign = -nudgeSign
-        applyAim(me, aim, nudgeSign * RotationUtil.gcd.toFloat(), 0f, target)
+
+        // Sometimes the hand simply does not move this tick.
+        if (Random.nextInt(100) < REST_CHANCE) {
+            hold()
+            return
+        }
+
+        // Re-drawn every time instead of alternating: 1..3 counts, now and then more, and a
+        // direction that turns on its own instead of on a fixed schedule.
+        driftCounts = when (Random.nextInt(100)) {
+            in 0..59 -> 1
+            in 60..87 -> 2
+            in 88..96 -> 3
+            else -> 4 + Random.nextInt(3)
+        }
+        if (Random.nextInt(100) < 30) {
+            driftSign = -driftSign
+        }
+
+        val stepYaw = (driftSign * driftCounts).toFloat() * RotationUtil.gcd.toFloat()
+        // The hand is far less busy vertically: most of the time the pitch does not move at all.
+        val stepPitch = if (pitchAssist > 0f && Random.nextInt(100) < 25) {
+            (if (Random.nextBoolean()) 1f else -1f) * RotationUtil.gcd.toFloat()
+        } else {
+            0f
+        }
+        applyAim(me, aim, stepYaw, stepPitch, target)
     }
 
     /** Quantizes, hands the rotation to the camera (or to [RotationManager]) and records it. */
@@ -1607,8 +1726,8 @@ internal class AimassistCore(
         val rawYaw = deltaYaw / step + (if (gcdDither) yawCarry else 0.0)
         val rawPitch = deltaPitch / step + (if (gcdDither) pitchCarry else 0.0)
 
-        val countsYaw: Int
-        val countsPitch: Int
+        var countsYaw: Int
+        var countsPitch: Int
 
         if (gcdDither) {
             countsYaw = handRound(rawYaw)
@@ -1620,9 +1739,103 @@ internal class AimassistCore(
             countsPitch = round(rawPitch).toInt()
         }
 
+        // The hand on top of the lattice: whole counts of noise, never the same pair twice, and now
+        // and then a count past the goal. Everything above made the step land on whole mouse counts
+        // (which a real mouse does too); this is what makes two consecutive steps different, and
+        // that is the only part a check can actually measure.
+        val hand = handOnLattice(countsYaw, countsPitch, deltaYaw, deltaPitch)
+        countsYaw = hand.first
+        countsPitch = hand.second
+
         // pitch is clamped by the caller on the absolute value, so the +-90 boundary that servers
         // treat as an untouched pitch is never crossed here either
         return (countsYaw * step).toFloat() to (countsPitch * step).toFloat()
+    }
+
+    /**
+     * The last thing a script does not have: a hand on the mouse.
+     *
+     * A tracking aim that lands exactly on the goal every tick produces a *geometric* sequence of
+     * deltas — 21, 15, 10, 7, 5, 3, 2, 1 counts — with the same ratio between neighbours, and then a
+     * handful of values repeating forever once it is on target. Two numbers describe that shape and
+     * they are the two components of the flag: few distinct values (`Distinct`) and a constant
+     * speed/ratio, which is what a pathfinder looks like (`Baritone`).
+     *
+     * Three things break it, and all three are what a person does with a mouse rather than what a
+     * controller does with a number:
+     *
+     *  - [mouseNoise] whole counts on every step, so the ratio between two steps is never the same;
+     *  - a step that would repeat the previous one to the count is nudged, because a person does not
+     *    land twice on exactly the same pair of numbers;
+     *  - [overshoot] a count too far now and then, taken back on the next tick.
+     *
+     * The residual carried by [gcdDither] is computed **before** this, so the noise never
+     * accumulates: it wobbles the aim, it does not walk it away from the target.
+     */
+    private fun handOnLattice(
+        countsYaw: Int,
+        countsPitch: Int,
+        deltaYaw: Double,
+        deltaPitch: Double,
+    ): Pair<Int, Int> {
+        var yaw = countsYaw
+        var pitch = countsPitch
+
+        val noise = mouseNoise
+        if (noise > 0) {
+            yaw += noiseCounts(noise)
+            // The hand is busier horizontally: the pitch gets one count less of noise, and only
+            // when it is moving anyway most of the time.
+            if (deltaPitch != 0.0 || Random.nextInt(100) < 30) {
+                pitch += noiseCounts(noise.coerceAtMost(1))
+            }
+        }
+
+        // A step that repeats the previous one to the count is a repeated computation. Break the tie
+        // on one axis only, so the aim is not pushed away from the goal twice in the same tick.
+        if (lastCountsYaw != null && yaw == lastCountsYaw && pitch == lastCountsPitch) {
+            if (Random.nextBoolean()) {
+                yaw += if (Random.nextBoolean()) 1 else -1
+            } else {
+                pitch += if (Random.nextBoolean()) 1 else -1
+            }
+        }
+
+        // Now and then a count too far, taken back on the next tick: the most human thing in the
+        // whole pipeline, and the one that keeps the sum moving instead of settling on a number.
+        if (overshoot > 0 && Random.nextInt(100) < overshoot) {
+            val yawSign = when {
+                deltaYaw > 0.0 -> 1
+                deltaYaw < 0.0 -> -1
+                yaw > 0 -> 1
+                yaw < 0 -> -1
+                else -> 0
+            }
+            if (yawSign != 0) {
+                yaw += yawSign
+            }
+            if (deltaPitch != 0.0) {
+                pitch += if (deltaPitch > 0) 1 else -1
+            }
+        }
+
+        lastCountsYaw = yaw
+        lastCountsPitch = pitch
+        return yaw to pitch
+    }
+
+    /** Noise in whole counts: mostly ±1, sometimes ±2, a third of the time nothing at all. */
+    private fun noiseCounts(bound: Int): Int {
+        val roll = Random.nextInt(100)
+        val amplitude = when {
+            bound >= 2 && roll >= 84 -> 2
+            roll >= 30 -> 1
+            else -> 0
+        }
+        if (amplitude == 0) {
+            return 0
+        }
+        return if (Random.nextBoolean()) amplitude else -amplitude
     }
 
     /** Nearest whole mouse count, with the decision boundary wobbling like a human hand. */
@@ -1646,8 +1859,8 @@ internal class AimassistCore(
                 target.name.string, target.distanceTo(me), crosshairOffset(target),
                 bubble(me, target), aimed.yaw, aimed.pitch, silent,
                 if (presetName.isEmpty()) "-" else presetName
-            ) + "§7strength=%.0f%% max=%.1f° own=%.2f°".format(
-                strength, maxSpeed, lastOwnYaw
+            ) + "§7strength=%.0f%% max=%.1f° own=%.2f° counts=%+d/%+d noise=%d".format(
+                strength, maxSpeed, lastOwnYaw, lastCountsYaw ?: 0, lastCountsPitch ?: 0, mouseNoise
             ) + (if (engine == Engine.AI) " §7$lastAiNote" else "") + warnings()
         )
     }
@@ -1670,6 +1883,9 @@ internal class AimassistCore(
         if (maxSpeed > 15f) append(" §cMaxSpeed>15 (packets can carry a snap)")
         if (!onlyOnCrosshair && fov > 45f) append(" §cOnlyOnCrosshair off with Fov>45 (wide magnet)")
         if (!gcdFix) append(" §cGcdFix off (deltas off the mouse lattice)")
+        if (gcdFix && mouseNoise <= 0) {
+            append(" §cMouseNoise 0 (every delta repeats: Distinct flag)")
+        }
         if (engine == Engine.AI && aiUnavailableReason != null) {
             append(" §cAI fallback (${aiUnavailableReason})")
         }

@@ -73,6 +73,20 @@ internal class AimbotValues(group: ValueGroup) : AimSettings {
     override val gcdFix by group.boolean("GcdFix", true)
     override val gcdDither by group.boolean("GcdDither", false)
 
+    /**
+     * Whole mouse counts of noise on every step, added after the quantisation. Without it an aimbot
+     * that lands exactly every tick produces a geometric sequence of deltas (same ratio between
+     * neighbours) and then repeats the same two values forever — the two components of the
+     * "machine-like rotations" flag: `Distinct` and `Baritone`.
+     */
+    override val mouseNoise by group.int("MouseNoise", 1, 0..4, "counts")
+
+    /** How often (in %) the hand lands one count past the goal; the next tick takes it back. */
+    override val overshoot by group.int("Overshoot", 8, 0..30, "%")
+
+    /** Spread of [strength] drawn per target: the speed of the pull is not a constant. */
+    override val strengthSpread by group.int("StrengthSpread", 15, 0..50, "%")
+
     /** A trace of noise on the step, in degrees, so the path is not a perfect curve. */
     private val jitter by group.float("Jitter", 0.03f, 0f..2f, "°")
 
