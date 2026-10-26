@@ -29,6 +29,7 @@ import net.minecraft.util.Util
 import net.minecraft.world.InteractionResult
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl
+import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
 import net.minecraft.world.level.block.SupportType
 import net.minecraft.world.phys.BlockHitResult
@@ -64,7 +65,9 @@ import kotlin.random.Random
  *     counts: a pearl that crosses the spot while still rising flies on and hits the side of the
  *     platform. That fit is only a guess — [verify] then judges it and a few variants of it with
  *     LiquidBounce's collision-aware simulation, which is the only thing that knows what is in
- *     between, and the first arc that lands on a block *top* wins;
+ *     between. The simulation clips a point, while a pearl is a box, so the impact has to sit
+ *     [edgeMargin] inside the top face — otherwise an edge graze counts as a top hit in the
+ *     simulation and as a side hit in the world;
  *  2. [humanize] — the rotation is stepped towards with [maxTurn] degrees per tick and quantized to
  *     whole mouse counts ([gcdFix] + [gcdDither]), so every throw is a rotation a real mouse could
  *     have produced;
@@ -83,6 +86,13 @@ import kotlin.random.Random
  * a block top the one whose pearl lands in the fewest ticks is thrown — the pearl has to touch the
  * ground before the player is already gone.
  *
+ * What the pearl inherits from the player is the least certain input in the whole calculation: the
+ * server throws it along the velocity *it* has for the player, which lags the client's by a tick, and
+ * a tick of knockback is a lot — and it may even disagree on whether you are airborne. So every
+ * landing is also simulated with that inherited velocity scaled by [VELOCITY_TRUST] and with no fall
+ * inherited at all ([deviations]); the throw that survives all of it beats a quicker, more fragile
+ * one.
+ *
  * ### Where the pearl comes from
  *
  * `OffhandWithHotbar`, i.e. the off hand or any hotbar slot, selected silently: your screen and your
@@ -96,6 +106,7 @@ import kotlin.random.Random
  *   SafeMemory      how long (ms) the remembered safe spot stays valid
  *   SafeSearch      radius (blocks) searched for another landing spot
  *   LandingTolerance  how far the arc may drift from the spot between two ticks
+ *   EdgeMargin      how far inside a block top the pearl must land (a pearl is not a point)
  *   EnemyRange      max distance of the target in Enemy mode
  *   EnemyTolerance  how close to the enemy the pearl has to land
  *   EnemyTrigger    Always, or only while you are in the air
@@ -185,7 +196,15 @@ object ModuleAutoPearlAI : ClientModule(
     private const val FAST_LANDING_TICKS = 8
 
     /** Hard cap on the collision-aware simulations spent on one plan. */
-    private const val MAX_SIMULATIONS = 48
+    private const val MAX_SIMULATIONS = 36
+
+    /**
+     * The player's own velocity is the least reliable input there is: the server throws the pearl
+     * along the velocity *it* has for the player, which lags the client's by a tick, and a tick of
+     * knockback is a lot. Landings are therefore also tested with the inherited velocity scaled by
+     * these factors, and an arc that survives them is preferred.
+     */
+    private val VELOCITY_TRUST = doubleArrayOf(0.85, 1.15)
 
     /**
      * How long (ms) to wait after a plan failed before planning again. Planning is the expensive part
@@ -230,6 +249,13 @@ object ModuleAutoPearlAI : ClientModule(
     private val safeSearch by safeSearchValue
     private val landingToleranceValue = float("LandingTolerance", 0.6f, 0.2f..3.0f, "blocks")
     private val landingTolerance by landingToleranceValue
+
+    /**
+     * How far inside the top face the pearl has to land, in blocks. The pearl is not a point: it has
+     * a hitbox, so a throw that grazes the edge of a block lands on its *side* instead of its top.
+     */
+    private val edgeMarginValue = float("EdgeMargin", 0.3f, 0.0f..0.6f, "blocks")
+    private val edgeMargin by edgeMarginValue
 
     // --- enemy --------------------------------------------------------------------------------
 
@@ -591,13 +617,12 @@ object ModuleAutoPearlAI : ClientModule(
         }
 
         // Every candidate costs real simulations and the player is falling while this runs, so the
-        // work is capped and the search stops as soon as a landing is quick. Among the landings that
-        // are found, the shortest flight wins: the pearl has to touch the ground before the player is
-        // already gone, so a spot two blocks away in eight ticks beats the perfect spot in thirty.
+        // work is capped and the search stops as soon as a landing is quick *and* robust. Landings are
+        // collected instead of taken one by one: among them the one that survives the velocity being
+        // slightly wrong wins, and among those the shortest flight.
         var solved = 0
         var simulations = 0
-        var best: Solution? = null
-        var bestTicks = Int.MAX_VALUE
+        val found = ArrayList<Landing>()
 
         search@ for (candidate in candidates) {
             if (solved >= MAX_SOLVED || simulations >= MAX_SIMULATIONS) break
@@ -624,23 +649,27 @@ object ModuleAutoPearlAI : ClientModule(
                     val impact = verify(rotation) ?: continue
                     if (!isSafeLanding(impact.hit)) {
                         if (debug) {
-                            chat("§7[AutoPearl] §7simulated landing at ${format(impact.hit.location)} is not safe")
+                            chat("§7[AutoPearl] §7landing at ${format(impact.hit.location)} is not on top")
                         }
                         continue
                     }
 
-                    if (impact.ticks < bestTicks) {
-                        bestTicks = impact.ticks
-                        best = Solution(rotation, "save", impact.hit.location)
-                    }
+                    val robust = robustness(me, rotation)
+                    simulations += deviations(me).size
+                    found += Landing(rotation, impact.hit.location, impact.ticks, robust)
 
-                    if (impact.ticks <= FAST_LANDING_TICKS) break@search
+                    if (robust == deviations(me).size && impact.ticks <= FAST_LANDING_TICKS) break@search
                 }
             }
         }
 
-        val result = best
-        if (result == null) {
+        // A throw that still lands when the inherited velocity is off by 15% is worth more than one
+        // that only works on paper; after that, the quickest landing wins.
+        val best = found.minWithOrNull(
+            compareByDescending<Landing> { it.robust }.thenBy { it.ticks }
+        )
+
+        if (best == null) {
             if (debug) {
                 val why = when {
                     solved == 0 -> "no candidate could be solved"
@@ -653,10 +682,17 @@ object ModuleAutoPearlAI : ClientModule(
         }
 
         if (debug) {
-            chat("§7[AutoPearl] §fplan §asave§f in §7$bestTicks ticks§f → ${format(result.landing)}")
+            chat(
+                "§7[AutoPearl] §fplan §asave§f in §7${best.ticks} ticks§f (steady ${best.robust}/${deviations(me).size}) → ${
+                    format(best.landing)
+                }"
+            )
         }
-        return result
+        return Solution(best.rotation, "save", best.landing)
     }
+
+    /** A landing the simulation accepted, with the two numbers that make one better than another. */
+    private data class Landing(val rotation: Rotation, val landing: Vec3, val ticks: Int, val robust: Int)
 
     /**
      * Where the pearl could land, closest to the player first: the shorter the throw, the sooner the
@@ -714,6 +750,16 @@ object ModuleAutoPearlAI : ClientModule(
         if (hit.direction != Direction.UP) return false
 
         val block = hit.blockPos
+
+        // The simulation clips a *point* against the world, but the pearl is a box: an arc that only
+        // grazes the edge of a block is reported as a hit on its top face and still, in the real
+        // world, smacks into its side one tick earlier. So the impact has to sit well inside the top
+        // face, not on its border.
+        val location = hit.location
+        val margin = edgeMargin.toDouble()
+        if (location.x - block.x < margin || block.x + 1.0 - location.x < margin) return false
+        if (location.z - block.z < margin || block.z + 1.0 - location.z < margin) return false
+
         val state = world.getBlockState(block)
         if (!state.isFaceSturdy(world, block, Direction.UP, SupportType.CENTER)) return false
 
@@ -1024,20 +1070,82 @@ object ModuleAutoPearlAI : ClientModule(
      * decides between two otherwise valid throws: the pearl that lands sooner is the pearl that
      * arrives while the player is still there.
      */
-    private fun verify(rotation: Rotation): Impact? {
-        val simulation = TrajectoryInfoRenderer.getHypotheticalTrajectory(
-            simulationOwner = player,
-            trajectoryInfo = TrajectoryInfo.GENERIC,
-            trajectoryType = TrajectoryType.EnderPearl,
-            rotation = rotation,
-            // keep the start position identical to [throwStart], no partial-tick interpolation
-            partialTicks = 0f
-        ).runSimulation(MAX_SIM_TICKS)
+    private fun verify(rotation: Rotation): Impact? = verify(rotation, null)
+
+    /**
+     * The velocities the player might really have, as far as the server is concerned.
+     *
+     * One is uncertain by ±15%, but there is a bigger one: whether the server still thinks the player
+     * is standing. The client only inherits its `y` velocity while airborne, so if the two sides
+     * disagree on that, the pearl misses the extra ~1 block/tick of fall — which is the difference
+     * between landing on the platform and slamming into its edge.
+     */
+    private fun deviations(me: LocalPlayer): List<Vec3> {
+        val carried = Vec3(
+            me.deltaMovement.x,
+            if (me.onGround()) 0.0 else me.deltaMovement.y,
+            me.deltaMovement.z
+        )
+
+        return listOf(
+            carried.scale(VELOCITY_TRUST[0]),
+            carried.scale(VELOCITY_TRUST[1]),
+            // the server still has you on the ground: no fall is inherited at all
+            Vec3(carried.x, 0.0, carried.z)
+        )
+    }
+
+    /**
+     * The same simulation, with the part of the velocity the pearl inherits given explicitly.
+     *
+     * null means "what the client thinks" and goes through LiquidBounce's own path; anything else is a
+     * deliberate deviation. The look direction is never touched — that is the part the throw
+     * controls.
+     */
+    private fun verify(rotation: Rotation, carried: Vec3?): Impact? {
+        val simulation = if (carried == null) {
+            // the nominal case stays LiquidBounce's own path, so Freeze and friends behave as usual
+            TrajectoryInfoRenderer.getHypotheticalTrajectory(
+                simulationOwner = player,
+                trajectoryInfo = TrajectoryInfo.GENERIC,
+                trajectoryType = TrajectoryType.EnderPearl,
+                rotation = rotation,
+                // keep the start position identical to [throwStart], no partial-tick interpolation
+                partialTicks = 0f
+            ).runSimulation(MAX_SIM_TICKS)
+        } else {
+            val me = mc.player ?: return null
+            val look = rotation.directionVector.scale(PEARL_SPEED)
+
+            TrajectoryInfoRenderer(
+                simulationOwner = player,
+                displayOwner = player,
+                icon = ItemStack.EMPTY,
+                velocity = Vec3(
+                    look.x + carried.x,
+                    look.y + carried.y,
+                    look.z + carried.z
+                ),
+                pos = throwStart(me),
+                trajectoryInfo = TrajectoryInfo.GENERIC,
+                trajectoryType = TrajectoryType.EnderPearl,
+                type = TrajectoryInfoRenderer.Type.HYPOTHETICAL,
+                renderOffset = Vec3.ZERO
+            ).runSimulation(MAX_SIM_TICKS)
+        }
 
         val hit = simulation.hitResult ?: return null
         if (hit.type == HitResult.Type.MISS) return null
         return Impact(hit, simulation.positions.size)
     }
+
+    /**
+     * How many of the perturbed simulations still land on a block top, i.e. how much this throw can be
+     * trusted while the velocity it inherits is uncertain. 0 means "it only works if the client's
+     * velocity happens to be exactly right".
+     */
+    private fun robustness(me: LocalPlayer, rotation: Rotation): Int =
+        deviations(me).count { carried -> isSafeLanding(verify(rotation, carried)?.hit) }
 
     /** The rotation the aim is at: what the server sees when silent, the camera otherwise. */
     private fun currentRotation(me: LocalPlayer): Rotation =
