@@ -1055,7 +1055,7 @@ object ModuleAimbotAI : ClientModule("Aimbot AI", Categories.LIQUIDADDON) {
      *  - an occasional "flinch": 1-3 ticks noticeably slower or faster, like a hand that slips.
      */
     private fun tickVariation(): Float {
-        chaos = 3.99f * chaos * (1f - chaos)
+        chaos *= 3.99f * (1f - chaos)
         if (chaos <= 0.001f || chaos >= 0.999f) chaos = 0.51f
         val chaotic = (chaos - 0.5f) * 2f
 
