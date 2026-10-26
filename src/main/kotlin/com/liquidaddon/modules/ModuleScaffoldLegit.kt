@@ -6,6 +6,9 @@ import net.ccbluex.liquidbounce.event.events.GameTickEvent
 import net.ccbluex.liquidbounce.event.events.MovementInputEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
+import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
+import net.ccbluex.liquidbounce.utils.block.SwingMode
+import net.ccbluex.liquidbounce.utils.block.doPlacement
 import net.ccbluex.liquidbounce.utils.movement.DirectionalInput
 import net.minecraft.client.KeyMapping
 import net.minecraft.client.Minecraft
@@ -54,6 +57,20 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     // Range Sliders con la doppia pallina per i Delay
     private val shiftDelay by intRange("Shift Delay", 0..2, 0..20, "ticks")
     private val jumpDelay by intRange("Jump Delay", 0..1, 0..20, "ticks")
+
+    /**
+     * The placement animation, the same choice LiquidBounce's own Scaffold exposes: which side gets
+     * the arm swing when a block is placed.
+     *
+     *  - `DoNotHide`   — the hand swings for the client and the swing packet is sent (vanilla look);
+     *  - `HideForBoth` — no animation at all, the block just appears;
+     *  - `HideForClient` — only the server sees the swing, the hand on your screen stays still;
+     *  - `HideForServer` — only your screen animates, the server gets no swing.
+     *
+     * It is applied through LiquidBounce's own placement helper, so the animation happens on the
+     * exact tick the block is placed instead of being left to whatever vanilla decides afterwards.
+     */
+    private val swingMode by enumChoice("Swing", SwingMode.DO_NOT_HIDE)
 
     private val chatLog by boolean("ChatLog", true)
     private val debug by boolean("Debug", false)
@@ -186,7 +203,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         if (readyTicks++ < delay) {
             return
         }
-        click()
+        place(me)
         phase = Phase.WALK
         stepBlock = cell
         waitTicks = 0
@@ -242,7 +259,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         if (readyTicks++ < delay) {
             return
         }
-        click()
+        place(me)
         debug(me, "aria tick $airTicks: clic sulla faccia di sopra")
         placedInAir = true
         airTickSum += airTicks
@@ -319,8 +336,27 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         walkZ = (forward * cos(yaw) + strafe * sin(yaw)) / length
     }
 
-    /** One right click for this tick's handleKeybinds, as if the player had pressed the use key. */
-    private fun click() {
+    /**
+     * Places the block the crosshair is pointing at, with the animation [swingMode] asks for.
+     *
+     * This is LiquidBounce's own `doPlacement`, the one its Scaffold uses: it calls the very same
+     * `useItemOn` the vanilla use key would, and then reports the swing of the placement exactly as
+     * the chosen mode says (client animation, swing packet, both or neither). Doing it here, on the
+     * tick the module decided to place, is also what makes the animation land on the placement
+     * instead of a tick or two later.
+     *
+     * If the crosshair is not on a block (it was, a few lines earlier: this is only a safety net),
+     * the click is queued for `handleKeybinds` as before and vanilla places it with its own swing.
+     */
+    private fun place(me: LocalPlayer) {
+        val hit = mc.hitResult as? BlockHitResult
+        if (hit != null && hit.type == HitResult.Type.BLOCK) {
+            runCatching {
+                doPlacement(hit, Rotation(me.yRot, me.xRot), swingMode = swingMode)
+            }.onSuccess {
+                return
+            }
+        }
         val key = mc.options.keyUse
         clickCount.setInt(key, clickCount.getInt(key) + 1)
     }

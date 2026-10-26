@@ -19,6 +19,7 @@ import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
 import net.ccbluex.liquidbounce.utils.entity.lastPos
 import net.ccbluex.liquidbounce.utils.entity.squaredBoxedDistanceTo
 import net.ccbluex.liquidbounce.utils.kotlin.Priority as RotationPriority
+import net.ccbluex.liquidbounce.utils.render.TargetRenderer
 import net.minecraft.client.Minecraft
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.util.Mth
@@ -323,6 +324,17 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
             chat("§7[Aimbot] §fpreset ${preset.tag} applied")
         }
     }
+
+    /**
+     * The circle under the target, the same renderer LiquidBounce's KillAura uses: the blue ring
+     * (`Circle` / `GlowingCircle`, outline `0x007CFF`) with its radius, inner radius, height mode
+     * and colours, all configurable in the GUI. It draws under [currentTarget] every frame and
+     * nothing while the module is not aiming at anybody.
+     *
+     * It is only a renderer: it never touches the aim.
+     */
+    @Suppress("unused")
+    private val targetRendering = tree(TargetRenderer(this) { currentTarget })
 
     init {
         // Switching preset rewrites the sliders; CUSTOM leaves them alone. Nothing is applied here:

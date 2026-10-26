@@ -23,6 +23,7 @@ import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
 import net.ccbluex.liquidbounce.utils.entity.lastPos
 import net.ccbluex.liquidbounce.utils.entity.squaredBoxedDistanceTo
 import net.ccbluex.liquidbounce.utils.kotlin.Priority as RotationPriority
+import net.ccbluex.liquidbounce.utils.render.TargetRenderer
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.util.Mth
 import net.minecraft.world.entity.LivingEntity
@@ -472,6 +473,18 @@ object ModuleAimassist : ClientModule("Aimassist", Categories.LIQUIDADDON) {
             chat("§7[Aimassist] §fpreset ${preset.tag} applied")
         }
     }
+
+    /**
+     * The circle under the target, exactly the one KillAura and Aimbot draw: LiquidBounce's own
+     * [TargetRenderer], so the blue ring (`Circle` / `GlowingCircle`, outline `0x007CFF`), its
+     * radius, its inner radius, its height mode and its colours are all configurable in the GUI
+     * like there. Every frame it draws under the entity this module is currently helping with
+     * ([currentTarget]), and nothing at all while there is no target.
+     *
+     * It is only a renderer: it never touches the aim.
+     */
+    @Suppress("unused")
+    private val targetRendering = tree(TargetRenderer(this) { currentTarget })
 
     init {
         // Switching preset rewrites the sliders; CUSTOM leaves them alone. Nothing is applied while
