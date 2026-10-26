@@ -9,7 +9,6 @@ import net.ccbluex.liquidbounce.utils.aiming.RotationManager
 import net.ccbluex.liquidbounce.utils.aiming.RotationTarget
 import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
 import net.ccbluex.liquidbounce.utils.aiming.features.MovementCorrection
-import net.ccbluex.liquidbounce.utils.aiming.projectiles.SituationalProjectileAngleCalculator
 import net.ccbluex.liquidbounce.utils.aiming.utils.RotationUtil
 import net.ccbluex.liquidbounce.utils.block.SwingMode
 import net.ccbluex.liquidbounce.utils.client.SilentHotbar
@@ -28,7 +27,6 @@ import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
 import net.minecraft.util.Util
 import net.minecraft.world.InteractionResult
-import net.minecraft.world.entity.EntityDimensions
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl
 import net.minecraft.world.item.Items
@@ -36,14 +34,15 @@ import net.minecraft.world.level.block.SupportType
 import net.minecraft.world.phys.HitResult
 import net.minecraft.world.phys.Vec3
 import kotlin.math.round
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 /**
  * AutoPearl — a pearl for TNT sumo: it throws an ender pearl at a spot that saves you.
  *
  * In TNT sumo you are knocked off a small platform over the void, and the only way back is an ender
- * pearl. A pearl is not "aim at the block": it is a ballistic throw, so this module solves the arc
- * with LiquidBounce's own projectile calculator and verifies it with LiquidBounce's own trajectory
+ * pearl. A pearl is not "aim at the block": it is a ballistic throw, so this module fits the arc
+ * against vanilla's own physics and verifies it with LiquidBounce's collision-aware trajectory
  * simulation *before* spending a pearl.
  *
  * Two modes:
@@ -57,9 +56,12 @@ import kotlin.random.Random
  *
  * Same pipeline as the Aimassist module, because the throw is a rotation like any other:
  *
- *  1. [solve] — the ballistic rotation comes from `SituationalProjectileAngleCalculator` (the solver
- *     LiquidBounce uses for bows, pearls and potions), then the arc is simulated to make sure it
- *     really ends where we want it. A pearl that would land in the void is never thrown;
+ *  1. [solveThrow] — the throw rotation is **fitted to the physics**, not computed with a
+ *     closed-form solver: those assume you stand still, while a pearl inherits your own velocity
+ *     (and while you are falling that is most of the throw). Both the pitch and the yaw are
+ *     searched until the simulated arc passes through the target; [verify] then replays the winning
+ *     arc with LiquidBounce's collision-aware simulation, so a pearl that would end in the void is
+ *     never thrown;
  *  2. [humanize] — the rotation is stepped towards with [maxTurn] degrees per tick and quantized to
  *     whole mouse counts ([gcdFix] + [gcdDither]), so every throw is a rotation a real mouse could
  *     have produced;
@@ -84,6 +86,7 @@ import kotlin.random.Random
  *   SafeSearch      radius (blocks) searched for another landing spot
  *   LandingTolerance  how close the simulated landing must be to the intended spot
  *   EnemyRange      max distance of the target in Enemy mode
+ *   EnemyTolerance  how close to the enemy the pearl has to land
  *   EnemyTrigger    Always, or only while you are in the air
  *   Rotate          turn to the solution instead of throwing immediately
  *   MaxTurn         degrees corrected per tick while turning
@@ -114,8 +117,37 @@ object ModuleAutoPearlAI : ClientModule(
     /** How much the rounding boundary may wobble, in mouse counts (same value as the Aimassist). */
     private const val DITHER_WOBBLE = 0.18
 
-    /** How many candidate landing spots are solved (each one costs a trajectory simulation). */
+    /** How many candidate landing spots are solved (each one costs a ballistic sweep). */
     private const val MAX_CANDIDATES = 16
+
+    /** How many of those candidates are actually solved per attempt. */
+    private const val MAX_SOLVED = 6
+
+    // --- vanilla physics of a thrown pearl, as LiquidBounce's simulation models it ---------------
+
+    /** Speed a pearl leaves the hand with. */
+    private const val PEARL_SPEED = 1.5
+
+    /** Air drag applied every tick. */
+    private const val PROJECTILE_DRAG = 0.99
+
+    /** Gravity applied every tick. */
+    private const val PROJECTILE_GRAVITY = 0.03
+
+    /** First pass over the whole pitch circle, in degrees. */
+    private const val COARSE_STEP = 3f
+
+    /** Local refinement around the coarse winner (and the yaw), in degrees. */
+    private const val FINE_STEP = 0.25f
+
+    /** How far the refinement looks around the coarse winner. */
+    private const val REFINE_SPAN = 3f
+
+    /** How far the yaw may move away from the geometric one while the arc is being fitted. */
+    private const val YAW_SPAN = 15f
+
+    /** The arc is only followed while it stays this far below the throw point. */
+    private const val ARC_DROP_LIMIT = 48.0
 
     enum class Mode(override val tag: String) : Tagged {
         SAVE("Save"), ENEMY("Enemy")
@@ -155,6 +187,10 @@ object ModuleAutoPearlAI : ClientModule(
     private val landingTolerance by landingToleranceValue
 
     // --- enemy --------------------------------------------------------------------------------
+
+    /** How close to the enemy the pearl has to land to count as a hit on them. */
+    private val enemyToleranceValue = float("EnemyTolerance", 1.5f, 0.5f..4f, "blocks")
+    private val enemyTolerance by enemyToleranceValue
 
     private val enemyRangeValue = float("EnemyRange", 12f, 3f..30f, "blocks")
     private val enemyRange by enemyRangeValue
@@ -289,9 +325,12 @@ object ModuleAutoPearlAI : ClientModule(
             Mode.ENEMY -> solveEnemy(me)
         } ?: return
 
-        // No turning wanted: the throw happens right now, with the solved rotation.
+        // No turning wanted: the throw happens right now, with the solved rotation (still put on the
+        // mouse lattice, so it is a rotation a mouse could have produced) and with the same gate.
         if (!rotate) {
-            throwPearl(me, solution)
+            val aim = humanize(currentRotation(me), solution.rotation, limitTurn = false)
+            if (!landsWhereWanted(aim, solution.landing, tolerance())) return
+            throwPearl(me, solution.copy(rotation = aim))
             return
         }
 
@@ -311,13 +350,67 @@ object ModuleAutoPearlAI : ClientModule(
             return
         }
 
-        val aim = humanize(currentRotation(me), solution.rotation)
+        // While falling, both the spawn point and the inherited velocity change every tick, so the
+        // arc is re-solved each tick instead of being frozen at the moment the plan was made.
+        val target = when (mode) {
+            Mode.SAVE -> solution.landing
+            Mode.ENEMY -> nearestEnemy(me)?.boundingBox?.center ?: run {
+                cancelPlan()
+                return
+            }
+        }
+        val tolerance = tolerance()
+
+        val rotation = solveThrow(me, target, tolerance) ?: run {
+            if (debug) chat("§7[AutoPearl] §cthe arc stopped reaching the target")
+            cancelPlan()
+            return
+        }
+
+        val aim = humanize(currentRotation(me), rotation)
         handToManager(aim)
 
         if (RotationManager.serverRotation.directionAngleTo(aim) > aimTolerance) return
 
-        throwPearl(me, solution.copy(rotation = aim))
+        if (!landsWhereWanted(aim, target, tolerance)) return
+
+        throwPearl(me, solution.copy(rotation = aim, landing = target))
     }
+
+    /**
+     * The last gate before a pearl is spent: LiquidBounce's collision-aware simulation has to end the
+     * arc on a safe block (Save) or next to the enemy (Enemy). This is what keeps the module from
+     * throwing pearls into the void when the ballistic fit looks right but a wall is in the way.
+     */
+    private fun landsWhereWanted(rotation: Rotation, target: Vec3, tolerance: Double): Boolean {
+        if (!simulate) return true
+
+        val landing = verify(rotation) ?: run {
+            if (debug) chat("§7[AutoPearl] §cthe simulated arc hits nothing")
+            return false
+        }
+
+        return when (mode) {
+            Mode.SAVE -> isSafeLanding(landing) || run {
+                if (debug) chat("§7[AutoPearl] §7would land at ${format(landing)}, not safe")
+                false
+            }
+
+            Mode.ENEMY -> landing.distanceTo(target) <= tolerance || run {
+                if (debug) {
+                    chat(
+                        "§7[AutoPearl] §7would land at ${format(landing)}, %.2f from the target"
+                            .format(landing.distanceTo(target))
+                    )
+                }
+                false
+            }
+        }
+    }
+
+    /** How close the pearl has to land, per mode. */
+    private fun tolerance(): Double =
+        if (mode == Mode.SAVE) landingTolerance.toDouble() else enemyTolerance.toDouble()
 
     // --- throwing -----------------------------------------------------------------------------
 
@@ -351,7 +444,7 @@ object ModuleAutoPearlAI : ClientModule(
 
         if (chatLog) {
             chat(
-                "§7[AutoPearl] §fthrown at §7${solution.label}§f, landing %.2f blocks away"
+                "§7[AutoPearl] §fthrown at §7${solution.label}§f, %.2f blocks away"
                     .format(solution.landing.distanceTo(me.position()))
             )
         }
@@ -412,14 +505,45 @@ object ModuleAutoPearlAI : ClientModule(
     }
 
     private fun solveSave(me: LocalPlayer): Solution? {
-        for (candidate in landingCandidates(me)) {
-            val rotation = solve(candidate) ?: continue
-            if (simulate && !landsAt(rotation, candidate, landingTolerance.toDouble())) continue
+        val candidates = landingCandidates(me)
+        if (candidates.isEmpty()) {
+            if (debug) chat("§7[AutoPearl] §cno safe landing found (no block tops around)")
+            return null
+        }
+
+        val solutions = ArrayList<Pair<Rotation, Vec3>>()
+        for (candidate in candidates.take(MAX_SOLVED)) {
+            val rotation = solveThrow(me, candidate, landingTolerance.toDouble()) ?: continue
+            solutions += rotation to candidate
+        }
+
+        if (solutions.isEmpty()) {
+            if (debug) {
+                chat("§7[AutoPearl] §cno safe landing found (no arc reaches the ${candidates.size} candidates)")
+            }
+            return null
+        }
+
+        if (!simulate) {
+            val (rotation, candidate) = solutions.first()
             if (debug) chat("§7[AutoPearl] §fplan §asave§f → ${format(candidate)}")
             return Solution(rotation, "save", candidate)
         }
 
-        if (debug) chat("§7[AutoPearl] §cno safe landing found")
+        // The sweep ignores collisions; confirm with LiquidBounce's simulation. The first arc that
+        // ends on a safe block wins, even if it is not exactly the candidate we aimed at — a pearl
+        // on the platform one block off is worth more than no pearl at all.
+        for ((rotation, candidate) in solutions) {
+            val landing = verify(rotation) ?: continue
+            if (!isSafeLanding(landing)) {
+                if (debug) chat("§7[AutoPearl] §7simulated landing at ${format(landing)} is not safe")
+                continue
+            }
+            if (debug) chat("§7[AutoPearl] §fplan §asave§f → ${format(candidate)}")
+            return Solution(rotation, "save", candidate)
+        }
+
+        if (debug) chat("§7[AutoPearl] §cno safe landing found (no arc survived the simulation)")
         return null
     }
 
@@ -460,7 +584,12 @@ object ModuleAutoPearlAI : ClientModule(
      * in is free. That is all a floating sumo platform can offer.
      */
     private fun isSafeLanding(point: Vec3): Boolean {
-        val block = BlockPos.containing(point.x, point.y - 0.1, point.z)
+        val block = BlockPos.containing(point.x, point.y - 0.05, point.z)
+
+        // A pearl that hits the side of a block is not saved, however solid that block is: only a
+        // point sitting on the top surface counts.
+        if (point.y < block.y + 1.0 - 0.35) return false
+
         val state = world.getBlockState(block)
         if (!state.isFaceSturdy(world, block, Direction.UP, SupportType.CENTER)) return false
 
@@ -478,14 +607,21 @@ object ModuleAutoPearlAI : ClientModule(
             return null
         }
 
-        val rotation = SituationalProjectileAngleCalculator.calculateAngleForEntity(
-            TrajectoryInfo.GENERIC, target
-        ) ?: return null
-
         val landing = target.boundingBox.center
-        if (simulate && !landsNear(rotation, landing, 2.0)) {
-            if (debug) chat("§7[AutoPearl] §cthe arc does not reach ${target.name.string}")
-            return null
+
+        // Same sweep as the save mode, so the fall velocity is taken into account here too.
+        val rotation = solveThrow(me, landing, enemyTolerance.toDouble())
+            ?: run {
+                if (debug) chat("§7[AutoPearl] §cthe arc does not reach ${target.name.string}")
+                return null
+            }
+
+        if (simulate) {
+            val hit = verify(rotation)
+            if (hit == null || hit.location.distanceTo(landing) > enemyTolerance.toDouble()) {
+                if (debug) chat("§7[AutoPearl] §cthe simulated arc misses ${target.name.string}")
+                return null
+            }
         }
 
         if (debug) chat("§7[AutoPearl] §fplan §cpearl §f→ §7${target.name.string}")
@@ -499,42 +635,181 @@ object ModuleAutoPearlAI : ClientModule(
         .filter { it.squaredBoxedDistanceTo(me) <= enemyRange.toDouble() * enemyRange }
         .minByOrNull { it.squaredBoxedDistanceTo(me) }
 
-    // --- aim: the same pipeline as the Aimassist ----------------------------------------------
+    // --- ballistics: solved by sweeping the arc, not analytically -----------------------------
 
-    /** The ballistic rotation that puts a pearl on [point], or null when the shot is impossible. */
-    private fun solve(point: Vec3): Rotation? =
-        SituationalProjectileAngleCalculator.calculateAngleForStaticTarget(
-            TrajectoryInfo.GENERIC,
-            point,
-            EntityDimensions.fixed(0.6f, 0.1f)
+    /**
+     * The velocity a pearl really leaves the hand with: the look direction times [PEARL_SPEED], plus
+     * the player's own movement — and the vertical part of that only while airborne.
+     *
+     * This single line is what the closed-form projectiles solvers do not model, and it is why every
+     * throw used to miss by a couple of blocks: while you are falling at ~1 block/tick, the pearl
+     * inherits that fall, so the arc has to be aimed far higher than the geometry suggests.
+     */
+    private fun throwVelocity(me: LocalPlayer, rotation: Rotation): Vec3 {
+        val look = rotation.directionVector.scale(PEARL_SPEED)
+        return look.add(
+            me.deltaMovement.x,
+            if (me.onGround()) 0.0 else me.deltaMovement.y,
+            me.deltaMovement.z
         )
+    }
 
-    /** Where the pearl thrown with [rotation] would end, according to LiquidBounce's simulation. */
-    private fun simulateHit(rotation: Rotation): HitResult? =
-        TrajectoryInfoRenderer.getHypotheticalTrajectory(
+    /** Where the pearl is spawned: the eye position, 0.1 lower, like the vanilla throw. */
+    private fun throwStart(me: LocalPlayer): Vec3 = Vec3(me.x, me.eyeY - 0.1, me.z)
+
+    /**
+     * How close the collision-free arc of a pearl thrown with [rotation] passes to [point].
+     *
+     * The arc mirrors `TrajectoryInfoRenderer.runSimulation` tick for tick — one physics tick on the
+     * velocity before the first move, then `pos += velocity` followed by `velocity *= 0.99` and
+     * `velocity.y -= 0.03` — but without block collisions, because this is the evaluator the search
+     * calls a few hundred times per tick. It is written with plain doubles on purpose: allocating a
+     * list of positions here would show up in the frame time.
+     *
+     * The distance is taken to the whole polyline, not to the point where the arc crosses the
+     * target's height. Near the player the pearl crosses that plane within a tick or two, so a
+     * crossing-based error jumps around and hides the angles that actually work.
+     */
+    private fun arcDistance(me: LocalPlayer, rotation: Rotation, point: Vec3): Double {
+        val start = throwStart(me)
+        val initial = throwVelocity(me, rotation)
+
+        // initial tick correction: TrajectoryType.EnderPearl applies one before the first move
+        var vx = initial.x * PROJECTILE_DRAG
+        var vy = initial.y * PROJECTILE_DRAG - PROJECTILE_GRAVITY
+        var vz = initial.z * PROJECTILE_DRAG
+
+        var px = start.x
+        var py = start.y
+        var pz = start.z
+
+        var best = Double.MAX_VALUE
+
+        repeat(MAX_SIM_TICKS) {
+            val nx = px + vx
+            val ny = py + vy
+            val nz = pz + vz
+
+            // distance from the point to the segment (p → n)
+            val abx = nx - px
+            val aby = ny - py
+            val abz = nz - pz
+            val lengthSqr = abx * abx + aby * aby + abz * abz
+
+            val along = (point.x - px) * abx + (point.y - py) * aby + (point.z - pz) * abz
+            val t = if (lengthSqr < 1.0e-12) 0.0 else (along / lengthSqr).coerceIn(0.0, 1.0)
+
+            val dx = px + abx * t - point.x
+            val dy = py + aby * t - point.y
+            val dz = pz + abz * t - point.z
+            val distance = sqrt(dx * dx + dy * dy + dz * dz)
+            if (distance < best) best = distance
+
+            px = nx
+            py = ny
+            pz = nz
+
+            vx *= PROJECTILE_DRAG
+            vy = vy * PROJECTILE_DRAG - PROJECTILE_GRAVITY
+            vz *= PROJECTILE_DRAG
+
+            if (py < start.y - ARC_DROP_LIMIT) return best
+        }
+
+        return best
+    }
+
+    /**
+     * The throw rotation whose arc passes closest to [point].
+     *
+     * Neither the yaw nor the pitch can be computed geometrically: the pearl inherits the player's
+     * movement, so a throw made while falling is dragged down and sideways and the arc that reaches
+     * the target is nowhere near the one that points at it. Instead both angles are fitted against
+     * the physics: a coarse sweep of the whole pitch circle, a coarse sweep of the yaw around the
+     * geometric value, then a local refinement of the two, alternating. Returns null when the best
+     * arc still misses by more than [tolerance].
+     */
+    private fun solveThrow(me: LocalPlayer, point: Vec3, tolerance: Double): Rotation? {
+        val geometric = Rotation.lookingAt(point, me.eyePosition)
+
+        var yaw = geometric.yaw
+        var pitch = geometric.pitch
+        var best = arcDistance(me, Rotation(yaw, pitch), point)
+
+        // coarse pass: the pitch decides the range, so it is swept over its whole range first
+        var candidate = -89f
+        while (candidate <= 89f) {
+            val error = arcDistance(me, Rotation(yaw, candidate), point)
+            if (error < best) {
+                best = error
+                pitch = candidate
+            }
+            candidate += COARSE_STEP
+        }
+
+        // ... then the yaw is allowed to drift away from the geometric one
+        candidate = yaw - YAW_SPAN
+        while (candidate <= yaw + YAW_SPAN) {
+            val error = arcDistance(me, Rotation(candidate, pitch), point)
+            if (error < best) {
+                best = error
+                yaw = candidate
+            }
+            candidate += COARSE_STEP
+        }
+
+        // refinement of both angles around the coarse winner, twice, so a yaw move can be paid back
+        // by a pitch move
+        repeat(2) {
+            candidate = pitch - REFINE_SPAN
+            while (candidate <= pitch + REFINE_SPAN) {
+                val error = arcDistance(me, Rotation(yaw, candidate), point)
+                if (error < best) {
+                    best = error
+                    pitch = candidate
+                }
+                candidate += FINE_STEP
+            }
+
+            candidate = yaw - REFINE_SPAN
+            while (candidate <= yaw + REFINE_SPAN) {
+                val error = arcDistance(me, Rotation(candidate, pitch), point)
+                if (error < best) {
+                    best = error
+                    yaw = candidate
+                }
+                candidate += FINE_STEP
+            }
+        }
+
+        if (best > tolerance) return null
+        return Rotation(normalizeYaw(yaw), pitch.coerceIn(-89f, 89f))
+    }
+
+    /** Brings a yaw back into -180..180, where every other rotation in the module lives. */
+    private fun normalizeYaw(yaw: Float): Float {
+        var wrapped = yaw % 360f
+        if (wrapped <= -180f) wrapped += 360f
+        if (wrapped > 180f) wrapped -= 360f
+        return wrapped
+    }
+
+    /**
+     * Runs LiquidBounce's own simulation (block collisions included) and returns where the pearl
+     * would land, or null when it hits nothing.
+     */
+    private fun verify(rotation: Rotation): Vec3? {
+        val hit = TrajectoryInfoRenderer.getHypotheticalTrajectory(
             simulationOwner = player,
             trajectoryInfo = TrajectoryInfo.GENERIC,
             trajectoryType = TrajectoryType.EnderPearl,
-            rotation = rotation
-        ).runSimulation(MAX_SIM_TICKS).hitResult
+            rotation = rotation,
+            // keep the start position identical to [throwStart], no partial-tick interpolation
+            partialTicks = 0f
+        ).runSimulation(MAX_SIM_TICKS).hitResult ?: return null
 
-    private fun landsAt(rotation: Rotation, expected: Vec3, tolerance: Double): Boolean {
-        val hit = simulateHit(rotation) ?: return false
-        if (hit.type == HitResult.Type.MISS) return false
-        if (hit.location.distanceTo(expected) > tolerance) {
-            if (debug) {
-                chat("§7[AutoPearl] §7landing off by %.2f".format(hit.location.distanceTo(expected)))
-            }
-            return false
-        }
-        val below = BlockPos.containing(hit.location).below()
-        return world.getBlockState(below).isFaceSturdy(world, below, Direction.UP, SupportType.CENTER)
-    }
-
-    private fun landsNear(rotation: Rotation, expected: Vec3, tolerance: Double): Boolean {
-        val hit = simulateHit(rotation) ?: return false
-        if (hit.type == HitResult.Type.MISS) return false
-        return hit.location.distanceTo(expected) <= tolerance
+        if (hit.type == HitResult.Type.MISS) return null
+        return hit.location
     }
 
     /** The rotation the aim is at: what the server sees when silent, the camera otherwise. */
@@ -546,10 +821,10 @@ object ModuleAutoPearlAI : ClientModule(
      * whole mouse counts, carrying the rounding residual — the same two rules the Aimassist uses, so
      * a pearl throw is never a rotation the mouse could not have produced.
      */
-    private fun humanize(from: Rotation, desired: Rotation): Rotation {
+    private fun humanize(from: Rotation, desired: Rotation, limitTurn: Boolean = true): Rotation {
         var next = desired
 
-        if (maxTurn > 0f) {
+        if (limitTurn && maxTurn > 0f) {
             val deltaYaw = RotationUtil.angleDifference(desired.yaw, from.yaw).coerceIn(-maxTurn, maxTurn)
             val deltaPitch = (desired.pitch - from.pitch).coerceIn(-maxTurn, maxTurn)
             next = Rotation(from.yaw + deltaYaw, (from.pitch + deltaPitch).coerceIn(-89.9f, 89.9f))
