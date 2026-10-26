@@ -102,8 +102,9 @@ import kotlin.random.Random
  *    server teleport, respawn, death or disconnect drops the positions that have just become stale
  *    instead of sending them;
  *  - [MAX_HOLD_TICKS] and [MAX_QUEUE] cap the silence whatever a mode asks for, and your own
- *    interactions ([flushOn]) go out immediately, *with* the held ticks in front of them, so the
- *    thing that is never left behind is your hit.
+ *    interactions ([flushOn]) make the connection catch up instead of being held with everything
+ *    else, so the thing that is left behind the least is your hit - and nowhere in the module is
+ *    there a burst, because a burst is a merged server tick, and a merged server tick is a flag.
  *
  * Everything runs on the client's shared [BlinkManager] queue, so the Blink ESP, the position line
  * and every other blink-aware module keep working exactly as they do with the built-in FakeLag.
@@ -139,6 +140,9 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
     /** An enemy looking at us from within this many degrees counts as "facing us". */
     private const val LOOK_ANGLE = 60f
 
+    /** How long [flushOn] keeps the hold at zero after one of its packets, in milliseconds. */
+    private const val CATCH_UP_MS = 300L
+
     enum class Mode(override val tag: String) : Tagged {
         /** Adds a constant amount of delay to your packets. */
         LATENCY("Latency"),
@@ -151,10 +155,11 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
     }
 
     /**
-     * Packets that make the module release everything it is holding, in order, right away, so your
-     * own interactions and the server's answers to them are never the things left behind. The first
-     * three are outgoing, the last two incoming - and those are the ones the built-in FakeLag never
-     * manages to fire, because it returns before reaching them.
+     * Packets that make the connection catch up: the hold drops to zero, one tick per tick, and
+     * stays there for [CATCH_UP_MS], so your own interactions and the server's answers to them are
+     * never the things left behind. The first three are outgoing, the last two incoming - and those
+     * are the ones the built-in FakeLag never manages to fire, because it returns before reaching
+     * them.
      */
     private enum class FlushOn(
         override val tag: String,
@@ -240,6 +245,9 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
     private var spikeMs = 0f
     private var spikeUntil = 0L
 
+    /** Until when [flushOn] keeps the hold at zero, i.e. the connection is catching up. */
+    private var catchUpUntil = 0L
+
     /** Enemies found on the last tick, around both the real and the frozen position. */
     private var enemies: List<Entity> = emptyList()
 
@@ -304,6 +312,10 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
 
         val desired = when {
             !shouldHold() -> 0
+            // An interaction just happened: the connection catches up, one tick per tick, and
+            // stays caught up for a moment. Never a burst - a burst is what merges two of our
+            // ticks into one server tick, which is exactly what the "post packet" checks flag.
+            now < catchUpUntil -> 0
             mode == Mode.REPEL -> chooseRepelHold(serverPos, enemies)
             else -> ticksFor(holdMs + jitterMs + spikeMs)
         }
@@ -351,7 +363,7 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
             }
 
             if (flushOn.matchesAny(packet)) {
-                releaseAll()
+                catchUpUntil = System.currentTimeMillis() + CATCH_UP_MS
             }
 
             event.action = BlinkManager.Action.PASS
@@ -363,14 +375,14 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
             return@handler
         }
 
-        // Your own interactions go out at once, with everything held in front of them: a hit is
-        // never the packet that gets left behind. This is the one burst the module allows - one
-        // merged server tick per interaction is the price of an instant hit, and it is the same
-        // trade the built-in FakeLag makes. Moving and mining never burst.
+        // Your own interactions make the connection catch up instead of being held with
+        // everything else: the hold drops to zero one tick per tick and stays there for a moment,
+        // so a hit or a place is late by at most the hold in force when it happened, and never
+        // after. A burst would be sooner, and would be flagged: releasing the held ticks together
+        // with a newer interaction puts a dig, place or swing behind the move packet of an older
+        // tick inside one server tick, which is the pattern every "post packet" check knows.
         if (flushOn.matchesAny(packet)) {
-            releaseAll()
-            event.action = BlinkManager.Action.PASS
-            return@handler
+            catchUpUntil = System.currentTimeMillis() + CATCH_UP_MS
         }
 
         holding = true
@@ -732,6 +744,7 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
         jitterMs = 0f
         spikeMs = 0f
         spikeUntil = 0L
+        catchUpUntil = 0L
         enemies = emptyList()
         lastDamageAt = 0L
         lastAttackAt = 0L
