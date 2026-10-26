@@ -116,7 +116,7 @@ import kotlin.random.Random
  *   ServerSafe        never click beyond the reach the server measures (default on)
  *   SafetyGap         how much of the reach is left unused while ServerSafe is on
  *   OverReach         how far past the reach an *attack* may go (0 = never, keep it there)
- *   PrePress          Off / Swing / Key: what the early press does
+ *   PrePress          Off / Swing / Key: what the early press does (Key never fires on an entity)
  *   ServerReach       the reach the server measures (3.0), caps every attack
  *   DesyncCompensation / DesyncPercent   subtract the position drift caused by ping
  *   CPS / CpsJitter   click rate as a slider range, plus a random stretch per click
@@ -625,12 +625,23 @@ object ModuleTriggerBotPlus : ClientModule(
                 // swallowed and the real click would come too late.
                 if (mc.missTime > 0) return
 
-                // Vanilla resolves the press against its own hit result. If that hit result is an
-                // entity we would not be allowed to attack, the press would become an out-of-range
-                // attack — which is a flag, not an early click. (`Hitbox` inflates that hit result
-                // through the item's hitbox margin, so this guard is not theoretical.)
-                val vanillaTarget = (mc.hitResult as? EntityHitResult)?.entity as? LivingEntity
-                if (vanillaTarget != null && serverDistance(me, vanillaTarget) > attackAt) return
+                // A queued press is only ever safe when vanilla's own hit result is NOT an entity.
+                // `Minecraft.startAttack` resolves the click against `mc.hitResult` and attacks
+                // whatever it finds there: a boat, a minecart, an armour stand — not just living
+                // entities. Vanilla also picks entities with the hitbox inflated by the pick radius,
+                // i.e. slightly farther than the server accepts, so such an attack can be a reach
+                // flag on its own. Aiming at a player while a boat sits in the line gives exactly a
+                // "type=acacia_boat" alert.
+                val entityUnderCrosshair = (mc.hitResult as? EntityHitResult)?.entity
+                if (entityUnderCrosshair != null) {
+                    if (debug) {
+                        chat(
+                            "§7[TriggerBotPlus] §7press skipped, §f${entityUnderCrosshair.name.string}" +
+                                "§7 is under the crosshair (vanilla would attack it)"
+                        )
+                    }
+                    return
+                }
 
                 KeyMapping.click(mc.options.keyAttack.key)
             }
