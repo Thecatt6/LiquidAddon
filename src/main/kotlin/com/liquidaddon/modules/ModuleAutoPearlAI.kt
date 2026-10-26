@@ -511,39 +511,39 @@ object ModuleAutoPearlAI : ClientModule(
             return null
         }
 
-        val solutions = ArrayList<Pair<Rotation, Vec3>>()
-        for (candidate in candidates.take(MAX_SOLVED)) {
+        // Solved one candidate at a time and stopping at the first arc that survives the simulation:
+        // solving all of them would be a dozen times the work for a result the first one usually
+        // already gives, and this runs on the client thread while falling.
+        var solved = 0
+        var simulated = 0
+
+        for (candidate in candidates) {
+            if (solved >= MAX_SOLVED) break
+            solved++
+
             val rotation = solveThrow(me, candidate, landingTolerance.toDouble()) ?: continue
-            solutions += rotation to candidate
-        }
 
-        if (solutions.isEmpty()) {
-            if (debug) {
-                chat("§7[AutoPearl] §cno safe landing found (no arc reaches the ${candidates.size} candidates)")
+            if (simulate) {
+                simulated++
+                val landing = verify(rotation) ?: continue
+                if (!isSafeLanding(landing)) {
+                    if (debug) chat("§7[AutoPearl] §7simulated landing at ${format(landing)} is not safe")
+                    continue
+                }
             }
-            return null
-        }
 
-        if (!simulate) {
-            val (rotation, candidate) = solutions.first()
             if (debug) chat("§7[AutoPearl] §fplan §asave§f → ${format(candidate)}")
             return Solution(rotation, "save", candidate)
         }
 
-        // The sweep ignores collisions; confirm with LiquidBounce's simulation. The first arc that
-        // ends on a safe block wins, even if it is not exactly the candidate we aimed at — a pearl
-        // on the platform one block off is worth more than no pearl at all.
-        for ((rotation, candidate) in solutions) {
-            val landing = verify(rotation) ?: continue
-            if (!isSafeLanding(landing)) {
-                if (debug) chat("§7[AutoPearl] §7simulated landing at ${format(landing)} is not safe")
-                continue
+        if (debug) {
+            val why = when {
+                solved == 0 -> "no candidate could be solved"
+                simulate && simulated > 0 -> "no arc survived the simulation"
+                else -> "no arc reaches the available spots"
             }
-            if (debug) chat("§7[AutoPearl] §fplan §asave§f → ${format(candidate)}")
-            return Solution(rotation, "save", candidate)
+            chat("§7[AutoPearl] §cno safe landing found ($why, ${solved}/${candidates.size} tried)")
         }
-
-        if (debug) chat("§7[AutoPearl] §cno safe landing found (no arc survived the simulation)")
         return null
     }
 
