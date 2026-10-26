@@ -617,8 +617,9 @@ object ModuleAutoPearlAI : ClientModule(
             }
 
         if (simulate) {
-            val hit = verify(rotation)
-            if (hit == null || hit.location.distanceTo(landing) > enemyTolerance.toDouble()) {
+            // verify() already returns the impact position, not the hit result
+            val impact = verify(rotation)
+            if (impact == null || impact.distanceTo(landing) > enemyTolerance.toDouble()) {
                 if (debug) chat("§7[AutoPearl] §cthe simulated arc misses ${target.name.string}")
                 return null
             }
