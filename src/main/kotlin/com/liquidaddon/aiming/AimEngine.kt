@@ -136,7 +136,9 @@ enum class Preset(override val tag: String) : Tagged {
  * engine is really doing; [Preset.CUSTOM] leaves the sliders alone.
  */
 @Suppress("TooManyFunctions", "LongParameterList")
-internal class AimValues(val group: ValueGroup) {
+internal class AimValues(
+    val group: ValueGroup,
+) : MinecraftShortcuts {
 
     // --- target selection -------------------------------------------------------------------
 
