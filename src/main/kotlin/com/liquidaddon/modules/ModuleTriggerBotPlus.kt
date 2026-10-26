@@ -382,7 +382,8 @@ object ModuleTriggerBotPlus : ClientModule(
     // --- gating -------------------------------------------------------------------------------
 
     private fun passesPauses(me: LocalPlayer): Boolean {
-        if (pauseOnScreen && mc.screen != null) return false
+        // In this Minecraft version the screen lives on the Gui, not on Minecraft itself.
+        if (pauseOnScreen && mc.gui.screen() != null) return false
         if (pauseOnUse && me.isUsingItem) return false
         if (interaction.isDestroying) return false
         if (pauseWithAutoClicker && ModuleAutoClicker.enabled) return false
