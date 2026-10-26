@@ -3,6 +3,7 @@ package com.liquidaddon.modules
 import com.liquidaddon.Categories
 import com.liquidaddon.aiming.AimbotValues
 import com.liquidaddon.aiming.AimassistCore
+import net.ccbluex.liquidbounce.event.events.AttackEntityEvent
 import net.ccbluex.liquidbounce.event.events.GameRenderEvent
 import net.ccbluex.liquidbounce.event.events.GameTickEvent
 import net.ccbluex.liquidbounce.event.events.MouseRotationEvent
@@ -26,7 +27,11 @@ import net.ccbluex.liquidbounce.utils.render.TargetRenderer
  * in `Range` and inside `Fov` (360° by default, i.e. all around you) the aim goes to it and stays
  * on it until it is dead or out of reach.
  *
- * The aimbot never clicks: it only aims. Use a KillAura/clicker for the hits, or click yourself.
+ * The aimbot never clicks: it only aims. Use a KillAura/clicker for the hits, or click yourself —
+ * and when you do, the click is synchronised with the aim: it is held until the rotation the server
+ * has is on the entity you hit, then sent (see [AimassistCore.onAttack]). An aimbot rotates a lot,
+ * so this is the difference between an attack that arrives *with* its rotation and the
+ * attack-then-snap pattern Vulcan calls `Killaura (Post)`.
  *
  * How it gets there is still the assist's maths, so the numbers mean the same thing:
  *  - `AimSpeed` is the hard cap of one tick, `Strength` the share of the remaining angle,
@@ -67,6 +72,10 @@ object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
     /** Friction: unused by the aimbot (`Friction` is fixed to 0), kept for the shared engine. */
     @Suppress("unused")
     private val mouseHandler = handler<MouseRotationEvent> { core.onMouseRotation(it) }
+
+    /** Attack synchronisation: a click is held until the rotation the server has is on the entity. */
+    @Suppress("unused")
+    private val attackHandler = handler<AttackEntityEvent> { core.onAttack(it) }
 
     /** The tick: pick the target, aim at it, hand the rotation out. */
     @Suppress("unused")

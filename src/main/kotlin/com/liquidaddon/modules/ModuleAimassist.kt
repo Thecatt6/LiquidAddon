@@ -3,6 +3,7 @@ package com.liquidaddon.modules
 import com.liquidaddon.Categories
 import com.liquidaddon.aiming.AimValues
 import com.liquidaddon.aiming.AimassistCore
+import net.ccbluex.liquidbounce.event.events.AttackEntityEvent
 import net.ccbluex.liquidbounce.event.events.GameRenderEvent
 import net.ccbluex.liquidbounce.event.events.GameTickEvent
 import net.ccbluex.liquidbounce.event.events.MouseRotationEvent
@@ -36,7 +37,11 @@ import net.ccbluex.liquidbounce.utils.render.TargetRenderer
  *    carried over, and `FrameInterpolation` spreads a tick's step over the frames of that tick;
  *  - `TurnCheck`, `FadeIn`, `OnlyOnCrosshair`, `ReactionDelay`/`ReactionRandom`, `IdleChance`,
  *    `DeadZone` and the `Jitter*` knobs keep it looking like a hand;
- *  - `Mode = Friction` damps the cursor while it glides over a hitbox (`Both` does both).
+ *  - `Mode = Friction` damps the cursor while it glides over a hitbox (`Both` does both);
+ *  - `AttackSync` (on by default) holds a click until the rotation the server has is already on the
+ *    entity being hit, then sends it: an attack can never leave *before* the aim arrives, which is
+ *    the "post rotation" pattern Vulcan's `Killaura (Post)` and Grim's aim checks are built around.
+ *    The click waits at most half a second and also tells the module *who* to aim at.
  *
  * `Silent = false` helps the camera itself; `Silent = true` goes through LiquidBounce's
  * `RotationManager` with `MoveFix`, at `IMPORTANT_FOR_USAGE_1` — i.e. below KillAura/Aimbot, which
@@ -73,6 +78,10 @@ object ModuleAimassist : ClientModule("Aimassist", Categories.LIQUIDADDON) {
     /** Friction: damped cursor deltas while the cursor glides over the hitbox. */
     @Suppress("unused")
     private val mouseHandler = handler<MouseRotationEvent> { core.onMouseRotation(it) }
+
+    /** Attack synchronisation: a click is held until the rotation the server has is on the entity. */
+    @Suppress("unused")
+    private val attackHandler = handler<AttackEntityEvent> { core.onAttack(it) }
 
     /** The tick: pick the target, apply the gates, compute and hand out the rotation. */
     @Suppress("unused")

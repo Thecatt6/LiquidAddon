@@ -7,6 +7,7 @@ import net.ccbluex.liquidbounce.deeplearn.DeepLearningEngine
 import net.ccbluex.liquidbounce.deeplearn.ModelManager
 import net.ccbluex.liquidbounce.deeplearn.data.CombatSample
 import net.ccbluex.liquidbounce.deeplearn.models.TwoDimensionalRegressionModel
+import net.ccbluex.liquidbounce.event.events.AttackEntityEvent
 import net.ccbluex.liquidbounce.event.events.MouseRotationEvent
 import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.features.module.MinecraftShortcuts
@@ -16,7 +17,9 @@ import net.ccbluex.liquidbounce.utils.aiming.RotationTarget
 import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
 import net.ccbluex.liquidbounce.utils.aiming.features.MovementCorrection
 import net.ccbluex.liquidbounce.utils.aiming.utils.RotationUtil
+import net.ccbluex.liquidbounce.utils.block.SwingMode
 import net.ccbluex.liquidbounce.utils.client.chat
+import net.ccbluex.liquidbounce.utils.combat.attackEntity
 import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
 import net.ccbluex.liquidbounce.utils.entity.lastPos
 import net.ccbluex.liquidbounce.utils.entity.squaredBoxedDistanceTo
@@ -92,6 +95,12 @@ private const val CROSSHAIR_GRACE_MS = 140L
 
 /** How often the engine may say in chat that the AI model could not answer. */
 private const val AI_NOTICE_MS = 15000L
+
+/** How long a click may wait for the aim before it is dropped instead of sent looking elsewhere. */
+private const val ATTACK_SYNC_MS = 500L
+
+/** Slack, in degrees, on top of the hitbox when judging whether the aim is already on an entity. */
+private const val ATTACK_AIM_MARGIN = 5f
 
 enum class Mode(override val tag: String) : Tagged {
     ASSIST("Assist"), FRICTION("Friction"), BOTH("Both")
@@ -196,6 +205,12 @@ internal interface AimSettings {
 
     /** Name of the active preset, only used in the chat/debug lines (empty when there is none). */
     val presetName: String
+
+    /**
+     * Never let an attack leave while the rotation the server has points somewhere else (see
+     * [AimassistCore.onAttack]): the click is held for a few ticks until the aim is on the entity.
+     */
+    val attackSync: Boolean
 
     /**
      * The engine chooses the target on its own: the cone around the crosshair stops filtering, and
@@ -336,6 +351,14 @@ internal class AimValues(
     override val silent by silentValue
     val moveFixValue = group.enumChoice("MoveFix", MoveFix.SILENT)
     override val moveFix by moveFixValue
+
+    /**
+     * An attack may only leave when the rotation the server has is already on the entity being hit.
+     * Otherwise the click waits (up to half a second) for the aim to arrive. Without it, clicking
+     * while the (silent) aim is still travelling sends the attack with the old rotation and the new
+     * one right after it — the pattern every anticheat calls "post rotation".
+     */
+    override val attackSync by group.boolean("AttackSync", true)
 
     /**
      * Not silent: draw the tick's step slice by slice on every frame instead of all at once on the
@@ -544,6 +567,7 @@ internal class AimassistCore(
     private val lockTarget get() = values.lockTarget
     private val switchDelay get() = values.switchDelay
     private val presetName get() = values.presetName
+    private val attackSync get() = values.attackSync
     private val mode get() = values.mode
     private val strength get() = values.strength
     private val maxSpeed get() = values.maxSpeed
@@ -646,6 +670,16 @@ internal class AimassistCore(
     private var lastGate = "start"
     private var lastDebugMessage = ""
 
+    /**
+     * A click the player made while the server rotation was not yet on the entity it hit (see
+     * [onAttack]). It is sent as soon as the aim is there, or dropped after [ATTACK_SYNC_MS].
+     */
+    private var pendingAttack: LivingEntity? = null
+    private var pendingAttackUntil = 0L
+
+    /** Set while [attackEntity] fires [AttackEntityEvent] again, so [onAttack] lets its own through. */
+    private var resendingAttack = false
+
     /** The entity this module is currently helping with, or `null`. Read by the target circle. */
     val target: LivingEntity?
         get() = currentTarget
@@ -678,6 +712,8 @@ internal class AimassistCore(
         debugTick = 0
         lastGate = "start"
         lastDebugMessage = ""
+        pendingAttack = null
+        resendingAttack = false
         rememberCamera()
     }
 
@@ -694,6 +730,8 @@ internal class AimassistCore(
         tickStepPitch = 0f
         drawnYaw = 0f
         drawnPitch = 0f
+        pendingAttack = null
+        resendingAttack = false
     }
 
     private fun rememberCamera() {
@@ -738,7 +776,73 @@ internal class AimassistCore(
     }
 
     /**
-     * The whole pipeline of the tick: target, gates, step, quantize, hand the rotation out.
+     * Attack synchronisation: an attack may only leave when the server is already looking at what
+     * is being hit.
+     *
+     * Vanilla sends the attack while the movement packet of the tick (the one that carries the
+     * rotation) is still to come, so the server always evaluates the hit against a rotation it
+     * already had. A silent aim breaks that: the click goes out with the previous rotation and the
+     * corrected one arrives right after it, pointing exactly at the entity that was just hit — the
+     * "post rotation" every anticheat looks for, and the reason a KillAura can be flagged while the
+     * player only clicked.
+     *
+     * [AttackEntityEvent] is fired at the head of `MultiPlayerGameMode.attack`, before the packet,
+     * and is cancellable. So the click is simply held here and re-sent from [tick] once the rotation
+     * the server has is on the entity; [findTarget] aims at that entity in the meantime, i.e. the
+     * player's click also decides *who* is aimed at. If the aim cannot get there in
+     * [ATTACK_SYNC_MS] the click is dropped: a lost click costs one, a blind one costs the account.
+     */
+    fun onAttack(event: AttackEntityEvent) {
+        if (!attackSync || resendingAttack) return
+        val me = mc.player ?: return
+        val entity = event.entity as? LivingEntity ?: return
+        if (!entity.isAlive) return
+        // Something this module would never aim at (a friend, a bot, out of AntiBot's rules) is left
+        // alone: holding a click that cannot be made valid would only lose it.
+        if (!isValidTarget(me, entity)) return
+        if (aimIsOn(me, entity)) return
+
+        event.cancelEvent()
+        pendingAttack = entity
+        pendingAttackUntil = System.currentTimeMillis() + ATTACK_SYNC_MS
+        debugLine("attack on ${entity.name.string} held: the aim is not there yet")
+    }
+
+    /** The rotation the server is looking at right now. */
+    private fun serverAim(me: LocalPlayer): Rotation =
+        if (silent) RotationManager.currentRotation ?: lastSent ?: Rotation(me.yRot, me.xRot)
+        else Rotation(me.yRot, me.xRot)
+
+    /** True while the rotation the server has is already on [entity] (hitbox plus a small slack). */
+    private fun aimIsOn(me: LocalPlayer, entity: LivingEntity): Boolean {
+        val angle = serverAim(me).directionAngleTo(directionTo(me, entity))
+        return angle <= hitboxRadius(me, entity) + ATTACK_AIM_MARGIN
+    }
+
+    /** Sends the held click the moment the aim is on its entity; gives up when the wait is over. */
+    private fun resolveAttack(me: LocalPlayer) {
+        val entity = pendingAttack ?: return
+        val now = System.currentTimeMillis()
+        if (!entity.isAlive || entity.isRemoved || now > pendingAttackUntil ||
+            me.distanceTo(entity) > range + 1f || !isValidTarget(me, entity)
+        ) {
+            pendingAttack = null
+            debugLine("held attack dropped")
+            return
+        }
+        if (!aimIsOn(me, entity)) return
+
+        pendingAttack = null
+        resendingAttack = true
+        try {
+            attackEntity(entity, SwingMode.DO_NOT_HIDE)
+        } finally {
+            resendingAttack = false
+        }
+    }
+
+    /**
+     * The whole pipeline of the tick: held attacks, target, gates, step, quantize, hand the rotation out.
      */
     fun tick() {
         val me = mc.player
@@ -754,6 +858,10 @@ internal class AimassistCore(
         // therefore still advances by exactly the quantized step the tick decided on, and the
         // server never sees the interpolation, only its result.
         flushPendingCamera(me)
+
+        // A click that was held back because the server was still looking elsewhere goes out now,
+        // before this tick's movement packet and before the player's own clicks.
+        resolveAttack(me)
 
         // The player's own turn since the last tick. Read before anything is written this tick, and
         // with our own previous step taken out, so the module never mistakes its own pull for the
@@ -792,7 +900,9 @@ internal class AimassistCore(
             }
             currentTarget = target
             lastSwitch = now
-            reactionUntil = now + reactionDelay + Random.nextInt(reactionRandom + 1)
+            // A click the player already made is not a reaction to wait for.
+            reactionUntil = if (target === pendingAttack) now else now + reactionDelay +
+                Random.nextInt(reactionRandom + 1)
             responseJitter = 0.85f + Random.nextFloat() * 0.3f
             stillTicks = 0
         }
@@ -1148,6 +1258,15 @@ internal class AimassistCore(
     // --- target selection -------------------------------------------------------------------
 
     private fun findTarget(me: LocalPlayer): LivingEntity? {
+        // A held click decides who is aimed at: the player pointed at it, so the aim goes there
+        // instead of waiting for the cone to agree.
+        val forced = pendingAttack
+        if (forced != null && isValidTarget(me, forced) &&
+            forced.squaredBoxedDistanceTo(me) <= range * range
+        ) {
+            return forced
+        }
+
         // Sticky: the target already being helped stays, as long as it is still valid and inside
         // the cone. Otherwise every small movement of the cursor would re-pick somebody else and
         // the aim would wobble between two enemies.

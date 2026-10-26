@@ -108,6 +108,12 @@ internal class AimbotValues(group: ValueGroup) : AimSettings {
     /** How much of the remaining angle the model's answer is completed with, when `Engine = AI`. */
     override val aiCorrection get() = 30f
 
+    /**
+     * Always on: an aimbot rotates a lot, so an attack sent before the rotation lands is exactly the
+     * pattern the "post rotation" checks are built around. The click waits, then goes.
+     */
+    override val attackSync get() = true
+
     override val pauseOnInventory get() = true
     override val pauseOnUse get() = false
     override val chatLog get() = false
