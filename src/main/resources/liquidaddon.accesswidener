@@ -3,5 +3,10 @@ accessWidener	v1	official
 # LiquidBounce's own access widener does NOT propagate to add-ons - every entry there is a plain
 # `accessible`/`mutable`, not `transitive-`. Widen anything you need yourself, here.
 
-# Read by TriggerBotPlus: vanilla ignores clicks for a few ticks after a missed swing.
+# Read by TriggerBotPlus: vanilla ignores clicks for a few ticks after a missed swing, and a click
+# queued inside that window would be swallowed (the real hit would then arrive a tick too late).
 accessible field net/minecraft/client/Minecraft missTime I
+
+# Read by TriggerBotPlus (PrePress = Key): `KeyMapping.click` needs the bound key, which is exposed
+# to LiquidBounce by this very same entry in its own access widener.
+accessible field net/minecraft/client/KeyMapping key Lcom/mojang/blaze3d/platform/InputConstants$Key;
