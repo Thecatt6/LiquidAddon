@@ -288,6 +288,18 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
 
         runCatching { useItem(hand) }
 
+        // The client is using the item: a shield (or a blocking sword) really is up.
+        val using = me.isUsingItem
+        // On a 1.8 server the sword blocks on the server only: this client has no animation for it,
+        // so "isUsingItem" says nothing there and the use packet is all that matters.
+        val serverSideSword = !using && isOlderThanOrEqual1_8 && hand == InteractionHand.MAIN_HAND
+
+        if (!using && !serverSideSword) {
+            lastSkip = "nothing started blocking"
+            note("the use did not start a block")
+            return false
+        }
+
         owningBlock = true
         blockHand = hand
         note("blocking with " + hand.name.lowercase())
