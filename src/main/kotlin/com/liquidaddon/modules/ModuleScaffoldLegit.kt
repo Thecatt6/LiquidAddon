@@ -41,8 +41,10 @@ import kotlin.random.Random
  * **The aim.** The module decides which block the bridge needs next, picks the best face of it (the
  * one whose centre or nearest point asks for the smallest turn and is still comfortably in reach),
  * and aims there with the Aimassist's maths ([BlockAim]): a share of the remaining angle per tick,
- * capped by `MaxSpeed`, bent by `Smoothing`, snapped to whole mouse counts with the residual carried
- * over. Those settings live in the collapsed `Aim` group, so the module menu only shows the
+ * capped by `MaxSpeed`, bent by `Smoothing` — or, with `Aim > Engine = AI`, the combat model
+ * LiquidBounce already trained — with `Jitter` for the hand noise and the step snapped to whole
+ * mouse counts, residual carried over. The face chosen for a cell is kept until the cell changes, so
+ * the aim converges instead of chasing a goal recomputed from the moving eye on every tick. Those settings live in the collapsed `Aim` group, so the module menu only shows the
  * scaffolding settings until the `Aim` arrow is clicked. The placement itself waits for
  * [BlockAim.reached], i.e. until the exact rotation has been on the server for a tick: the click can
  * never arrive before the aim, which is the "post rotation" pattern anticheats look for.
@@ -135,6 +137,17 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     private var aimingCell: BlockPos? = null
 
     /**
+     * The placement already chosen for [aimingCell]. It is reused instead of being recomputed every
+     * tick: the point it aims at is derived from the eye position, which moves, so recomputing it
+     * would hand the aim a slightly different goal on every tick — the aim would keep arriving and
+     * never be "there", and the click would never come.
+     */
+    private var chosen: Placement? = null
+
+    /** Consecutive ticks at the edge without a usable placement for the walkway extension. */
+    private var flatMisses = 0
+
+    /**
      * The face the module committed to for [aimingCell] (support block + face). Keeping it for the
      * whole placement stops the scorer from flip-flopping between two equally good faces every tick:
      * the aim would never converge and no click would ever go out.
@@ -197,6 +210,8 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         readyTicks = 0
         jumpNow = false
         aimingCell = null
+        chosen = null
+        flatMisses = 0
         blockAim.clear()
     }
 
@@ -262,6 +277,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     /** Nothing to aim at in this phase: let the aim walk back to the camera. */
     private fun idle() {
         aimingCell = null
+        chosen = null
         stickySupport = null
         stickyFace = null
         blockAim.clear()
@@ -276,7 +292,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
             return
         }
         val cell = flatCell(me) ?: run {
-            debug(me, "piano: il blocco davanti ai piedi c'è già")
+            debug(me, "piano: niente da piazzare (" + reason() + ")")
             idle()
             readyTicks = 0
             return
@@ -296,19 +312,32 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
             return
         }
 
-        val placement = findPlacement(me, cell) ?: run {
-            debug(me, "piano: nessuna faccia raggiungibile per il blocco " + posText(cell) + " (" + reason() + ")")
-            idle()
-            readyTicks = 0
-            return
-        }
         if (aimingCell != cell) {
             aimingCell = cell
+            chosen = null
             stickySupport = null
             stickyFace = null
             readyTicks = 0
         }
-        blockAim.aimAt(placement.rotation)
+
+        // The face chosen for this cell is kept until the cell changes: see [chosen].
+        val placement = chosen ?: findPlacement(me, cell)?.also { chosen = it }
+        if (placement == null) {
+            // Nothing to extend the walkway with here (typically the side face of the block under
+            // the feet, which is only visible when the eye hangs over the edge). Standing still and
+            // waiting would never get the player up a level, so after a couple of attempts the
+            // module takes the step instead: jump, then place the block on top of the one under the
+            // feet — the climb the bridge needs.
+            debug(me, "piano: nessuna faccia raggiungibile per " + posText(cell) + " (" + reason() + ")")
+            if (++flatMisses >= 2 && !jumpNow) {
+                debug(me, "piano: passo diretto, salto")
+                jumpNow = true
+            }
+            return
+        }
+        flatMisses = 0
+
+        blockAim.aimAt(placement.rotation, placement.point)
         debug(me, "piano: mirando al blocco " + posText(cell) + " (" + placement.text() + ")")
         // The click waits until the server is looking exactly there.
         if (!blockAim.reached) {
@@ -326,22 +355,37 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         waitTicks = 0
         readyTicks = 0
         aimingCell = null
+        chosen = null
     }
 
-    /** 2: back onto the new block, then the jump once past its middle by JumpAt (MovementInputEvent). */
+    /**
+     * 2: the jump onto the new block.
+     *
+     * The jump is what makes the player go *up*: it is triggered as soon as the feet are over the
+     * new block — not only once the player is past its middle by [jumpAt], which a player who stops
+     * walking never reaches and which used to leave the module stuck at the edge forever. If the
+     * block could not be placed at all, the jump happens anyway: the air phase then puts the block
+     * on top of the one under the feet, so the module climbs instead of stalling.
+     */
     private fun walkTick(me: LocalPlayer) {
-        val block = stepBlock ?: return reset()
+        val block = stepBlock
         // Walking over the block that was just placed: nothing to aim at.
         idle()
-        if (++waitTicks > 40) {
-            debug(me, "salita: non sei arrivato sul blocco nuovo in 2 secondi, ricomincio")
-            reset() // never got onto it
+        if (++waitTicks > 20) {
+            // Two seconds stuck here means the walk onto the block is not going to happen (a wall,
+            // a stop, a wrong direction): take the step from where we are instead of looping.
+            debug(me, "salita: niente da fare, salto da qui")
+            jumpNow = true
             return
         }
-        // how far past the middle of the new block, along the walk
+        if (block == null) {
+            jumpNow = true
+            return
+        }
         val past = (me.x - (block.x + 0.5)) * walkX + (me.z - (block.z + 0.5)) * walkZ
-        if (underFeet(me) == block && past >= jumpAt) {
-            debug(me, "salita: sul blocco nuovo, salto")
+        val onIt = underFeet(me) == block
+        if (onIt || past >= jumpAt || waitTicks >= 3) {
+            debug(me, "salita: salto (sul blocco=$onIt, avanti=%.2f)".format(past))
             jumpNow = true
         } else {
             debug(me, "salita: aspetto di essere sul blocco nuovo")
@@ -391,17 +435,18 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
 
         // The aim starts while the jump is still rising — it only has a few ticks — but the block
         // itself is placed when the arc stops rising (PEAK) or at once (EARLY).
-        val placement = findPlacement(me, cell) ?: run {
-            debug(me, "aria tick $airTicks: nessuna faccia raggiungibile sopra " + posText(from) + " (" + reason() + ")")
-            return
-        }
         if (aimingCell != cell) {
             aimingCell = cell
+            chosen = null
             stickySupport = null
             stickyFace = null
             readyTicks = 0
         }
-        blockAim.aimAt(placement.rotation)
+        val placement = chosen ?: findPlacement(me, cell)?.also { chosen = it } ?: run {
+            debug(me, "aria tick $airTicks: nessuna faccia raggiungibile sopra " + posText(from) + " (" + reason() + ")")
+            return
+        }
+        blockAim.aimAt(placement.rotation, placement.point)
         if (placeTiming == Timing.PEAK && me.deltaMovement.y > 0.0) {
             return
         }
@@ -416,6 +461,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         placedInAir = true
         airTickSum += airTicks
         aimingCell = null
+        chosen = null
     }
 
     private fun report(me: LocalPlayer) {
@@ -439,7 +485,13 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
      * rotation that produces it. `place` gets this object, so the face validated here is exactly the
      * face sent to the server.
      */
-    private class Placement(val cell: BlockPos, val hit: BlockHitResult, val rotation: Rotation) {
+    private class Placement(
+        val cell: BlockPos,
+        val hit: BlockHitResult,
+        val rotation: Rotation,
+        /** The point on the face the aim is pointed at (used by the AI engine for the distance). */
+        val point: Vec3
+    ) {
         /** Debug: which face of which block. */
         fun text(): String = hit.direction.name.lowercase() + " di " + posText(hit.blockPos)
     }
@@ -515,7 +567,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
                     (if (sticky) STICKY_BONUS else 0.0)
                 if (score < bestScore) {
                     bestScore = score
-                    best = Placement(cell, traced, rotation)
+                    best = Placement(cell, traced, rotation, point)
                 }
             }
         }
@@ -575,7 +627,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
             return null
         }
         lastReject = ""
-        return Placement(cell, hit, rotation)
+        return Placement(cell, hit, rotation, hit.location)
     }
 
     /** Debug: a position, short. */
@@ -625,8 +677,23 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         // Watched from before the call: if the block only appears a tick later, the box is drawn by
         // [flushPendingRender] once it is really there.
         pending[cell] = 0
+        // The face was chosen a few ticks ago and the player has moved since: the click has to be
+        // traced again from where the eyes are now, along the very rotation the server has, or the
+        // click would point at a spot the server cannot see from the position it has. The cached
+        // face is kept as long as the new ray ends on it.
+        val hit = runCatching {
+            val fresh = traceFromPlayer(click.rotation)
+            if (fresh.type == HitResult.Type.BLOCK && fresh.blockPos == click.hit.blockPos &&
+                fresh.direction == click.hit.direction
+            ) {
+                fresh
+            } else {
+                click.hit
+            }
+        }.getOrDefault(click.hit)
+
         runCatching {
-            doPlacement(click.hit, click.rotation, onPlacementSuccess = {
+            doPlacement(hit, click.rotation, onPlacementSuccess = {
                 pending.remove(cell)
                 renderer.addBlock(cell)
                 true

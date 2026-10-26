@@ -1,6 +1,10 @@
 package com.liquidaddon.aiming
 
 import net.ccbluex.liquidbounce.config.types.group.ValueGroup
+import net.ccbluex.liquidbounce.deeplearn.DeepLearningEngine
+import net.ccbluex.liquidbounce.deeplearn.ModelManager
+import net.ccbluex.liquidbounce.deeplearn.data.CombatSample
+import net.ccbluex.liquidbounce.deeplearn.models.TwoDimensionalRegressionModel
 import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.features.module.MinecraftShortcuts
 import net.ccbluex.liquidbounce.utils.aiming.RotationManager
@@ -11,6 +15,7 @@ import net.ccbluex.liquidbounce.utils.aiming.utils.RotationUtil
 import net.ccbluex.liquidbounce.utils.kotlin.Priority
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.util.Mth
+import net.minecraft.world.phys.Vec3
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.round
@@ -21,8 +26,9 @@ import kotlin.random.Random
  *
  * They are the Aimassist's aiming knobs, restricted to what a placement needs: how big a share of
  * the remaining angle is covered per tick ([strength]), the hard cap of a single tick ([maxSpeed]),
- * the response curve ([smoothing]), the mouse lattice ([gcdFix]/[gcdDither]) and how the rotation
- * reaches the server ([silent] + [moveFix]).
+ * the engine ([engine] — the curve, or LiquidBounce's already trained model with its `AI*` gains),
+ * the hand noise ([jitter]), the mouse lattice ([gcdFix]/[gcdDither]) and how the rotation reaches
+ * the server ([silent] + [moveFix]).
  *
  * Because it lives in a [ValueGroup] of its own, the main menu only shows the scaffolding settings:
  * the whole aim list stays folded under `Aim` until the arrow is clicked.
@@ -52,6 +58,22 @@ internal class BlockAimValues : ValueGroup("Aim") {
     /** Snap every step to whole mouse counts (and dither the rounding) like a real mouse. */
     val gcdFix by boolean("GcdFix", true)
     val gcdDither by boolean("GcdDither", true)
+
+    /** A trace of hand noise on the step, in degrees — the Aimassist's `Jitter*`, one slider here. */
+    val jitter by float("Jitter", 0.12f, 0f..2f, "°")
+
+    /**
+     * Who computes the step: `Math` is the curve above, `AI` is the combat model LiquidBounce
+     * already trained on recorded human fights — the same one the Aimassist can use. Nothing is
+     * trained here, and when the engine is not available the curve takes over.
+     */
+    val engine by enumChoice("Engine", Engine.MATH)
+    val aiModel by enumChoice("AIModel", AiModel.MODEL_19KC8KP)
+    val aiYawMultiplier by float("AIYawMultiplier", 1.5f, 0.5f..2f)
+    val aiPitchMultiplier by float("AIPitchMultiplier", 1f, 0.5f..2f)
+
+    /** Share of the remaining angle added on top of the model's answer, so the aim still arrives. */
+    val aiCorrection by float("AICorrection", 30f, 0f..100f, "%")
 }
 
 /** Two rotations closer than this are the same rotation: no step is worth sending. */
@@ -74,6 +96,16 @@ private const val RELEASE_DONE = 0.75f
  * "post rotation" pattern.
  */
 private const val REACHED_TICKS = 2
+
+/**
+ * Two goals closer than this are the same goal. The point the module aims at is recomputed from the
+ * eye position every tick, so it drifts by a few hundredths of a degree: without this slack the goal
+ * would be "new" on every tick, [BlockAim.stable] would never grow and the click would never come.
+ */
+private const val GOAL_SLACK = 0.75f
+
+/** Throttle for the "the AI engine is not available" notice. */
+private const val AI_NOTICE_MS = 15000L
 
 /**
  * A release never lasts longer than this. If the player keeps turning while the aim walks back, the
@@ -127,17 +159,34 @@ internal class BlockAim(
     /** Ticks spent walking back to the camera, capped by [RELEASE_MAX_TICKS]. */
     private var releaseTicks = 0
 
+    /** Where the goal points at, so the model can be told the distance. */
+    private var goalPoint: Vec3? = null
+
+    /** The aim the previous tick started from: the model's "previous vector". */
+    private var previousAim: Rotation? = null
+
+    private var aiReason: String? = null
+    private var aiNoticeAt = 0L
+
     /** `true` while a goal is set or the aim is still walking back. */
     val active: Boolean
         get() = goal != null || sent != null
 
-    /** Asks the aim to go to [rotation]. Repeated calls with the same goal change nothing. */
-    fun aimAt(rotation: Rotation) {
+    /**
+     * Asks the aim to go to [rotation], which looks at [point].
+     *
+     * A goal that is already there — or within [GOAL_SLACK], which is what the per-tick drift of a
+     * recomputed point looks like — is not a new goal: it must not reset the "the server has it"
+     * counter, otherwise the aim would keep arriving and never be allowed to click.
+     */
+    fun aimAt(rotation: Rotation, point: Vec3? = null) {
         val current = goal
-        if (current != null && same(current, rotation)) {
+        if (current != null && close(current, rotation)) {
+            goalPoint = point ?: goalPoint
             return
         }
         goal = rotation
+        goalPoint = point
         reached = false
         stable = 0
         releaseTicks = 0
@@ -146,6 +195,7 @@ internal class BlockAim(
     /** Stops aiming: the aim walks back to the camera over the next ticks. */
     fun clear() {
         goal = null
+        goalPoint = null
         reached = false
         stable = 0
         releaseTicks = 0
@@ -158,6 +208,8 @@ internal class BlockAim(
         reached = false
         stable = 0
         releaseTicks = 0
+        goalPoint = null
+        previousAim = null
         yawCarry = 0.0
         pitchCarry = 0.0
     }
@@ -196,14 +248,46 @@ internal class BlockAim(
             return
         }
 
-        val share = (values.strength / 100f) * shape(abs(deltaYaw))
-        var stepYaw = (deltaYaw * share).coerceIn(-values.maxSpeed, values.maxSpeed)
-        var stepPitch = (deltaPitch * share).coerceIn(-values.maxSpeed, values.maxSpeed)
+        var stepYaw: Float
+        var stepPitch: Float
+
+        // `Engine = AI`: the combat model LiquidBounce already trained answers with the movement of
+        // a whole human tick. It is trusted as much as `Strength` says and completed with
+        // `AICorrection` of what is left, exactly like the Aimassist does; when the engine is not
+        // there (it is downloaded on start-up) the curve below takes over without dropping a tick.
+        val ai = if (values.engine == Engine.AI) aiStep(me, from, target) else null
+        if (ai != null) {
+            val trust = values.strength / 100f
+            val correction = values.aiCorrection / 100f
+            var aiYaw = ai.first * trust + deltaYaw * correction
+            var aiPitch = ai.second * trust + deltaPitch * correction
+
+            // An aim never walks away from the goal and never walks past it: whatever the model
+            // suggested, the step stays inside the correction the curve would have made.
+            if (deltaYaw != 0f && aiYaw * deltaYaw < 0f) aiYaw = 0f
+            if (deltaPitch != 0f && aiPitch * deltaPitch < 0f) aiPitch = 0f
+            stepYaw = if (abs(aiYaw) > abs(deltaYaw)) deltaYaw else aiYaw
+            stepPitch = if (abs(aiPitch) > abs(deltaPitch)) deltaPitch else aiPitch
+        } else {
+            val share = (values.strength / 100f) * shape(abs(deltaYaw))
+            stepYaw = deltaYaw * share
+            stepPitch = deltaPitch * share
+        }
+
+        stepYaw = stepYaw.coerceIn(-values.maxSpeed, values.maxSpeed)
+        stepPitch = stepPitch.coerceIn(-values.maxSpeed, values.maxSpeed)
 
         // Never walk past the goal: a correction that overshoots is a wobble, and a wobble around a
         // block face means the click lands on a different face.
         if (abs(stepYaw) >= abs(deltaYaw)) stepYaw = deltaYaw
         if (abs(stepPitch) >= abs(deltaPitch)) stepPitch = deltaPitch
+
+        // A hand is never a control loop: a trace of noise, but only while there is still a way to
+        // go — at the goal it would only make the face the click lands on jitter.
+        if (values.jitter > 0f && abs(deltaYaw) + abs(deltaPitch) > 1f) {
+            stepYaw += (Random.nextFloat() - 0.5f) * values.jitter
+            stepPitch += (Random.nextFloat() - 0.5f) * values.jitter
+        }
 
         var next = Rotation(from.yaw + stepYaw, (from.pitch + stepPitch).coerceIn(-89.9f, 89.9f))
         if (values.gcdFix) {
@@ -214,6 +298,72 @@ internal class BlockAim(
             next = if (moved < 1.0e-3f) target else quantized
         }
         publish(next)
+    }
+
+    /**
+     * The trained model's answer for this tick, in degrees, or `null` when it cannot answer.
+     *
+     * The input is a [CombatSample] like the one the Aimassist feeds it, with the block taking the
+     * place of the entity: where the aim is ([from]), where it came from ([previousAim]), where it
+     * wants to go ([goal]), how fast the player moves, and the distance to the point being aimed at.
+     * There is no entity, so the target motion and the hurt time are zero.
+     */
+    private fun aiStep(me: LocalPlayer, from: Rotation, goal: Rotation): Pair<Float, Float>? {
+        if (!DeepLearningEngine.isInitialized) {
+            return aiUnavailable("deep learning not initialised")
+        }
+        val model = activeModel() ?: return aiUnavailable("no model '${values.aiModel.tag}' loaded")
+        val previous = previousAim ?: from
+        val point = goalPoint
+        val distance = point?.let { me.eyePosition.distanceToSqr(it) }?.toFloat() ?: 0f
+
+        // A predict can throw (closed model, translator failure) and must never reach the tick.
+        val prediction = runCatching {
+            model.predict(
+                CombatSample(
+                    currentVector = from.directionVector,
+                    previousVector = previous.directionVector,
+                    targetVector = goal.directionVector,
+                    velocityDelta = previous.rotationDeltaTo(from).toVec2f(),
+                    playerDiff = me.position().subtract(me.lastPos),
+                    targetDiff = Vec3.ZERO,
+                    distance = distance,
+                    hurtTime = 0,
+                    age = 0
+                ).asInput
+            )
+        }
+        val output = prediction.getOrNull()
+            ?: return aiUnavailable(prediction.exceptionOrNull()?.javaClass?.simpleName ?: "model error")
+
+        if (output.size < 2) return aiUnavailable("model returned ${output.size} values")
+        val yaw = output[0] * values.aiYawMultiplier
+        val pitch = output[1] * values.aiPitchMultiplier
+        if (!yaw.isFinite() || !pitch.isFinite()) return aiUnavailable("model returned NaN")
+
+        aiReason = null
+        return yaw to pitch
+    }
+
+    /** The bundled model LiquidBounce ships for [values.aiModel], or the one selected in its menu. */
+    private fun activeModel(): TwoDimensionalRegressionModel? = runCatching {
+        val group = ModelManager.models
+        group.modes.firstOrNull { model -> model.tag.equals(values.aiModel.tag, ignoreCase = true) }
+            ?: group.activeMode
+    }.getOrNull()
+
+    /**
+     * The model did not answer. The aim keeps working with the curve instead, and the reason is said
+     * in chat (throttled) instead of leaving a silently degraded engine.
+     */
+    private fun aiUnavailable(reason: String): Pair<Float, Float>? {
+        aiReason = reason
+        val now = System.currentTimeMillis()
+        if (now - aiNoticeAt >= AI_NOTICE_MS) {
+            aiNoticeAt = now
+            chat("§7[" + owner.name + "] §cAI engine: $reason §7- using ${values.smoothing.tag}")
+        }
+        return null
     }
 
     /** The rotation the aim starts the step from: what the server has, or the camera. */
@@ -254,6 +404,9 @@ internal class BlockAim(
 
     /** Hands [rotation] to the server (silent) or to the camera directly. */
     private fun publish(rotation: Rotation, priority: Priority = Priority.IMPORTANT_FOR_PLAYER_LIFE) {
+        // The model of the next tick reads this as "where the aim came from", i.e. how fast it is
+        // already turning. Recorded before the write, so it is the aim the step started at.
+        previousAim = sent ?: rotation
         sent = rotation
 
         if (!values.silent) {
@@ -336,4 +489,8 @@ internal class BlockAim(
 
     private fun same(a: Rotation, b: Rotation): Boolean =
         abs(Mth.wrapDegrees(a.yaw - b.yaw)) <= SAME && abs(a.pitch - b.pitch) <= SAME
+
+    /** Same goal, with the slack a recomputed point needs (see [GOAL_SLACK]). */
+    private fun close(a: Rotation, b: Rotation): Boolean =
+        abs(Mth.wrapDegrees(a.yaw - b.yaw)) + abs(a.pitch - b.pitch) <= GOAL_SLACK
 }
