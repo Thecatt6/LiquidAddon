@@ -35,7 +35,7 @@ import kotlin.random.Random
  */
 internal class BlockAimValues : ValueGroup("Aim") {
 
-    /** Aim the block before placing it. Off = the old behaviour, the crosshair decides. */
+    /** Aim the block before placing it. Off = the player has to look at the face himself. */
     val enabled by boolean("Enabled", true)
 
     /**
@@ -48,10 +48,10 @@ internal class BlockAimValues : ValueGroup("Aim") {
     val moveFix by enumChoice("MoveFix", MoveFix.SILENT)
 
     /** Share of the remaining angle covered per tick. */
-    val strength by float("Strength", 60f, 1f..100f, "%")
+    val strength by float("Strength", 70f, 1f..100f, "%")
 
     /** Hard cap of a single tick, in degrees: how fast the aim may travel to the block. */
-    val maxSpeed by float("MaxSpeed", 30f, 1f..180f, "°")
+    val maxSpeed by float("MaxSpeed", 45f, 1f..180f, "°")
 
     val smoothing by enumChoice("Smoothing", Smoothing.BEZIER)
 
@@ -60,7 +60,7 @@ internal class BlockAimValues : ValueGroup("Aim") {
     val gcdDither by boolean("GcdDither", true)
 
     /** A trace of hand noise on the step, in degrees — the Aimassist's `Jitter*`, one slider here. */
-    val jitter by float("Jitter", 0.12f, 0f..2f, "°")
+    val jitter by float("Jitter", 0.15f, 0f..2f, "°")
 
     /**
      * Who computes the step: `Math` is the curve above, `AI` is the combat model LiquidBounce
@@ -76,36 +76,11 @@ internal class BlockAimValues : ValueGroup("Aim") {
     val aiCorrection by float("AICorrection", 30f, 0f..100f, "%")
 }
 
-/** Two rotations closer than this are the same rotation: no step is worth sending. */
-private const val SAME = 0.02f
-
-/** Inside this distance from the goal the step snaps onto it, so the server sees the exact aim. */
+/** Inside this distance from the goal the step snaps onto it. */
 private const val SNAP = 0.35f
 
 /** Release: the gap under which the way back to the camera is finished. */
 private const val RELEASE_DONE = 0.75f
-
-/**
- * How many ticks the goal has to stay published before a click may go out.
- *
- * `RotationManager.update()` runs at `FIRST_PRIORITY` on `GameTickEvent`, i.e. *before* the module's
- * handler: the rotation published at the end of tick N becomes `currentRotation` on tick N+1 and is
- * what the movement packet of N+1 carries. So the server only has the goal once tick N+1's packet
- * has gone out, and the click has to wait for tick N+2 — two stable ticks — to arrive *after* it.
- * Anything less and the click is evaluated by the server against the previous rotation, which is the
- * "post rotation" pattern.
- */
-private const val REACHED_TICKS = 2
-
-/**
- * Two goals closer than this are the same goal. The point the module aims at is recomputed from the
- * eye position every tick, so it drifts by a few hundredths of a degree: without this slack the goal
- * would be "new" on every tick, [BlockAim.stable] would never grow and the click would never come.
- */
-private const val GOAL_SLACK = 0.75f
-
-/** Throttle for the "the AI engine is not available" notice. */
-private const val AI_NOTICE_MS = 15000L
 
 /**
  * A release never lasts longer than this. If the player keeps turning while the aim walks back, the
@@ -115,21 +90,29 @@ private const val AI_NOTICE_MS = 15000L
  */
 private const val RELEASE_MAX_TICKS = 6
 
+/** Throttle for the "the AI engine is not available" notice. */
+private const val AI_NOTICE_MS = 15000L
+
 /**
  * Aiming for a **block**, with the Aimassist's maths.
  *
- * It is the same idea as [AimassistCore] with an entity swapped for a point on a block face: the
- * module asks for a rotation ([aimAt]), this class walks the aim towards it tick by tick
- * ([tick]) — a share of the remaining angle per tick, capped by `MaxSpeed`, bent by `Smoothing`,
- * snapped to whole mouse counts — and publishes every intermediate rotation. `Silent` (default)
- * means the camera is never touched: only the rotation the server receives moves, which is what
- * lets the player look straight ahead while the module places blocks behind/below them.
+ * It is the same idea as the Aimassist with an entity swapped for a point on a block face: the
+ * module asks for a rotation ([aimAt]), this class walks the aim towards it tick by tick ([tick]) —
+ * a share of the remaining angle per tick, capped by `MaxSpeed`, bent by `Smoothing`, snapped to
+ * whole mouse counts, with `Jitter` for the hand noise — and publishes every intermediate rotation
+ * to `RotationManager`. `Silent` (default) means the camera is never touched: only the rotation the
+ * server receives moves, so the player can look straight ahead while the blocks are placed behind
+ * or below them.
  *
- * Placement needs one more thing than a smooth rotation: the server has to **already** have the
- * final rotation when the click arrives, otherwise the click is judged against the old aim and is
- * the classic "post rotation" pattern. So [reached] only becomes `true` a tick *after* the exact
- * goal rotation was published: by then the movement packet carrying it has been sent, and the
- * placement that follows is geometrically consistent on the server too.
+ * **Where the aim is stepped matters.** [tick] has to run inside the `RotationUpdateEvent` handler:
+ * `RotationManager` fires that event and then calls `update()`, so a rotation published from there is
+ * the `currentRotation` of the *same* tick and rides this tick's movement packet. Published one
+ * handler later (a `GameTickEvent` with the default priority) it would only be applied on the next
+ * tick, and the click would always arrive one step early.
+ *
+ * Whether the aim is "there" is not decided here: the module traces from [serverRotation] — the
+ * rotation the last movement packet really carried — and clicks only when that ray hits the face it
+ * planned. An angle comparison would be a guess; the ray is the truth.
  */
 internal class BlockAim(
     private val owner: ClientModule,
@@ -137,7 +120,8 @@ internal class BlockAim(
 ) : MinecraftShortcuts {
 
     /** Where the aim is going, or `null` while it walks back to the camera. */
-    private var goal: Rotation? = null
+    var goal: Rotation? = null
+        private set
 
     /** The last rotation handed to the server (or to the camera, when not silent). */
     private var sent: Rotation? = null
@@ -146,24 +130,14 @@ internal class BlockAim(
     private var yawCarry = 0.0
     private var pitchCarry = 0.0
 
-    /**
-     * `true` when the rotation the server has is already the goal: it has been published and kept
-     * for [REACHED_TICKS], so the movement packet that carried it has gone out. The click may go.
-     */
-    var reached = false
-        private set
-
-    /** Ticks the goal has been the published rotation without interruption. */
-    private var stable = 0
-
-    /** Ticks spent walking back to the camera, capped by [RELEASE_MAX_TICKS]. */
-    private var releaseTicks = 0
-
     /** Where the goal points at, so the model can be told the distance. */
     private var goalPoint: Vec3? = null
 
     /** The aim the previous tick started from: the model's "previous vector". */
     private var previousAim: Rotation? = null
+
+    /** Ticks spent walking back to the camera, capped by [RELEASE_MAX_TICKS]. */
+    private var releaseTicks = 0
 
     private var aiReason: String? = null
     private var aiNoticeAt = 0L
@@ -173,76 +147,72 @@ internal class BlockAim(
         get() = goal != null || sent != null
 
     /**
-     * Asks the aim to go to [rotation], which looks at [point].
-     *
-     * A goal that is already there — or within [GOAL_SLACK], which is what the per-tick drift of a
-     * recomputed point looks like — is not a new goal: it must not reset the "the server has it"
-     * counter, otherwise the aim would keep arriving and never be allowed to click.
+     * Whether `RotationManager` is really applying the steps published here. It reads `null` when
+     * something else holds the rotation (a combat module in `CombatManager.shouldPauseRotation`, an
+     * open inventory, a request of higher priority): in that case the aim cannot move and the module
+     * says so instead of silently doing nothing.
      */
+    var applied = true
+        private set
+
+    /**
+     * The rotation the **server** already has: it is written from the packets that were actually
+     * sent, so it is what an interaction arriving now would be judged with. Not silent means the
+     * camera is the aim, and the camera is sent on every movement packet too, so this is the right
+     * base in both cases.
+     */
+    fun serverRotation(me: LocalPlayer): Rotation =
+        if (values.silent) RotationManager.serverRotation else Rotation(me.yRot, me.xRot)
+
+    /** How far the server rotation still is from the goal, in degrees — debug only. */
+    fun remaining(me: LocalPlayer): Float {
+        val target = goal ?: return 0f
+        return serverRotation(me).directionAngleTo(target)
+    }
+
+    /** Asks the aim to go to [rotation], which looks at [point]. */
     fun aimAt(rotation: Rotation, point: Vec3? = null) {
-        val current = goal
-        if (current != null && close(current, rotation)) {
-            goalPoint = point ?: goalPoint
-            return
-        }
         goal = rotation
-        goalPoint = point
-        reached = false
-        stable = 0
-        releaseTicks = 0
+        goalPoint = point ?: goalPoint
     }
 
     /** Stops aiming: the aim walks back to the camera over the next ticks. */
     fun clear() {
         goal = null
         goalPoint = null
-        reached = false
-        stable = 0
-        releaseTicks = 0
     }
 
     /** Forgets everything, for enable/disable. */
     fun reset() {
         goal = null
         sent = null
-        reached = false
-        stable = 0
-        releaseTicks = 0
         goalPoint = null
         previousAim = null
+        releaseTicks = 0
         yawCarry = 0.0
         pitchCarry = 0.0
     }
 
     /**
-     * One tick of the aim. Call it once per tick, before reading [reached]: it advances the step
-     * while a goal is set, and walks the rotation back to the camera when the goal is gone.
+     * One tick of the aim. Call it once per tick from the `RotationUpdateEvent` handler — see the
+     * class documentation — before anything reads the rotation the server has.
      */
     fun tick() {
         val me = mc.player ?: return
 
+        // Did the manager keep the step published last tick?
+        applied = !values.silent || RotationManager.currentRotation != null
+
         val target = goal
         if (target == null) {
-            stable = 0
-            reached = false
             release(me)
             return
         }
         releaseTicks = 0
 
-        // Still the published rotation? Count how long, and only then consider the server reached.
-        stable = if (sent?.let { same(it, target) } == true) stable + 1 else 0
-        reached = stable >= REACHED_TICKS
-        if (reached) {
-            // Refresh the request without moving: a rotation that is dropped goes stale and the
-            // manager would snap the server rotation back to the camera.
-            publish(target)
-            return
-        }
-
-        val from = current(me)
-        val deltaYaw = Mth.wrapDegrees(target.yaw - from.yaw)
-        val deltaPitch = target.pitch - from.pitch
+        val current = RotationManager.currentRotation ?: sent ?: serverRotation(me)
+        val deltaYaw = Mth.wrapDegrees(target.yaw - current.yaw)
+        val deltaPitch = target.pitch - current.pitch
         if (abs(deltaYaw) + abs(deltaPitch) <= SNAP) {
             publish(target)
             return
@@ -255,7 +225,7 @@ internal class BlockAim(
         // a whole human tick. It is trusted as much as `Strength` says and completed with
         // `AICorrection` of what is left, exactly like the Aimassist does; when the engine is not
         // there (it is downloaded on start-up) the curve below takes over without dropping a tick.
-        val ai = if (values.engine == Engine.AI) aiStep(me, from, target) else null
+        val ai = if (values.engine == Engine.AI) aiStep(me, current, target) else null
         if (ai != null) {
             val trust = values.strength / 100f
             val correction = values.aiCorrection / 100f
@@ -263,7 +233,7 @@ internal class BlockAim(
             var aiPitch = ai.second * trust + deltaPitch * correction
 
             // An aim never walks away from the goal and never walks past it: whatever the model
-            // suggested, the step stays inside the correction the curve would have made.
+            // suggested, the step stays inside what the curve would have made.
             if (deltaYaw != 0f && aiYaw * deltaYaw < 0f) aiYaw = 0f
             if (deltaPitch != 0f && aiPitch * deltaPitch < 0f) aiPitch = 0f
             stepYaw = if (abs(aiYaw) > abs(deltaYaw)) deltaYaw else aiYaw
@@ -289,10 +259,10 @@ internal class BlockAim(
             stepPitch += (Random.nextFloat() - 0.5f) * values.jitter
         }
 
-        var next = Rotation(from.yaw + stepYaw, (from.pitch + stepPitch).coerceIn(-89.9f, 89.9f))
+        var next = Rotation(current.yaw + stepYaw, (current.pitch + stepPitch).coerceIn(-89.9f, 89.9f))
         if (values.gcdFix) {
-            val quantized = quantize(from, next)
-            val moved = abs(Mth.wrapDegrees(quantized.yaw - from.yaw)) + abs(quantized.pitch - from.pitch)
+            val quantized = quantize(current, next)
+            val moved = abs(Mth.wrapDegrees(quantized.yaw - current.yaw)) + abs(quantized.pitch - current.pitch)
             // At a low sensitivity a tiny step rounds to zero mouse counts and the aim would sit
             // still one count short of the face forever: on that tick the goal itself is taken.
             next = if (moved < 1.0e-3f) target else quantized
@@ -366,11 +336,6 @@ internal class BlockAim(
         return null
     }
 
-    /** The rotation the aim starts the step from: what the server has, or the camera. */
-    private fun current(me: LocalPlayer): Rotation =
-        if (values.silent) RotationManager.currentRotation ?: sent ?: Rotation(me.yRot, me.xRot)
-        else Rotation(me.yRot, me.xRot)
-
     /**
      * Steps the rotation back towards the camera after the goal is gone. Without it the manager
      * would hand the camera back the moment the request expires: a single packet turning as many
@@ -402,7 +367,7 @@ internal class BlockAim(
         )
     }
 
-    /** Hands [rotation] to the server (silent) or to the camera directly. */
+    /** Hands [rotation] to the server (silent) or straight to the camera. */
     private fun publish(rotation: Rotation, priority: Priority = Priority.IMPORTANT_FOR_PLAYER_LIFE) {
         // The model of the next tick reads this as "where the aim came from", i.e. how fast it is
         // already turning. Recorded before the write, so it is the aim the step started at.
@@ -428,6 +393,8 @@ internal class BlockAim(
      */
     private fun plan(rotation: Rotation) = RotationTarget(
         rotation = rotation,
+        // Must be re-requested every tick (done in [tick]); this is only how long a request outlives
+        // a missed tick before the manager starts dropping the aim.
         ticksUntilReset = 4,
         resetThreshold = 0.5f,
         considerInventory = true,
@@ -486,11 +453,4 @@ internal class BlockAim(
         val wobble = Random.nextDouble(-0.18, 0.18)
         return kotlin.math.floor(counts + 0.5 + wobble).toInt()
     }
-
-    private fun same(a: Rotation, b: Rotation): Boolean =
-        abs(Mth.wrapDegrees(a.yaw - b.yaw)) <= SAME && abs(a.pitch - b.pitch) <= SAME
-
-    /** Same goal, with the slack a recomputed point needs (see [GOAL_SLACK]). */
-    private fun close(a: Rotation, b: Rotation): Boolean =
-        abs(Mth.wrapDegrees(a.yaw - b.yaw)) + abs(a.pitch - b.pitch) <= GOAL_SLACK
 }
