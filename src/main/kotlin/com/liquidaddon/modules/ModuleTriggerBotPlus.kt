@@ -631,17 +631,18 @@ object ModuleTriggerBotPlus : ClientModule(
         }
     }
 
-    private fun report(me: LocalPlayer, target: LivingEntity, distance: Double, base: Double, isEarly: Boolean) {
+    private fun report(me: LocalPlayer, target: LivingEntity, measured: Double, base: Double, isEarly: Boolean) {
+        val reach = me.entityInteractionRange()
+
         if (chatLog && isEarly) {
             chat(
                 "§7[TriggerBotPlus] §fpre-trigger §7${target.name.string} §fat %.2f§7 blocks (+%.2f on base %.2f)"
                     .format(measured, measured - base, base)
             )
-            val reach = me.entityInteractionRange()
-            if (!serverSafe && distance > reach) {
+            if (measured > reach) {
                 chat(
                     "§7[TriggerBotPlus] §c%.2f > real reach %.2f — the server may reject this hit"
-                        .format(distance, reach)
+                        .format(measured, reach)
                 )
             }
         }
