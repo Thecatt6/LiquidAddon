@@ -35,6 +35,7 @@ import net.minecraft.world.level.block.SupportType
 import net.minecraft.world.phys.BlockHitResult
 import net.minecraft.world.phys.HitResult
 import net.minecraft.world.phys.Vec3
+import java.util.Locale
 import kotlin.math.round
 import kotlin.math.sqrt
 import kotlin.random.Random
@@ -78,6 +79,13 @@ import kotlin.random.Random
  *  4. the throw happens on the same tick the plan is made: the `UseItem` packet carries the
  *     rotation, so waiting for the camera to arrive only makes the pearl leave the hand later.
  *     [aimFirst] turns the waiting back on for anyone who wants it.
+ *
+ * ### Choosing the spot
+ *
+ * [targetMode] is Auto by default: the module picks the best block top around you. Set it to Manual
+ * and the throw goes to [point] and nowhere else — the pearl has to land on the top face of exactly
+ * that block. The point is an "x y z" text value, so it can be typed in the ClickGUI; the
+ * [setPointValue] switch fills it with the block you are standing on.
  *
  * ### Which spot
  *
@@ -200,6 +208,9 @@ object ModuleAutoPearlAI : ClientModule(
      */
     private const val FAST_LANDING_TICKS = 8
 
+    /** Below this many ticks of flight, a hit means the pearl spawned inside something. */
+    private const val MIN_FLIGHT_TICKS = 2
+
     /** Hard cap on the collision-aware simulations spent on one plan. */
     private const val MAX_SIMULATIONS = 44
 
@@ -227,6 +238,10 @@ object ModuleAutoPearlAI : ClientModule(
 
     enum class Mode(override val tag: String) : Tagged {
         SAVE("Save"), ENEMY("Enemy")
+    }
+
+    enum class TargetMode(override val tag: String) : Tagged {
+        AUTO("Auto"), MANUAL("Manual")
     }
 
     enum class EnemyTrigger(override val tag: String) : Tagged {
@@ -259,6 +274,18 @@ object ModuleAutoPearlAI : ClientModule(
     private val safeMemory by safeMemoryValue
     private val safeSearchValue = float("SafeSearch", 3.0f, 0.5f..8.0f, "blocks")
     private val safeSearch by safeSearchValue
+    /** Auto = find a spot; Manual = throw at [point] and nowhere else. */
+    private val targetModeValue = enumChoice("Target", TargetMode.AUTO)
+    private val targetMode by targetModeValue
+
+    /** The manual target, as "x y z". Typed in the ClickGUI, or filled by [setPointValue]. */
+    private val pointValue = text("Point", "")
+    private val point by pointValue
+
+    /** When switched on, the point becomes the block top under the player, and the switch resets. */
+    private val setPointValue = boolean("SetPoint", false)
+    private val setPoint by setPointValue
+
     private val landingToleranceValue = float("LandingTolerance", 0.6f, 0.2f..3.0f, "blocks")
     private val landingTolerance by landingToleranceValue
 
@@ -281,6 +308,13 @@ object ModuleAutoPearlAI : ClientModule(
     /** How close to the enemy the pearl has to land to count as a hit on them. */
     private val enemyToleranceValue = float("EnemyTolerance", 1.5f, 0.5f..4f, "blocks")
     private val enemyTolerance by enemyToleranceValue
+
+    /**
+     * How many ticks behind the client the server's copy of the player is. One tick is the norm; on a
+     * laggy server it is more, and while falling every tick is most of a block.
+     */
+    private val serverLagValue = int("ServerLag", 1, 0..4, "ticks")
+    private val serverLag by serverLagValue
 
     private val enemyRangeValue = float("EnemyRange", 12f, 3f..30f, "blocks")
     private val enemyRange by enemyRangeValue
@@ -394,6 +428,14 @@ object ModuleAutoPearlAI : ClientModule(
         }
 
         trackSafeSpot(me)
+
+        // "SetPoint" is a one-shot: it takes the block top under the player (or the last spot they
+        // stood on, if they are already falling), stores it as text and switches itself back off.
+        if (setPoint) {
+            capturePoint(me)
+            setPointValue.set(false)
+            return
+        }
 
         // A solution in progress: keep aiming, and throw when the server has the rotation.
         val active = planned
@@ -510,9 +552,17 @@ object ModuleAutoPearlAI : ClientModule(
         }
 
         return when (mode) {
-            Mode.SAVE -> isSafeLanding(impact.hit) || run {
-                if (debug) chat("§7[AutoPearl] §7would land at ${format(impact.hit.location)}, not safe")
-                false
+            // with a manual point the pearl has to reach *that* block, exactly like in the search
+            Mode.SAVE -> if (targetMode == TargetMode.MANUAL) {
+                landsOnTopOf(impact.hit, BlockPos.containing(target.x, target.y - 0.05, target.z)) || run {
+                    if (debug) chat("§7[AutoPearl] §7would miss the point: ${format(impact.hit.location)}")
+                    false
+                }
+            } else {
+                isSafeLanding(impact.hit) || run {
+                    if (debug) chat("§7[AutoPearl] §7would land at ${format(impact.hit.location)}, not safe")
+                    false
+                }
             }
 
             Mode.ENEMY -> impact.hit.location.distanceTo(target) <= tolerance || run {
@@ -603,6 +653,22 @@ object ModuleAutoPearlAI : ClientModule(
         safeSpotAt = Util.getMillis()
     }
 
+    /**
+     * Stores the block top the player is on as the manual target. Being a text value, it can also be
+     * typed by hand in the ClickGUI — this is just the convenient way to get the coordinates right.
+     */
+    private fun capturePoint(me: LocalPlayer) {
+        val base = if (me.onGround()) me.position() else safeSpot ?: me.position()
+        val block = BlockPos.containing(base.x, base.y - 0.05, base.z)
+
+        // the middle of the block top, which is where the module aims and the safest place to land
+        val captured = Vec3(block.x + 0.5, block.y + 1.0, block.z + 0.5)
+        pointValue.set(String.format(Locale.ROOT, "%.2f %.2f %.2f", captured.x, captured.y, captured.z))
+        targetModeValue.set(TargetMode.MANUAL)
+
+        chat("§7[AutoPearl] §fpoint set to §7${format(captured)}")
+    }
+
     /** Whether the current mode has something to do: a fall to save, or an enemy to pearl at. */
     private fun wantsToAct(me: LocalPlayer): Boolean = when (mode) {
         Mode.SAVE -> inDanger(me)
@@ -628,7 +694,76 @@ object ModuleAutoPearlAI : ClientModule(
         return true
     }
 
-    private fun solveSave(me: LocalPlayer): Solution? {
+    private fun solveSave(me: LocalPlayer): Solution? = when (targetMode) {
+        TargetMode.MANUAL -> solveManual(me)
+        TargetMode.AUTO -> solveAuto(me)
+    }
+
+    /**
+     * Throws at the point the user configured, and nowhere else.
+     *
+     * This exists because the automatic choice is a guess: it picks a block top that looks safe from
+     * up here, and on a platform edge the pearl can still arrive on the wrong face. A point you chose
+     * yourself, with the coordinates of the spot you want to land on, is not a guess — the module
+     * fits that spot and only accepts a landing on the top face of *that* block.
+     *
+     * The point is the middle of the block top; the block is the one right under it.
+     */
+    private fun solveManual(me: LocalPlayer): Solution? {
+        val configured = configuredPoint() ?: run {
+            if (debug) chat("§7[AutoPearl] §cthe Point is empty or not in \"x y z\" form")
+            return null
+        }
+
+        val block = BlockPos.containing(configured.x, configured.y - 0.05, configured.z)
+        val spot = Vec3(configured.x, block.y + 1.0, configured.z)
+
+        // three fits instead of two: this is the throw the player asked for, so it is worth the work
+        val fits = throwCandidates(me, spot, descending = true, limit = 3)
+        if (fits.isEmpty()) {
+            if (debug) chat("§7[AutoPearl] §cno arc reaches the point ${format(spot)}")
+            return null
+        }
+
+        if (!simulate) {
+            if (debug) chat("§7[AutoPearl] §fplan §apoint§f → ${format(spot)}")
+            return Solution(fits.first().rotation, "point", spot)
+        }
+
+        for (fit in fits) {
+            for (rotation in variants(fit.rotation)) {
+                val impact = verify(rotation) ?: continue
+                if (impact.ticks < MIN_FLIGHT_TICKS) continue
+                if (!landsOnTopOf(impact.hit, block)) {
+                    if (debug) chat("§7[AutoPearl] §7hit ${format(impact.hit.location)}, not the configured block")
+                    continue
+                }
+
+                if (debug) chat("§7[AutoPearl] §fplan §apoint§f in §7${impact.ticks} ticks§f → ${format(impact.hit.location)}")
+                return Solution(rotation, "point", impact.hit.location)
+            }
+        }
+
+        if (debug) chat("§7[AutoPearl] §cno arc lands on the top of the configured block")
+        return null
+    }
+
+    /** The manual target, parsed from the "x y z" text value. */
+    private fun configuredPoint(): Vec3? {
+        val parts = point.trim().split(' ', ',', ';', '\t').filter { it.isNotEmpty() }
+        if (parts.size < 3) return null
+
+        val x = parts[0].toDoubleOrNull() ?: return null
+        val y = parts[1].toDoubleOrNull() ?: return null
+        val z = parts[2].toDoubleOrNull() ?: return null
+        return Vec3(x, y, z)
+    }
+
+    /** Whether the pearl hit the top face of exactly [block]. */
+    private fun landsOnTopOf(hit: HitResult?, block: BlockPos): Boolean =
+        hit is BlockHitResult && hit.direction == Direction.UP && hit.blockPos == block
+
+    private fun solveAuto(me: LocalPlayer): Solution? {
         val candidates = landingCandidates(me)
         if (candidates.isEmpty()) {
             if (debug) chat("§7[AutoPearl] §cno safe landing found (no block tops around)")
@@ -666,6 +801,16 @@ object ModuleAutoPearlAI : ClientModule(
                     if (simulations++ >= MAX_SIMULATIONS) break@search
 
                     val impact = verify(rotation) ?: continue
+
+                    // An impact on the very first tick means the pearl was born inside a block: the
+                    // face reported there says nothing about where the pearl would land.
+                    if (impact.ticks < MIN_FLIGHT_TICKS) {
+                        if (debug) {
+                            chat("§7[AutoPearl] §7hit at ${format(impact.hit.location)} after ${impact.ticks} ticks (spawn point)")
+                        }
+                        continue
+                    }
+
                     if (!isSafeLanding(impact.hit)) {
                         if (debug) {
                             chat("§7[AutoPearl] §7landing at ${format(impact.hit.location)} is not on top")
@@ -1160,8 +1305,8 @@ object ModuleAutoPearlAI : ClientModule(
             Deviation(carried.scale(VELOCITY_TRUST[1]), 0),
             // the server still has you on the ground: no fall is inherited at all
             Deviation(Vec3(carried.x, 0.0, carried.z), 0),
-            // the server's position is one tick behind: the pearl spawns where you were last tick
-            Deviation(carried, 1)
+            // the server's position lags: the pearl spawns where you were a few ms ago
+            Deviation(carried, serverLag.coerceAtLeast(1))
         )
     }
 
