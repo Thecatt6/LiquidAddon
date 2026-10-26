@@ -200,10 +200,15 @@ internal class BlockAim(
     fun tick() {
         val me = mc.player ?: return
 
-        // Did the manager keep the step published last tick?
-        applied = !values.silent || RotationManager.currentRotation != null
-
         val target = goal
+
+        // Did the manager keep the step published last tick? It is our step only when the rotation it
+        // is using is the one we sent: a rotation held by another module reads as "not applied" too.
+        val managed = RotationManager.currentRotation
+        val mine = sent
+        applied = !values.silent || target == null ||
+            (managed != null && mine != null && managed.directionAngleTo(mine) < 5f)
+
         if (target == null) {
             release(me)
             return

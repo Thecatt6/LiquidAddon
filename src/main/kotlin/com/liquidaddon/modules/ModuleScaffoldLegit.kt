@@ -38,6 +38,19 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 /**
+ * How far the aim may still be from the planned rotation and the click still be sent with the
+ * *planned* hit instead of a traced one, in degrees.
+ *
+ * The trace of a bridge block is often blocked by the very block it is clicked on: the block under
+ * the player's feet hides its own side face from an eye that is above it, so the ray that points at
+ * that face enters the block through its top. The click is still correct — it hits that block, in
+ * reach, along a rotation that points at it — which is exactly what the server and the anticheats
+ * check. Only the *face* of the hit cannot be traced, and that is what this tolerance allows: once
+ * the aim is this close, the planned hit is used.
+ */
+private const val PLANNED_HIT_TOLERANCE = 3f
+
+/**
  * ScaffoldLegit — the bridge and the stair climb, with a real aim.
  *
  * **What it does, every tick**
@@ -50,10 +63,13 @@ import kotlin.random.Random
  *  3. it aims at that face with the Aimassist's maths ([BlockAim]: a share per tick, `MaxSpeed`,
  *     `Smoothing`, `Jitter`, or LiquidBounce's already trained combat model with `Engine = AI`) and
  *     publishes the rotation tick by tick — silently, so the camera stays free;
- *  4. it clicks only when the ray from the rotation the **server already has**
- *     (`RotationManager.serverRotation`, written from the packets that were sent) hits that face.
- *     That is the "post rotation" order anticheats look for: never a click justified by a rotation
- *     the server has not received yet;
+ *  4. it clicks only when the rotation the **server already has** (`RotationManager.serverRotation`,
+ *     written from the packets that were sent) is on that face: the click is traced from there and
+ *     verified, and when the trace is blocked by the very block that is being clicked — the usual
+ *     case for a bridge block, its own top face hides the side face an eye above it aims at — the
+ *     planned hit is used once the aim is within [PLANNED_HIT_TOLERANCE] of it. That is the "post
+ *     rotation" order anticheats look for: never a click justified by a rotation the server has not
+ *     received yet;
  *  5. every block it really places goes to [PlacementRenderer], which draws the box.
  *
  * **The climb.** `Mode = Stairs`: first the walkway block in front (same level as the one under the
@@ -230,7 +246,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
             blockedTicks = 0
             return
         }
-        if (++blockedTicks == 60) {
+        if (++blockedTicks % 60 == 0) {
             me.sendSystemMessage(
                 Component.literal(
                     "§7[ScaffoldLegit] §cla rotazione è bloccata da LiquidBounce " +
@@ -343,16 +359,15 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         // The click has to be justified by the rotation the server already received, so it is traced
         // from there. As long as the ray does not reach the planned face the module keeps aiming.
         val server = blockAim.serverRotation(me)
-        val hit = click.verifyClick(rotation = server)
+        val remaining = server.directionAngleTo(click.rotation)
+        val verified = click.verifyClick(rotation = server)
+        val hit = verified ?: if (remaining <= PLANNED_HIT_TOLERANCE) click.blockHitResult else null
         if (hit == null) {
             if (++traceMisses % 6 == 0) {
                 // The player moved and the planned click is stale: look for another face.
                 target = null
             }
-            debug(
-                me,
-                "mirando " + posText(cell) + ": resta %.1f°".format(blockAim.remaining(me))
-            )
+            debug(me, "mirando " + posText(cell) + ": resta %.1f°".format(remaining))
             return
         }
 
