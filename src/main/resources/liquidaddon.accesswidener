@@ -10,3 +10,12 @@ accessible field net/minecraft/client/Minecraft missTime I
 # Read by TriggerBotPlus (PrePress = Key): `KeyMapping.click` needs the bound key, which is exposed
 # to LiquidBounce by this very same entry in its own access widener.
 accessible field net/minecraft/client/KeyMapping key Lcom/mojang/blaze3d/platform/InputConstants$Key;
+
+# Used by BlockHit to open a block the way the right button does: it hands back a prediction
+# sequence, without which the server has nothing to reconcile and the use looks crafted. Same entry
+# as in LiquidBounce's own access widener (which does not propagate to add-ons).
+accessible method net/minecraft/client/multiplayer/MultiPlayerGameMode startPrediction (Lnet/minecraft/client/multiplayer/ClientLevel;Lnet/minecraft/client/multiplayer/prediction/PredictiveAction;)V
+
+# Used by BlockHit before that use: it tells the server which slot is held, so a silent hotbar swap
+# left behind by another module cannot make the use land on the item that was in the hand before.
+accessible method net/minecraft/client/multiplayer/MultiPlayerGameMode ensureHasSentCarriedItem ()V
