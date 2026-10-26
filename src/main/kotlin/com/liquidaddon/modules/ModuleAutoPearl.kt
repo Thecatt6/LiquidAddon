@@ -23,6 +23,7 @@ import net.ccbluex.liquidbounce.utils.kotlin.Priority as RotationPriority
 import net.ccbluex.liquidbounce.utils.render.trajectory.TrajectoryInfo
 import net.ccbluex.liquidbounce.utils.render.trajectory.TrajectoryInfoRenderer
 import net.ccbluex.liquidbounce.utils.render.trajectory.TrajectoryType
+import net.minecraft.client.player.LocalPlayer
 import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
 import net.minecraft.util.Util
@@ -413,7 +414,7 @@ object ModuleAutoPearl : ClientModule(
     private fun solveSave(me: LocalPlayer): Solution? {
         for (candidate in landingCandidates(me)) {
             val rotation = solve(candidate) ?: continue
-            if (simulate && !landsAt(rotation, candidate, landingTolerance)) continue
+            if (simulate && !landsAt(rotation, candidate, landingTolerance.toDouble())) continue
             if (debug) chat("§7[AutoPearl] §fplan §asave§f → ${format(candidate)}")
             return Solution(rotation, "save", candidate)
         }
@@ -437,7 +438,7 @@ object ModuleAutoPearl : ClientModule(
 
         // A sumo platform floats over the void, so the only thing that makes a spot safe is the
         // block itself: solid top, free space above it.
-        val center = (remembered ?: me.position()).toBlockPos()
+        val center = BlockPos.containing(remembered ?: me.position())
         val radius = safeSearch.toInt().coerceAtLeast(1)
         val around = ArrayList<Vec3>()
 
@@ -468,8 +469,6 @@ object ModuleAutoPearl : ClientModule(
         return aboveState.isAir || !aboveState.fluidState.isEmpty
     }
 
-    private fun Vec3.toBlockPos(): BlockPos = BlockPos.containing(this)
-
     // --- mode: enemy --------------------------------------------------------------------------
 
     private fun solveEnemy(me: LocalPlayer): Solution? {
@@ -497,7 +496,7 @@ object ModuleAutoPearl : ClientModule(
         .asSequence()
         .filterIsInstance<LivingEntity>()
         .filter { it !== me && it.shouldBeAttacked() }
-        .filter { it.squaredBoxedDistanceTo(me) <= enemyRange * enemyRange }
+        .filter { it.squaredBoxedDistanceTo(me) <= enemyRange.toDouble() * enemyRange }
         .minByOrNull { it.squaredBoxedDistanceTo(me) }
 
     // --- aim: the same pipeline as the Aimassist ----------------------------------------------
