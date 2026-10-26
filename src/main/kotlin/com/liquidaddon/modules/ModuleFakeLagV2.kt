@@ -370,18 +370,33 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
             return@handler
         }
 
+        // Never let a packet overtake the ones we are holding: the blink queue is FIFO only among
+        // queued packets, so passing one while older ticks are still held would deliver your ticks
+        // to the server out of order - the rubber-banding, "hacks bugging out" kind of wrong, which
+        // is exactly what entering water used to do. While the hold drains (water, gui, eating,
+        // death) new packets are queued too and leave with the drain, one whole tick per tick.
         if (!shouldHold()) {
-            event.action = BlinkManager.Action.PASS
-            return@handler
-        }
-
-        // Your own interactions make the connection catch up instead of being held with
-        // everything else: the hold drops to zero one tick per tick and stays there for a moment,
-        // so a hit or a place is late by at most the hold in force when it happened, and never
-        // after. A burst would be sooner, and would be flagged: releasing the held ticks together
-        // with a newer interaction puts a dig, place or swing behind the move packet of an older
-        // tick inside one server tick, which is the pattern every "post packet" check knows.
-        if (flushOn.matchesAny(packet)) {
+            if (!holding) {
+                event.action = BlinkManager.Action.PASS
+                return@handler
+            }
+            if (heldTicks == 0) {
+                // The drain is over: what is left in the queue is only the tick we are inside,
+                // because every older tick left at the last boundary. Letting it go now, alone,
+                // keeps every tick in its own server tick and frees the rest of this one.
+                BlinkManager.flush { it.origin == TransferOrigin.OUTGOING }
+                holding = false
+                event.action = BlinkManager.Action.PASS
+                return@handler
+            }
+            // Still draining: queue, so nothing overtakes the ticks that are left.
+        } else if (flushOn.matchesAny(packet)) {
+            // Your own interactions make the connection catch up instead of being held with
+            // everything else: the hold drops to zero one tick per tick and stays there for a
+            // moment, so a hit or a place is late by at most the hold in force when it happened,
+            // and never after. A burst would be sooner, and would be flagged: releasing the held
+            // ticks together with a newer interaction puts a dig, place or swing behind the move
+            // packet of an older tick inside one server tick, which every "post packet" check knows.
             catchUpUntil = System.currentTimeMillis() + CATCH_UP_MS
         }
 
