@@ -2,3 +2,6 @@ accessWidener	v1	official
 
 # LiquidBounce's own access widener does NOT propagate to add-ons - every entry there is a plain
 # `accessible`/`mutable`, not `transitive-`. Widen anything you need yourself, here.
+
+# Read by TriggerBotPlus: vanilla ignores clicks for a few ticks after a missed swing.
+accessible field net/minecraft/client/Minecraft missTime I

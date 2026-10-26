@@ -19,9 +19,12 @@ import net.ccbluex.liquidbounce.utils.item.WeaponType
 import net.ccbluex.liquidbounce.utils.kotlin.matchesAny
 import net.ccbluex.liquidbounce.utils.raytracing.findEntityInCrosshair
 import net.ccbluex.liquidbounce.utils.raytracing.hasLineOfSight
+import net.minecraft.client.KeyMapping
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.util.Util
+import net.minecraft.world.InteractionHand
 import net.minecraft.world.entity.LivingEntity
+import kotlin.math.max
 import kotlin.math.sqrt
 import kotlin.random.Random
 
@@ -53,38 +56,41 @@ import kotlin.random.Random
  * the module can never click faster than the weapon allows, and the camera is never touched: this
  * module does not aim, it only decides *when* to swing.
  *
- * ### Reach, and why anticheats flag pre-triggers
+ * ### What "early" means here: the press, not the hit
  *
- * A pre-trigger is a click on an enemy that is **not in range yet**, so a server that validates the
- * distance of an attack (Grim's `Reach` check, for example) flags it — that is the feature working,
- * not a bug in it. Two consequences:
+ * The first version of this module attacked the enemy from outside the reach. That is a Reach hack
+ * and every anticheat that measures attack distance flags it — correctly.
  *
- *  - [serverSafe] (default on) keeps the randomness but keeps it **inside the legal window**
- *    `base .. reach + [overReach] - SafetyGap`, and the cushion decides where inside it the click
- *    lands. [overReach] is the only part of a pre-trigger a server lets through, because your own
- *    latency hands it back — the enemy keeps walking while the packet travels. `0` = a strictly
- *    legal triggerbot that never fires past the reach; `0.15..0.25` = a real early click that most
- *    servers still accept for a target that is closing;
- *  - with [serverSafe] off the module does what the name says — clicks while the enemy is still
- *    outside the reach. That is what a Grim `Reach` flag is made of. Every pre-trigger of this kind
- *    is validated server-side, so a rejected one still burns the client attack cooldown.
+ * So the early part was moved **onto the button**: while the enemy is inside the acquisition ray but
+ * still outside the attack distance, the module presses the left button ([prePress]) without
+ * attacking anyone —
+ *
+ *  - [PrePress.SWING] swings the arm, exactly the packets vanilla sends when your click hits nothing;
+ *  - [PrePress.KEY] queues a real attack-key press and lets vanilla resolve it on its own hit result,
+ *    so the attack happens only once the enemy is already inside the vanilla reach.
+ *
+ * The attack itself then always comes from [attackLimit], i.e. from inside `reach - [safetyGap]`
+ * (plus [overReach], 0 by default). Nothing is ever sent to an out-of-range entity, so there is
+ * nothing for a Reach check to see, while the hand is already clicking the instant the enemy walks
+ * in: no reaction time, no lost tick, no wasted swing.
  *
  * The distance is measured exactly like the server does it ([serverDistance]): from the eyes to the
  * hitbox, **without** the client pick-radius slack. Using the usual boxed distance (which inflates
- * the hitbox by 0.1) is enough on its own to push a "3.0 blocks" click over the limit.
+ * the hitbox by 0.1) is enough on its own to push a "3.0 blocks" attack over the limit.
  *
  * Settings:
  *   Preset            ready-made configs (Custom = the sliders below)
  *   Range             base trigger distance, used while the enemy is still outside real reach
  *   MatchVanilla      use the weapon's real attack range (attribute + item component) as base
- *   Early             slider range `min..max` of the random cushion, in blocks
+ *   Early             slider range `min..max`: how early the button starts being pressed
  *   CPS               clicks per second as a slider range, re-drawn after every click
  *   CpsJitter         extra random delay on top of the CPS interval, in %
  *   Fov               0 = the enemy must be under the crosshair ray, >0 = a cone around it
  *   EarlyChance       chance (%) that an encounter uses a cushion at all
  *   ServerSafe        never click beyond the reach the server measures (default on)
  *   SafetyGap         how much of the reach is left unused while ServerSafe is on
- *   OverReach         how far past the reach the cushion may push (the real "early" knob)
+ *   OverReach         how far past the reach an *attack* may go (0 = never, keep it there)
+ *   PrePress          Off / Swing / Key: what the early press does
  *   CPS / CpsJitter   click rate as a slider range, plus a random stretch per click
  *   MinCooldown       minimum attack strength, so the rate never nerfs the damage
  *   Predict           lead the enemy's movement
@@ -144,7 +150,8 @@ object ModuleTriggerBotPlus : ClientModule(
         val keepSprint: Boolean,
         val serverSafe: Boolean = true,
         val safetyGap: Float = 0.05f,
-        val overReach: Float = 0.10f
+        val overReach: Float = 0.0f,
+        val prePress: PrePress = PrePress.SWING
     )
 
     enum class Preset(override val tag: String, val profile: Profile?) : Tagged {
@@ -157,7 +164,7 @@ object ModuleTriggerBotPlus : ClientModule(
                 range = 3.0f, matchVanilla = true, early = 0.10f..0.30f, earlyChance = 40,
                 predict = true, predictTicks = 1, reaction = 0..1, minCooldown = 1.0f,
                 cps = 8..11, clickDelay = 0..1, throughWalls = false, keepSprint = false,
-                serverSafe = true, safetyGap = 0.05f, overReach = 0.05f
+                serverSafe = true, safetyGap = 0.05f, overReach = 0.0f, prePress = PrePress.SWING
             )
         ),
 
@@ -168,7 +175,7 @@ object ModuleTriggerBotPlus : ClientModule(
                 range = 3.0f, matchVanilla = true, early = 0.20f..0.55f, earlyChance = 75,
                 predict = true, predictTicks = 2, reaction = 0..0, minCooldown = 1.0f,
                 cps = 10..14, clickDelay = 0..0, throughWalls = false, keepSprint = false,
-                serverSafe = true, safetyGap = 0.05f, overReach = 0.10f
+                serverSafe = true, safetyGap = 0.05f, overReach = 0.0f, prePress = PrePress.KEY
             )
         ),
 
@@ -179,9 +186,28 @@ object ModuleTriggerBotPlus : ClientModule(
                 range = 3.2f, matchVanilla = false, early = 0.35f..0.90f, earlyChance = 100,
                 predict = true, predictTicks = 2, reaction = 0..0, minCooldown = 0.90f,
                 cps = 14..20, clickDelay = 0..0, throughWalls = true, keepSprint = false,
-                serverSafe = false, safetyGap = 0.05f, overReach = 0.0f
+                serverSafe = false, safetyGap = 0.05f, overReach = 0.0f, prePress = PrePress.SWING
             )
         )
+    }
+
+    /** How the early click is delivered, i.e. what "pressing the left button" means here. */
+    enum class PrePress(override val tag: String) : Tagged {
+        /** No early click: the module only attacks, in range. */
+        OFF("Off"),
+
+        /**
+         * Swing the arm exactly like vanilla does when you click at nothing: client animation plus
+         * `ServerboundSwingPacket`. No attack packet, no cooldown consumed, nothing to flag.
+         */
+        SWING("Swing"),
+
+        /**
+         * Queue a real attack-key press, like pressing the button yourself. Vanilla resolves it
+         * against its own hit result, so the attack only happens when the enemy is already inside the
+         * vanilla reach. Held back while vanilla is still in its miss cooldown.
+         */
+        KEY("Key")
     }
 
     // --- preset -------------------------------------------------------------------------------
@@ -202,12 +228,17 @@ object ModuleTriggerBotPlus : ClientModule(
     private val matchVanillaValue = boolean("MatchVanilla", true)
     private val matchVanilla by matchVanillaValue
 
-    /** The random cushion: every encounter draws one value between these two handles. */
-    private val earlyValue = floatRange("Early", 0.05f..0.25f, 0.0f..2.0f, "blocks")
+    /**
+     * The random cushion: every encounter draws one value between these two handles. It is how many
+     * blocks **before** the attack distance the module starts pressing the left button — the enemy is
+     * still out of reach, so the press hits nothing, but the hand is already clicking when they
+     * arrive.
+     */
+    private val earlyValue = floatRange("Early", 0.10f..0.35f, 0.0f..2.0f, "blocks")
     private val early by earlyValue
 
     /** Chance (%) that an encounter draws a cushion at all. 0 = never early, 100 = always. */
-    private val earlyChanceValue = int("EarlyChance", 65, 0..100, "%")
+    private val earlyChanceValue = int("EarlyChance", 100, 0..100, "%")
     private val earlyChance by earlyChanceValue
 
     /**
@@ -219,12 +250,12 @@ object ModuleTriggerBotPlus : ClientModule(
     private val fov by fovValue
 
     /**
-     * Keep the pre-trigger inside the window the server still accepts: the click lands between the
-     * base distance and `reach + [overReach] - [safetyGap]`, with the cushion deciding where in that
-     * window, so the randomness survives instead of every encounter piling up on the ceiling.
+     * Keep every **attack** inside the reach the server measures: the hit happens at
+     * `min(base, reach - SafetyGap + OverReach)`. The early part of the module does not need this,
+     * because it lives on the press ([prePress]), which never attacks.
      *
-     * Turning it off adds the cushion as it is drawn, past the reach: the raw "click before the
-     * enemy is in range" behaviour, and what Grim's Reach check flags.
+     * Turning it off adds the cushion to the attack distance as it is drawn, past the reach: the
+     * attack itself happens out of range, which is exactly what Grim's Reach check flags.
      */
     private val serverSafeValue = boolean("ServerSafe", true)
     private val serverSafe by serverSafeValue
@@ -237,15 +268,20 @@ object ModuleTriggerBotPlus : ClientModule(
     private val safetyGap by safetyGapValue
 
     /**
-     * How far past the reach the module may pre-trigger while [serverSafe] is on. This is the knob
-     * that actually buys the early click: to be early you have to click while the enemy is still a
-     * little outside your reach, and the only part of that which a server lets through is the part
-     * your own latency covers — the enemy keeps walking while the packet travels, so by the time it
-     * is evaluated they are closer again. `0.10` is roughly one tick of a sprinting target at ~70ms
-     * ping; `0.0` is the strictly legal triggerbot (never early, never flagged).
+     * How far past the reach an **attack** may go while [serverSafe] is on. Keep it at `0`: the early
+     * click is the press now, so an attack has no reason to leave the reach. Anything above zero is
+     * paid for with reach flags, and only makes sense together with [serverSafe] off.
      */
-    private val overReachValue = float("OverReach", 0.15f, 0.0f..0.50f, "blocks")
+    private val overReachValue = float("OverReach", 0.0f, 0.0f..0.50f, "blocks")
     private val overReach by overReachValue
+
+    /**
+     * What the early click actually is. [PrePress.SWING] and [PrePress.KEY] both press the left
+     * button while the enemy is still out of range **without attacking them** — the hit is left to
+     * the moment they come in range, which is why nothing here can be a Reach flag.
+     */
+    private val prePressValue = enumChoice("PrePress", PrePress.SWING)
+    private val prePress by prePressValue
 
     // --- timing / humanisation ----------------------------------------------------------------
 
@@ -287,7 +323,7 @@ object ModuleTriggerBotPlus : ClientModule(
 
     // --- behaviour ----------------------------------------------------------------------------
 
-    private val holdAttackValue = boolean("HoldAttack", true)
+    private val holdAttackValue = boolean("HoldAttack", false)
     private val holdAttack by holdAttackValue
     private val throughWallsValue = boolean("ThroughWalls", false)
     private val throughWalls by throughWallsValue
@@ -332,11 +368,19 @@ object ModuleTriggerBotPlus : ClientModule(
 
     private var triggers = 0
     private var preTriggers = 0
+    private var presses = 0
     private var lastMargin = 0.0
 
-    /** HUD tag: the cushion of the last pre-trigger, so the randomness is visible in game. */
+    /**
+     * HUD tag: `~N` while the early presses are the only thing happening (the enemy is still out of
+     * reach), `+x.xx` once an attack landed earlier than the base distance.
+     */
     override val tag: String
-        get() = if (preTriggers == 0) "" else "+%.2f".format(lastMargin)
+        get() = when {
+            preTriggers > 0 -> "+%.2f".format(lastMargin)
+            presses > 0 -> "~$presses"
+            else -> ""
+        }
 
     init {
         // A preset rewrites the sliders, so the GUI always shows what is really used. Nothing is
@@ -349,6 +393,7 @@ object ModuleTriggerBotPlus : ClientModule(
         resetEncounter()
         triggers = 0
         preTriggers = 0
+        presses = 0
         lastMargin = 0.0
         clickDelay = 0
         nextClickAt = 0L
@@ -419,17 +464,26 @@ object ModuleTriggerBotPlus : ClientModule(
 
         val base = baseDistance(me)
         val measured = serverDistance(me, target)
-        val limit = triggerLimit(me, base)
+        val attackAt = attackLimit(me, base)
         val distance = if (serverSafe) measured else predictedDistance(me, target, measured)
-        if (distance > limit) return
+
+        // The early click: the enemy is still beyond the attack distance, so we only press the left
+        // button. Nothing is attacked here — the press hits air, exactly like a player clicking at
+        // nothing while the target walks in.
+        if (distance > attackAt) {
+            if (measured <= attackAt + earlyMargin) {
+                pressEarly(me, target, measured, attackAt)
+            }
+            return
+        }
 
         if (!weapon.matchesAny(me.mainHandItem)) return
         if (skipInvulnerable && target.hurtTime > 0) return
         if (!isCooldownReady(me)) return
 
-        // A pre-trigger is a click that really happened past the base distance because of the
-        // cushion of this encounter — not merely "a cushion existed".
-        val isEarly = earlyMargin > 0.0 && measured > base
+        // A pre-trigger is an attack that happened past the base distance because the enemy walked
+        // into a press that was already going.
+        val isEarly = measured > base
 
         if (!attackEntity(target, swing, keepSprint)) {
             // Cancelled (e.g. by HitSelect) — try again next tick instead of spinning on it.
@@ -440,13 +494,49 @@ object ModuleTriggerBotPlus : ClientModule(
         triggers++
         if (isEarly) {
             preTriggers++
-            // how much earlier than the base distance the click really was, in blocks
             lastMargin = measured - base
         }
         clickDelay = nextIn(clickDelayRange)
         nextClickAt = Util.getMillis() + nextIntervalMillis()
 
         report(me, target, measured, base, isEarly)
+    }
+
+    // --- the early click ----------------------------------------------------------------------
+
+    /**
+     * Presses the left button while the enemy is outside the attack distance: [PrePress.SWING] swings
+     * the arm (client animation + swing packet, like vanilla does when the click hits nothing),
+     * [PrePress.KEY] queues a real attack-key press so vanilla resolves it on its own hit result.
+     *
+     * Either way **no attack is sent to an out-of-range entity**, which is what a Reach check looks
+     * for. The only thing this buys is time: the button is already down when the enemy steps in.
+     */
+    private fun pressEarly(me: LocalPlayer, target: LivingEntity, measured: Double, attackAt: Double) {
+        if (prePress == PrePress.OFF || earlyMargin <= 0.0) return
+        if (!weapon.matchesAny(me.mainHandItem)) return
+
+        when (prePress) {
+            PrePress.OFF -> return
+            PrePress.SWING -> swing.swing(InteractionHand.MAIN_HAND)
+            PrePress.KEY -> {
+                // Vanilla ignores clicks for a few ticks after a missed swing; pressing now would be
+                // swallowed and the real click would come too late.
+                if (mc.missTime > 0) return
+                KeyMapping.click(mc.options.keyAttack.key)
+            }
+        }
+
+        presses++
+        clickDelay = nextIn(clickDelayRange)
+        nextClickAt = Util.getMillis() + nextIntervalMillis()
+
+        if (debug) {
+            chat(
+                "§7[TriggerBotPlus] §fearly press §7${target.name.string} §fat %.2f§7 (attack at %.2f, in %.2f)"
+                    .format(measured, attackAt, measured - attackAt)
+            )
+        }
     }
 
     // --- target acquisition -------------------------------------------------------------------
@@ -501,9 +591,9 @@ object ModuleTriggerBotPlus : ClientModule(
     private fun baseDistance(me: LocalPlayer): Double =
         if (matchVanilla) me.entityInteractionRange() else range.toDouble()
 
-    /** How far the acquisition ray looks: far enough to see the enemy before the trigger distance. */
+    /** How far the acquisition ray looks: far enough to see the enemy before the press begins. */
     private fun acquisitionRange(me: LocalPlayer): Double =
-        baseDistance(me) + early.endInclusive + overReach + RAY_SLACK
+        max(baseDistance(me), me.entityInteractionRange()) + early.endInclusive + overReach + RAY_SLACK
 
     /**
      * The distance an attack packet is measured with on the server side: attacker's eyes to the
@@ -517,29 +607,18 @@ object ModuleTriggerBotPlus : ClientModule(
         sqrt(target.boundingBox.distanceToSqr(me.eyePosition))
 
     /**
-     * The distance the click actually happens at.
+     * The distance at which the module is allowed to **attack**. The early part of the module lives
+     * on the press ([pressEarly]), never here, so this stays inside the reach:
      *
-     * Without [serverSafe] it is plain `base + cushion`: the drawn cushion is added as it is, so a
-     * cushion of `0.25` clicks a quarter of a block before the reach — and past it.
-     *
-     * With [serverSafe] the draw is **mapped onto the legal window** instead of being clamped to it.
-     * The window is `base .. reach + OverReach - SafetyGap` — the part of the pre-trigger your own
-     * latency hands back — and the cushion decides *where* inside it the click lands, so the
-     * randomness survives instead of piling every encounter on the ceiling:
-     *
-     *   distance = base + (cushion / Early.max) * window
-     *
-     * `OverReach = 0` therefore means "click at the reach, never past it", and the largest cushion
-     * always means "as early as the server still accepts".
+     *  - [serverSafe] on: `reach - SafetyGap` (+ [overReach], which is 0 by default). Nothing to flag;
+     *  - [serverSafe] off: `base + cushion`, i.e. the attack itself happens out of range — reach hack,
+     *    and exactly what Grim flags.
      */
-    private fun triggerLimit(me: LocalPlayer, base: Double): Double {
+    private fun attackLimit(me: LocalPlayer, base: Double): Double {
         if (!serverSafe) return (base + earlyMargin).coerceAtLeast(MIN_TRIGGER)
 
         val ceiling = me.entityInteractionRange() + overReach - safetyGap
-        val window = (ceiling - base).coerceAtLeast(0.0)
-        val top = early.endInclusive.toDouble()
-        val share = if (top <= 0.0) 0.0 else (earlyMargin / top).coerceIn(0.0, 1.0)
-        return (base + window * share).coerceAtLeast(MIN_TRIGGER)
+        return minOf(base, ceiling).coerceAtLeast(MIN_TRIGGER)
     }
 
     /**
@@ -625,6 +704,7 @@ object ModuleTriggerBotPlus : ClientModule(
         serverSafeValue.set(p.serverSafe)
         safetyGapValue.set(p.safetyGap)
         overReachValue.set(p.overReach)
+        prePressValue.set(p.prePress)
 
         if (debug || chatLog) {
             chat("§7[TriggerBotPlus] §fpreset §7${preset.tag}§f applied")
@@ -649,8 +729,8 @@ object ModuleTriggerBotPlus : ClientModule(
 
         if (debug) {
             chat(
-                "§7[TriggerBotPlus] §ftrigger #$triggers §7(pre $preTriggers) §fdist=%.2f base=%.2f limit=%.2f cps=%d%s"
-                    .format(measured, base, triggerLimit(me, base), nextIn(cps), if (isEarly) " §6early" else "")
+                "§7[TriggerBotPlus] §ftrigger #$triggers §7(pre $preTriggers, presses $presses) §fdist=%.2f base=%.2f attackAt=%.2f cps=%d%s"
+                    .format(measured, base, attackLimit(me, base), nextIn(cps), if (isEarly) " §6early" else "")
             )
         }
     }
