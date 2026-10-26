@@ -154,6 +154,8 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     private var walkX = 0.0
     private var walkZ = 0.0
     private var lastDebug = ""
+    /** Ticks the module has been on without a placement, for the "why nothing?" hint. */
+    private var silentTicks = 0
     /** Why the last [findPlacement] refused; only shown by the debug line. */
     private var lastReject = ""
 
@@ -169,6 +171,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         steps = 0
         misses = 0
         airTickSum = 0
+        silentTicks = 0
         pending.clear()
         blockAim.reset()
         aimingCell = null
@@ -261,6 +264,12 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     private val tickHandler = handler<GameTickEvent> {
         val me = mc.player ?: return@handler
         flushPendingRender()
+        silentTicks++
+        if (silentTicks == 100 && steps == 0 && !debug && chatLog) {
+            me.sendSystemMessage(
+                Component.literal("§7[ScaffoldLegit] §enessun blocco in 5 secondi - attiva §fDebug §7per il motivo")
+            )
+        }
         if (phase == Phase.FLAT && !(mode == Mode.STAIRS && spaceHeld)) {
             debug(me, "spazio non premuto: solo Eagle")
             blockAim.clear()
@@ -283,8 +292,15 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
      * it — the "post rotation" order. Judging by a tick counter instead would be a guess; this is
      * the state of the server.
      */
-    private fun aimed(me: LocalPlayer, rotation: Rotation): Boolean =
-        blockAim.serverRotation(me).directionAngleTo(rotation) <= AIM_TOLERANCE
+    private fun aimed(me: LocalPlayer, rotation: Rotation): Boolean {
+        // Either the server is already looking there, or the rotation has been sent and carried by
+        // the movement packets for a couple of ticks: both mean the click is justified by a rotation
+        // the server has.
+        if (blockAim.serverRotation(me).directionAngleTo(rotation) <= AIM_TOLERANCE) {
+            return true
+        }
+        return blockAim.ticksOnGoal >= 2
+    }
 
     /** Nothing to aim at in this phase: let the aim walk back to the camera. */
     private fun idle() {
@@ -695,11 +711,17 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
      */
     private fun flatCell(me: LocalPlayer): BlockPos? {
         val length = hypot(walkX, walkZ)
+        val dx: Double
+        val dz: Double
         if (length < 1.0e-6) {
-            return null
+            // No key pressed: the bridge follows the camera (see [atEdge]).
+            val yaw = Math.toRadians(me.yRot.toDouble())
+            dx = -sin(yaw)
+            dz = cos(yaw)
+        } else {
+            dx = walkX / length
+            dz = walkZ / length
         }
-        val dx = walkX / length
-        val dz = walkZ / length
         val level = mc.level ?: return null
         val feetY = floor(me.y + 1.0e-3).toInt()
         val ahead = BlockPos.containing(me.x + dx * 0.9, me.y - 0.5, me.z + dz * 0.9)
@@ -720,17 +742,27 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         return ahead
     }
 
-    /** Eagle: the block below the point EdgeDistance ahead, along where the keys push, is air. */
+    /**
+     * Eagle: the block below the point EdgeDistance ahead, along where the keys push, is air.
+     *
+     * Without a movement key the direction is the one the camera looks at, so standing still on the
+     * edge works too — before, a player who stopped walking got no edge at all and the module did
+     * nothing while it looked like it was doing nothing wrong.
+     */
     private fun atEdge(me: LocalPlayer, keys: DirectionalInput): Boolean {
         val forward = (if (keys.forwards) 1.0 else 0.0) - (if (keys.backwards) 1.0 else 0.0)
         val strafe = (if (keys.left) 1.0 else 0.0) - (if (keys.right) 1.0 else 0.0)
         val length = hypot(forward, strafe)
-        if (length < 1e-6) {
-            return false
-        }
         val yaw = Math.toRadians(me.yRot.toDouble())
-        val dx = (strafe * cos(yaw) - forward * sin(yaw)) / length
-        val dz = (forward * cos(yaw) + strafe * sin(yaw)) / length
+        val dx: Double
+        val dz: Double
+        if (length < 1e-6) {
+            dx = -sin(yaw)
+            dz = cos(yaw)
+        } else {
+            dx = (strafe * cos(yaw) - forward * sin(yaw)) / length
+            dz = (forward * cos(yaw) + strafe * sin(yaw)) / length
+        }
         val level = mc.level ?: return false
         val currentDistance = getEdgeDistance()
         val below = BlockPos.containing(me.x + dx * currentDistance, me.y - 0.5, me.z + dz * currentDistance)

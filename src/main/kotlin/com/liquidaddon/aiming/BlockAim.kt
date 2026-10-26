@@ -162,6 +162,14 @@ internal class BlockAim(
         private set
 
     /**
+     * How many ticks in a row the rotation that was sent is already the goal. It is what the module
+     * uses when the server rotation cannot be read (or does not move): after a couple of ticks the
+     * rotation has been published and carried by a movement packet, so the click may go.
+     */
+    var ticksOnGoal = 0
+        private set
+
+    /**
      * The rotation the **server** already has: it is written from the packets that were actually
      * sent, so it is what an interaction arriving now would be judged with. Not silent means the
      * camera is the aim, and the camera is sent on every movement packet too, so this is the right
@@ -186,6 +194,7 @@ internal class BlockAim(
     fun clear() {
         goal = null
         goalPoint = null
+        ticksOnGoal = 0
     }
 
     /** Forgets everything, for enable/disable. */
@@ -197,6 +206,7 @@ internal class BlockAim(
         releaseTicks = 0
         yawCarry = 0.0
         pitchCarry = 0.0
+        ticksOnGoal = 0
     }
 
     /**
@@ -226,6 +236,7 @@ internal class BlockAim(
         val deltaPitch = target.pitch - current.pitch
         if (abs(deltaYaw) + abs(deltaPitch) <= SNAP) {
             publish(target)
+            countOnGoal(target)
             return
         }
 
@@ -279,6 +290,13 @@ internal class BlockAim(
             next = if (moved < 1.0e-3f) target else quantized
         }
         publish(next)
+        countOnGoal(target)
+    }
+
+    /** Counts the ticks the sent rotation already is the goal (see [ticksOnGoal]). */
+    private fun countOnGoal(target: Rotation) {
+        val reachedNow = sent?.directionAngleTo(target)?.let { it <= 0.5f } == true
+        ticksOnGoal = if (reachedNow) ticksOnGoal + 1 else 0
     }
 
     /**

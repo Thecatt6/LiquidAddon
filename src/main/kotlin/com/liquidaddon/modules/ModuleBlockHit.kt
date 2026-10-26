@@ -17,6 +17,9 @@ import net.ccbluex.liquidbounce.utils.input.InputTracker.isPressedOnAny
 import net.ccbluex.liquidbounce.utils.item.isSword
 import net.ccbluex.liquidbounce.utils.network.releaseUsingItemInTickLoop
 import net.minecraft.client.player.LocalPlayer
+import net.minecraft.core.BlockPos
+import net.minecraft.core.Direction
+import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.item.ItemUseAnimation
 import kotlin.random.Random
@@ -318,9 +321,9 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
     }
 
     /**
-     * Ends our block with the vanilla release action. A block the player is holding down is never
-     * released: with the right button pressed vanilla owns the state and would only have to start it
-     * again on the next tick, which shows up as a stutter in the animation.
+     * Ends our block. A block the player is holding down is never released: with the right button
+     * pressed vanilla owns the state and would only have to start it again on the next tick, which
+     * shows up as a stutter in the animation.
      */
     private fun releaseBlock(me: LocalPlayer) {
         if (!owningBlock) {
@@ -328,10 +331,10 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
         }
         owningBlock = false
         blockHand = null
-        if (!me.isUsingItem || mc.options.keyUse.isPressedOnAny) {
+        if (mc.options.keyUse.isPressedOnAny) {
             return
         }
-        runCatching { interaction.releaseUsingItemInTickLoop() }
+        stopBlocking(me)
     }
 
     /** Releases immediately, for disable: the module must not leave the player blocking. */
@@ -342,10 +345,34 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
         owningBlock = false
         blockHand = null
         val me = mc.player ?: return
-        if (!me.isUsingItem || mc.options.keyUse.isPressedOnAny) {
+        if (mc.options.keyUse.isPressedOnAny) {
             return
         }
-        runCatching { interaction.releaseUsingItemInTickLoop() }
+        stopBlocking(me)
+    }
+
+    /**
+     * The release, in the shape the server understands.
+     *
+     * When the client is using an item (a shield) the vanilla release action does it. On a 1.8
+     * server with a sword the client has no "using" state at all — the server is blocking on its own
+     * since the use packet — so the release has to be the old action packet; without it the server
+     * keeps the player blocking forever, which is the block that never ends.
+     */
+    private fun stopBlocking(me: LocalPlayer) {
+        if (me.isUsingItem) {
+            runCatching { interaction.releaseUsingItemInTickLoop() }
+            return
+        }
+        runCatching {
+            network.send(
+                ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.RELEASE_USE_ITEM,
+                    BlockPos.ZERO,
+                    Direction.DOWN,
+                )
+            )
+        }
     }
 
     // --- the lag --------------------------------------------------------------------------
