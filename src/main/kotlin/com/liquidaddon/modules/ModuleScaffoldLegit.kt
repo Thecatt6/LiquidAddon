@@ -7,8 +7,8 @@ import net.ccbluex.liquidbounce.event.events.MovementInputEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
-import net.ccbluex.liquidbounce.utils.block.SwingMode
 import net.ccbluex.liquidbounce.utils.block.doPlacement
+import net.ccbluex.liquidbounce.utils.render.placement.PlacementRenderer
 import net.ccbluex.liquidbounce.utils.movement.DirectionalInput
 import net.minecraft.client.KeyMapping
 import net.minecraft.client.Minecraft
@@ -29,6 +29,11 @@ import kotlin.random.Random
 
 /**
  * ModuleScaffoldLegit con Range Sliders (stile LiquidBounce Nextgen UI).
+ *
+ * The blocks it places are drawn by LiquidBounce's own placement renderer ([PlacementRenderer], the
+ * one the normal Scaffold uses): a box appears on the new block, animates its size, and fades out.
+ * Its settings (size curves, in/out time, colours, clump) are in the `Render` group, and `Enabled`
+ * there turns only the visual effect off.
  */
 object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDON) {
 
@@ -59,18 +64,29 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     private val jumpDelay by intRange("Jump Delay", 0..1, 0..20, "ticks")
 
     /**
-     * The placement animation, the same choice LiquidBounce's own Scaffold exposes: which side gets
-     * the arm swing when a block is placed.
+     * The placement animation: the box that appears on the block the module just placed and fades
+     * out again — the same effect (and the same settings) LiquidBounce's own Scaffold draws.
      *
-     *  - `DoNotHide`   — the hand swings for the client and the swing packet is sent (vanilla look);
-     *  - `HideForBoth` — no animation at all, the block just appears;
-     *  - `HideForClient` — only the server sees the swing, the hand on your screen stays still;
-     *  - `HideForServer` — only your screen animates, the server gets no swing.
+     * It is [PlacementRenderer], the renderer the normal Scaffold uses, added here exactly like
+     * there (`PlacementRenderer("Render", true, this, keep = false)`):
      *
-     * It is applied through LiquidBounce's own placement helper, so the animation happens on the
-     * exact tick the block is placed instead of being left to whatever vanilla decides afterwards.
+     *  - `Enabled` — turn the whole effect off without touching the scaffolding itself;
+     *  - `Clump` — merge neighbouring boxes so a fast bridge does not stack a hundred of them;
+     *  - `StartSize` / `EndSize` and their curves — the box grows/shrinks between the two sizes;
+     *  - `FadeInCurve` / `FadeOutCurve`, `InTime` / `OutTime` — how long it takes to appear and to
+     *    fade away, and with which easing;
+     *  - `Color` / `OutlineColor` — the fill and the outline (green by default, like the Scaffold).
+     *
+     * Every block that is actually placed goes in through `addBlock` from the placement callback, so
+     * a click that fails never draws a box. Nothing is drawn for the blocks that were already there.
      */
-    private val swingMode by enumChoice("Swing", SwingMode.DO_NOT_HIDE)
+    private val renderer = tree(PlacementRenderer("Render", true, this, keep = false))
+
+    /** Set when a click went through the vanilla path, so the box is drawn only if the block landed. */
+    private var pendingRender: BlockPos? = null
+
+    /** Ticks [pendingRender] is still allowed to wait for its block before the box is forgotten. */
+    private var pendingRenderTicks = 0
 
     private val chatLog by boolean("ChatLog", true)
     private val debug by boolean("Debug", false)
@@ -115,7 +131,18 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         steps = 0
         misses = 0
         airTickSum = 0
+        pendingRender = null
+        pendingRenderTicks = 0
         super.onEnabled()
+    }
+
+    override fun onDisabled() {
+        // Let the boxes that are still on screen run their fade-out instead of vanishing: this is
+        // what the normal Scaffold does when it is turned off.
+        pendingRender = null
+        pendingRenderTicks = 0
+        renderer.clearSilently()
+        super.onDisabled()
     }
 
     private fun reset() {
@@ -168,6 +195,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     @Suppress("unused")
     private val tickHandler = handler<GameTickEvent> {
         val me = mc.player ?: return@handler
+        flushPendingRender()
         if (phase == Phase.FLAT && !(mode == Mode.STAIRS && spaceHeld)) {
             debug(me, "spazio non premuto: solo Eagle")
         }
@@ -203,7 +231,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         if (readyTicks++ < delay) {
             return
         }
-        place(me)
+        place(me, cell)
         phase = Phase.WALK
         stepBlock = cell
         waitTicks = 0
@@ -259,7 +287,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         if (readyTicks++ < delay) {
             return
         }
-        place(me)
+        place(me, cell)
         debug(me, "aria tick $airTicks: clic sulla faccia di sopra")
         placedInAir = true
         airTickSum += airTicks
@@ -337,28 +365,56 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     }
 
     /**
-     * Places the block the crosshair is pointing at, with the animation [swingMode] asks for.
+     * Places the block at [cell] — the cell [clickCell] already validated — and hands it to the
+     * [renderer], which draws the box that appears on it and fades out again, exactly like the box
+     * LiquidBounce's own Scaffold draws on the blocks it places.
      *
-     * This is LiquidBounce's own `doPlacement`, the one its Scaffold uses: it calls the very same
-     * `useItemOn` the vanilla use key would, and then reports the swing of the placement exactly as
-     * the chosen mode says (client animation, swing packet, both or neither). Doing it here, on the
-     * tick the module decided to place, is also what makes the animation land on the placement
-     * instead of a tick or two later.
+     * The placement goes through LiquidBounce's `doPlacement`, the same helper the normal Scaffold
+     * uses, so the block lands on the tick the module decided on and the swing is reported the way
+     * vanilla does. `onPlacementSuccess` is the callback that runs only when the placement really
+     * happened: that is where the box is added, so a click that the server or the client refuses
+     * never leaves a phantom box behind.
      *
-     * If the crosshair is not on a block (it was, a few lines earlier: this is only a safety net),
-     * the click is queued for `handleKeybinds` as before and vanilla places it with its own swing.
+     * If the crosshair is not on a block any more (it was a few lines earlier: this is only a
+     * safety net), the click is queued for `handleKeybinds` as before and the box is drawn from
+     * [tickHandler] once the block is really there.
      */
-    private fun place(me: LocalPlayer) {
+    private fun place(me: LocalPlayer, cell: BlockPos) {
         val hit = mc.hitResult as? BlockHitResult
         if (hit != null && hit.type == HitResult.Type.BLOCK) {
-            runCatching {
-                doPlacement(hit, Rotation(me.yRot, me.xRot), swingMode = swingMode)
-            }.onSuccess {
-                return
-            }
+            val done = runCatching {
+                doPlacement(hit, Rotation(me.yRot, me.xRot), onPlacementSuccess = {
+                    renderer.addBlock(cell)
+                    pendingRender = null
+                    true
+                })
+            }.isSuccess
+            if (done) return
         }
         val key = mc.options.keyUse
         clickCount.setInt(key, clickCount.getInt(key) + 1)
+        // The vanilla path places during handleKeybinds: the box is added once the block is there.
+        pendingRender = cell
+        pendingRenderTicks = 0
+    }
+
+    /**
+     * Draws the box for a placement that went through the vanilla click path, but only after the
+     * block has actually appeared in the world, so a refused click cannot render anything.
+     */
+    private fun flushPendingRender() {
+        val cell = pendingRender ?: return
+        val level = mc.level ?: return
+        // A refused click must not leave this waiting forever and then draw a box on a block that
+        // somebody else placed: half a second is plenty for the click to be processed.
+        if (++pendingRenderTicks > 10) {
+            pendingRender = null
+            return
+        }
+        if (!level.getBlockState(cell).canBeReplaced()) {
+            renderer.addBlock(cell)
+            pendingRender = null
+        }
     }
 
     // Estrae un ritardo casuale nell'intervallo dello slider
