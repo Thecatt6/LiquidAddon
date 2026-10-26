@@ -173,6 +173,18 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         blockAim.reset()
         aimingCell = null
         super.onEnabled()
+
+        val me = mc.player
+        if (chatLog && me != null) {
+            // If this line does not appear, the build you are running is not this one.
+            me.sendSystemMessage(
+                Component.literal(
+                    "§7[ScaffoldLegit] §aattivo§7 - ${mode.tag}, mira " +
+                        (if (aim.enabled) (if (aim.silent) "silenziosa" else "visibile") else "spenta") +
+                        (if (handWithBlock(me) == null) " §c- nessun blocco in mano!" else "")
+                )
+            )
+        }
     }
 
     override fun onDisabled() {
@@ -491,6 +503,11 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
 
         var best: Placement? = null
         var bestDistance = Double.MAX_VALUE
+        // The same click, among the faces the crosshair can really reach. Preferred: the ray from the
+        // eye has to end on that very face, so the click the server receives is the click that was
+        // planned.
+        var visible: Placement? = null
+        var visibleDistance = Double.MAX_VALUE
 
         for (direction in Direction.entries) {
             val support = cell.relative(direction)
@@ -506,19 +523,31 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
             if (distance > reach) {
                 continue
             }
+
+            val rotation = Rotation.lookingAt(point, eye)
+            val placement = Placement(
+                cell = cell,
+                hit = BlockHitResult(point, face, support, false),
+                rotation = rotation,
+                point = point,
+            )
             if (distance < bestDistance) {
                 bestDistance = distance
-                best = Placement(
-                    cell = cell,
-                    hit = BlockHitResult(point, face, support, false),
-                    rotation = Rotation.lookingAt(point, eye),
-                    point = point,
-                )
+                best = placement
+            }
+
+            val traced = traceFromPlayer(rotation)
+            val canSee = traced.type == HitResult.Type.BLOCK &&
+                traced.blockPos == support && traced.direction == face
+            if (canSee && distance < visibleDistance) {
+                visibleDistance = distance
+                visible = placement
             }
         }
 
-        lastReject = if (best == null) "nessun appoggio a portata per la cella" else ""
-        return best
+        val winner = visible ?: best
+        lastReject = if (winner == null) "nessun appoggio a portata per la cella" else ""
+        return winner
     }
 
     /**

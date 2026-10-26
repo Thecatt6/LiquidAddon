@@ -49,13 +49,17 @@ internal class BlockAimValues : ValueGroup("Aim") {
 
     val moveFix by enumChoice("MoveFix", MoveFix.SILENT)
 
-    /** Share of the remaining angle covered per tick. */
-    val strength by float("Strength", 70f, 1f..100f, "%")
+    /**
+     * Share of the remaining angle covered per tick. `100` with `Smoothing = Linear` is the simple
+     * aim: the crosshair snaps straight onto the centre of the block face on the first tick. Lower
+     * it (or pick another curve) to make the turn gradual.
+     */
+    val strength by float("Strength", 100f, 1f..100f, "%")
 
     /** Hard cap of a single tick, in degrees: how fast the aim may travel to the block. */
-    val maxSpeed by float("MaxSpeed", 45f, 1f..180f, "°")
+    val maxSpeed by float("MaxSpeed", 180f, 1f..180f, "°")
 
-    val smoothing by enumChoice("Smoothing", Smoothing.BEZIER)
+    val smoothing by enumChoice("Smoothing", Smoothing.LINEAR)
 
     /** Snap every step to whole mouse counts (and dither the rounding) like a real mouse. */
     val gcdFix by boolean("GcdFix", true)

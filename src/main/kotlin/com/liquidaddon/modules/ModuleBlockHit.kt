@@ -135,6 +135,17 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
     override fun onEnabled() {
         reset()
         super.onEnabled()
+
+        // If this line does not appear, the build you are running is not this one.
+        val me = mc.player ?: return
+        val hand = blockingHand(me)
+        val what = when {
+            hand == null -> "§cniente che possa bloccare: serve uno scudo (o un server 1.8 con la spada)"
+            me.getItemInHand(hand).useAnimation == ItemUseAnimation.BLOCK ->
+                "§a" + me.getItemInHand(hand).hoverName.string + " in " + hand.name.lowercase()
+            else -> "§aspada in " + hand.name.lowercase() + " §7(server 1.8: blocca solo lato server)"
+        }
+        chat("§7[BlockHit] §aattivo §7- blocca con $what")
     }
 
     override fun onDisabled() {
