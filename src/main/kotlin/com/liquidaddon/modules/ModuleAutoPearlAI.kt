@@ -81,10 +81,14 @@ import kotlin.random.Random
  *
  * ### Which spot
  *
- * The shortest flight wins, not the closest match to the geometry: candidates are ordered by how
- * close they are, every fit is judged by LiquidBounce's simulation, and among the arcs that land on
- * a block top the one whose pearl lands in the fewest ticks is thrown — the pearl has to touch the
- * ground before the player is already gone.
+ * The shortest flight wins, not the closest match to the geometry: every fit is judged by
+ * LiquidBounce's simulation, and among the arcs that land on a block top the one whose pearl lands in
+ * the fewest ticks is thrown — the pearl has to touch the ground before the player is already gone.
+ *
+ * With [preferCenter] the middle of the platform gets a couple of ticks of credit: a block on the
+ * border is where you are one knockback away from the void again, and it is also where an arc most
+ * easily clips a block *side* instead of its top. The bonus is deliberately small — being two ticks
+ * late is worse than landing one block off centre.
  *
  * What the pearl inherits from the player is the least certain input in the whole calculation: the
  * server throws it along the velocity *it* has for the player, which lags the client's by a tick, and
@@ -107,6 +111,7 @@ import kotlin.random.Random
  *   SafeSearch      radius (blocks) searched for another landing spot
  *   LandingTolerance  how far the arc may drift from the spot between two ticks
  *   EdgeMargin      how far inside a block top the pearl must land (a pearl is not a point)
+ *   PreferCenter    land towards the middle of the platform, not on its border
  *   EnemyRange      max distance of the target in Enemy mode
  *   EnemyTolerance  how close to the enemy the pearl has to land
  *   EnemyTrigger    Always, or only while you are in the air
@@ -196,7 +201,14 @@ object ModuleAutoPearlAI : ClientModule(
     private const val FAST_LANDING_TICKS = 8
 
     /** Hard cap on the collision-aware simulations spent on one plan. */
-    private const val MAX_SIMULATIONS = 36
+    private const val MAX_SIMULATIONS = 44
+
+    /**
+     * How many ticks of extra flight a landing in the middle of the platform is worth. Without this the
+     * quickest landing always wins and that is the border; with it, the middle wins unless it is
+     * noticeably slower — which while falling is the one thing that must not happen.
+     */
+    private const val CENTER_TICKS_BONUS = 2
 
     /**
      * The player's own velocity is the least reliable input there is: the server throws the pearl
@@ -211,7 +223,7 @@ object ModuleAutoPearlAI : ClientModule(
      * — a dozen collision-aware simulations per candidate — and a failed plan would otherwise be
      * retried on every single tick.
      */
-    private const val PLAN_RETRY = 150
+    private const val PLAN_RETRY = 50
 
     enum class Mode(override val tag: String) : Tagged {
         SAVE("Save"), ENEMY("Enemy")
@@ -234,9 +246,9 @@ object ModuleAutoPearlAI : ClientModule(
 
     // --- save ---------------------------------------------------------------------------------
 
-    private val minFallValue = float("MinFall", 0.5f, 0.1f..5.0f, "blocks")
+    private val minFallValue = float("MinFall", 0.35f, 0.1f..5.0f, "blocks")
     private val minFall by minFallValue
-    private val minAirTicksValue = int("MinAirTicks", 2, 1..20, "ticks")
+    private val minAirTicksValue = int("MinAirTicks", 1, 1..20, "ticks")
     private val minAirTicks by minAirTicksValue
 
     /** Air blocks below the player that still count as "there is ground": more than this = void. */
@@ -256,6 +268,13 @@ object ModuleAutoPearlAI : ClientModule(
      */
     private val edgeMarginValue = float("EdgeMargin", 0.3f, 0.0f..0.6f, "blocks")
     private val edgeMargin by edgeMarginValue
+
+    /**
+     * Land towards the middle of the platform instead of on its border. A pearl that lands on the
+     * outermost block is one hit away from being knocked into the void again, and the border is also
+     * where an arc is most likely to clip the side instead of the top.
+     */
+    private val preferCenter by boolean("PreferCenter", true)
 
     // --- enemy --------------------------------------------------------------------------------
 
@@ -526,11 +545,11 @@ object ModuleAutoPearlAI : ClientModule(
             return
         }
 
-        // normalize() keeps the rotation on the mouse lattice but can push the yaw outside -180..180,
-        // and a yaw beyond that range is exactly what Grim's AimModulo360 check reports.
-        val normalized = solution.rotation.normalize()
-        val yaw = normalizeYaw(normalized.yaw)
-        val pitch = normalized.pitch
+        // The rotation is thrown exactly as it was verified — no further normalization, or the pearl
+        // could leave the hand on an angle the simulation never checked. Only the yaw is wrapped into
+        // -180..180, which points the same way and keeps Grim's AimModulo360 check quiet.
+        val yaw = normalizeYaw(solution.rotation.yaw)
+        val pitch = solution.rotation.pitch
 
         SilentHotbar.selectSlotSilently(this, slot, slotReset)
         val result = useItem(slot.useHand, yaw, pitch, swing)
@@ -656,17 +675,26 @@ object ModuleAutoPearlAI : ClientModule(
 
                     val robust = robustness(me, rotation)
                     simulations += deviations(me).size
-                    found += Landing(rotation, impact.hit.location, impact.ticks, robust)
+                    found += Landing(
+                        rotation = rotation,
+                        landing = impact.hit.location,
+                        ticks = impact.ticks,
+                        robust = robust,
+                        interior = preferCenter && isInterior(candidate)
+                    )
 
                     if (robust == deviations(me).size && impact.ticks <= FAST_LANDING_TICKS) break@search
                 }
             }
         }
 
-        // A throw that still lands when the inherited velocity is off by 15% is worth more than one
-        // that only works on paper; after that, the quickest landing wins.
+        // A throw that still lands when the velocity the server uses is off is worth more than one that
+        // only works on paper; after that, the quickest landing wins — with a couple of ticks of credit
+        // for landing in the middle of the platform instead of on its border.
+        fun score(landing: Landing) = landing.ticks - (if (landing.interior) CENTER_TICKS_BONUS else 0)
+
         val best = found.minWithOrNull(
-            compareByDescending<Landing> { it.robust }.thenBy { it.ticks }
+            compareByDescending<Landing> { it.robust }.thenBy { score(it) }
         )
 
         if (best == null) {
@@ -683,16 +711,26 @@ object ModuleAutoPearlAI : ClientModule(
 
         if (debug) {
             chat(
-                "§7[AutoPearl] §fplan §asave§f in §7${best.ticks} ticks§f (steady ${best.robust}/${deviations(me).size}) → ${
-                    format(best.landing)
-                }"
+                "§7[AutoPearl] §fplan §asave§f in §7${best.ticks} ticks§f (steady ${best.robust}/${
+                    deviations(me).size
+                }${if (best.interior) ", center" else ", edge"}) → ${format(best.landing)}"
             )
         }
         return Solution(best.rotation, "save", best.landing)
     }
 
-    /** A landing the simulation accepted, with the two numbers that make one better than another. */
-    private data class Landing(val rotation: Rotation, val landing: Vec3, val ticks: Int, val robust: Int)
+    /**
+     * A landing the simulation accepted, with the three things that make one better than another: how
+     * much of the uncertainty it survives, how long the flight is, and whether it is in the middle of
+     * the platform rather than on its border.
+     */
+    private data class Landing(
+        val rotation: Rotation,
+        val landing: Vec3,
+        val ticks: Int,
+        val robust: Int,
+        val interior: Boolean
+    )
 
     /**
      * Where the pearl could land, closest to the player first: the shorter the throw, the sooner the
@@ -711,8 +749,7 @@ object ModuleAutoPearlAI : ClientModule(
 
         // A sumo platform floats over the void, so the only thing that makes a spot safe is the
         // block itself: solid top, free space above it. Everything around the remembered spot is
-        // collected, then ordered by how close it is — the shortest throw is the one that lands
-        // soonest.
+        // collected, then ordered.
         val center = BlockPos.containing(remembered ?: me.position())
         val radius = safeSearch.toInt().coerceAtLeast(1)
 
@@ -723,8 +760,30 @@ object ModuleAutoPearlAI : ClientModule(
             found += top
         }
 
-        found.sortBy { it.distanceToSqr(me.position()) }
+        // Interior blocks first: on the border a pearl is one knockback away from the void, and the
+        // border is exactly where an arc tends to clip a side instead of a top. Within each group the
+        // closest spot comes first, because the shortest flight lands soonest.
+        found.sortWith(
+            compareByDescending<Vec3> { preferCenter && isInterior(it) }
+                .thenBy { it.distanceToSqr(me.position()) }
+        )
+
         return found.take(MAX_CANDIDATES).distinct()
+    }
+
+    /**
+     * Whether a block top has a solid block on all four sides at the same level, i.e. whether it is
+     * inside the platform rather than on its edge.
+     */
+    private fun isInterior(top: Vec3): Boolean {
+        val around = arrayOf(
+            Vec3(top.x - 1.0, top.y, top.z),
+            Vec3(top.x + 1.0, top.y, top.z),
+            Vec3(top.x, top.y, top.z - 1.0),
+            Vec3(top.x, top.y, top.z + 1.0)
+        )
+
+        return around.all { isSafeSpot(it) }
     }
 
     /**
@@ -1073,14 +1132,23 @@ object ModuleAutoPearlAI : ClientModule(
     private fun verify(rotation: Rotation): Impact? = verify(rotation, null)
 
     /**
-     * The velocities the player might really have, as far as the server is concerned.
-     *
-     * One is uncertain by ±15%, but there is a bigger one: whether the server still thinks the player
-     * is standing. The client only inherits its `y` velocity while airborne, so if the two sides
-     * disagree on that, the pearl misses the extra ~1 block/tick of fall — which is the difference
-     * between landing on the platform and slamming into its edge.
+     * A way the throw can differ from the client's idea of it: the velocity the pearl inherits, and how
+     * far behind the client's the server's copy of the player is.
      */
-    private fun deviations(me: LocalPlayer): List<Vec3> {
+    private data class Deviation(val carried: Vec3, val lagTicks: Int)
+
+    /**
+     * The throws that might really happen, as far as the server is concerned.
+     *
+     * The velocity is uncertain by a few percent, but two differences are structural:
+     *  - whether the server thinks the player is on the ground. The client only inherits its `y`
+     *    velocity while airborne, so if the two sides disagree, the pearl misses the extra block per
+     *    tick of fall;
+     *  - where the server thinks the player is. It spawns the pearl from *its* position, which is a
+     *    tick behind the client's: while falling that is most of a block higher, and sideways by the
+     *    knockback. Simulating only from the client's position makes the arc look better than it is.
+     */
+    private fun deviations(me: LocalPlayer): List<Deviation> {
         val carried = Vec3(
             me.deltaMovement.x,
             if (me.onGround()) 0.0 else me.deltaMovement.y,
@@ -1088,22 +1156,24 @@ object ModuleAutoPearlAI : ClientModule(
         )
 
         return listOf(
-            carried.scale(VELOCITY_TRUST[0]),
-            carried.scale(VELOCITY_TRUST[1]),
+            Deviation(carried.scale(VELOCITY_TRUST[0]), 0),
+            Deviation(carried.scale(VELOCITY_TRUST[1]), 0),
             // the server still has you on the ground: no fall is inherited at all
-            Vec3(carried.x, 0.0, carried.z)
+            Deviation(Vec3(carried.x, 0.0, carried.z), 0),
+            // the server's position is one tick behind: the pearl spawns where you were last tick
+            Deviation(carried, 1)
         )
     }
 
     /**
-     * The same simulation, with the part of the velocity the pearl inherits given explicitly.
+     * The same simulation, from a position and with a velocity the pearl inherits given explicitly.
      *
      * null means "what the client thinks" and goes through LiquidBounce's own path; anything else is a
      * deliberate deviation. The look direction is never touched — that is the part the throw
      * controls.
      */
-    private fun verify(rotation: Rotation, carried: Vec3?): Impact? {
-        val simulation = if (carried == null) {
+    private fun verify(rotation: Rotation, deviation: Deviation?): Impact? {
+        val simulation = if (deviation == null) {
             // the nominal case stays LiquidBounce's own path, so Freeze and friends behave as usual
             TrajectoryInfoRenderer.getHypotheticalTrajectory(
                 simulationOwner = player,
@@ -1116,6 +1186,15 @@ object ModuleAutoPearlAI : ClientModule(
         } else {
             val me = mc.player ?: return null
             val look = rotation.directionVector.scale(PEARL_SPEED)
+            val start = throwStart(me)
+
+            // a lagging server spawns the pearl where the player was `lagTicks` ago
+            val carried = deviation.carried
+            val spawn = Vec3(
+                start.x - carried.x * deviation.lagTicks,
+                start.y - carried.y * deviation.lagTicks,
+                start.z - carried.z * deviation.lagTicks
+            )
 
             TrajectoryInfoRenderer(
                 simulationOwner = player,
@@ -1126,7 +1205,7 @@ object ModuleAutoPearlAI : ClientModule(
                     look.y + carried.y,
                     look.z + carried.z
                 ),
-                pos = throwStart(me),
+                pos = spawn,
                 trajectoryInfo = TrajectoryInfo.GENERIC,
                 trajectoryType = TrajectoryType.EnderPearl,
                 type = TrajectoryInfoRenderer.Type.HYPOTHETICAL,
@@ -1140,12 +1219,12 @@ object ModuleAutoPearlAI : ClientModule(
     }
 
     /**
-     * How many of the perturbed simulations still land on a block top, i.e. how much this throw can be
-     * trusted while the velocity it inherits is uncertain. 0 means "it only works if the client's
-     * velocity happens to be exactly right".
+     * How many of the deviations ([deviations]) still land on a block top, i.e. how much this throw can
+     * be trusted while the velocity it inherits and the position the server has are uncertain. Zero
+     * means "it only works if the server agrees with the client to the tick".
      */
     private fun robustness(me: LocalPlayer, rotation: Rotation): Int =
-        deviations(me).count { carried -> isSafeLanding(verify(rotation, carried)?.hit) }
+        deviations(me).count { deviation -> isSafeLanding(verify(rotation, deviation)?.hit) }
 
     /** The rotation the aim is at: what the server sees when silent, the camera otherwise. */
     private fun currentRotation(me: LocalPlayer): Rotation =
