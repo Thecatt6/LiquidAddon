@@ -99,6 +99,10 @@ kotlin {
         jvmToolchain(libs.versions.jdk.get().toInt())
         // LiquidBounce is compiled with preview features, which marks its classes as pre-release
         freeCompilerArgs.add("-Xskip-prerelease-check")
+        // Extension functions declared as members (`private fun Vec3.top()` inside a module object)
+        // are a normal way to write helpers in an add-on. Kotlin 2.4 rejects them as experimental
+        // unless this flag is set, and the diagnostic is an error, not a warning.
+        freeCompilerArgs.add("-Xcompanion-blocks-and-extensions")
     }
 }
 
