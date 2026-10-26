@@ -43,7 +43,7 @@ import kotlin.random.Random
  * ClickGUI always shows what the module is really doing. `Custom` leaves the sliders alone.
  * `Undetectable` is the profile tuned for Vulcan "Aim (Rotation)" / packet "perfectrotation".
  */
-object ModuleAimbotAI : ClientModule("AimbotAI", Categories.LIQUIDADDON) {
+object ModuleAimbotAI : ClientModule("Aimbot AI", Categories.LIQUIDADDON) {
 
     /** How far (in mouse counts) the rounding boundary may wobble when [gcdDither] is on. */
     private const val DITHER_WOBBLE = 0.18

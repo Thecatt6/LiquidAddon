@@ -102,8 +102,8 @@ import kotlin.random.Random
  *   ChatLog         print every throw with the distance of the landing
  *   Debug           print the plan, the solved rotation and the simulation result
  */
-object ModuleAutoPearl : ClientModule(
-    "AutoPearl",
+object ModuleAutoPearlAI : ClientModule(
+    "AutoPearl AI",
     Categories.LIQUIDADDON,
     aliases = listOf("PearlSave", "SumoPearl")
 ) {
