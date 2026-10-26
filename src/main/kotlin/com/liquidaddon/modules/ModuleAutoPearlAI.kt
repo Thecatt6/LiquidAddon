@@ -72,8 +72,16 @@ import kotlin.random.Random
  *     [MovementCorrection]. Silent means the camera never moves and only the `UseItem` packet
  *     carries it, which is exactly what matters for a pearl: the server throws along the rotation in
  *     that packet;
- *  4. the pearl is thrown only when the rotation the server has is within [aimTolerance] of the
- *     solved one, with [slotReset] ticks of silent hotbar swap and the same [swing] mode.
+ *  4. the throw happens on the same tick the plan is made: the `UseItem` packet carries the
+ *     rotation, so waiting for the camera to arrive only makes the pearl leave the hand later.
+ *     [aimFirst] turns the waiting back on for anyone who wants it.
+ *
+ * ### Which spot
+ *
+ * The shortest flight wins, not the closest match to the geometry: candidates are ordered by how
+ * close they are, every fit is judged by LiquidBounce's simulation, and among the arcs that land on
+ * a block top the one whose pearl lands in the fewest ticks is thrown — the pearl has to touch the
+ * ground before the player is already gone.
  *
  * ### Where the pearl comes from
  *
@@ -94,7 +102,8 @@ import kotlin.random.Random
  *   Rotate          turn to the solution instead of throwing immediately
  *   MaxTurn         degrees corrected per tick while turning
  *   AimTolerance    how close (degrees) the server rotation must be before throwing
- *   AimTicks        max ticks spent aiming before giving up
+ *   AimTicks        max ticks spent aiming when AimFirst is on
+ *   AimFirst        wait for the server rotation before throwing (slower, rarely needed)
  *   Silent          only the UseItem packet carries the rotation, the camera stays still
  *   MoveFix         movement correction used with Silent
  *   GcdFix / GcdDither  put the throw rotation on the mouse lattice, with a human rounding boundary
@@ -169,6 +178,16 @@ object ModuleAutoPearlAI : ClientModule(
     private const val MAX_FIT_ERROR = 3.0
 
     /**
+     * A landing this quick ends the search for a better one. The player is falling while the plan is
+     * made: a pearl that lands in eight ticks saves them, a "more accurate" one that lands in thirty
+     * does not.
+     */
+    private const val FAST_LANDING_TICKS = 8
+
+    /** Hard cap on the collision-aware simulations spent on one plan. */
+    private const val MAX_SIMULATIONS = 48
+
+    /**
      * How long (ms) to wait after a plan failed before planning again. Planning is the expensive part
      * — a dozen collision-aware simulations per candidate — and a failed plan would otherwise be
      * retried on every single tick.
@@ -196,9 +215,9 @@ object ModuleAutoPearlAI : ClientModule(
 
     // --- save ---------------------------------------------------------------------------------
 
-    private val minFallValue = float("MinFall", 1.0f, 0.2f..5.0f, "blocks")
+    private val minFallValue = float("MinFall", 0.5f, 0.1f..5.0f, "blocks")
     private val minFall by minFallValue
-    private val minAirTicksValue = int("MinAirTicks", 4, 1..20, "ticks")
+    private val minAirTicksValue = int("MinAirTicks", 2, 1..20, "ticks")
     private val minAirTicks by minAirTicksValue
 
     /** Air blocks below the player that still count as "there is ground": more than this = void. */
@@ -232,6 +251,13 @@ object ModuleAutoPearlAI : ClientModule(
     private val aimTolerance by aimToleranceValue
     private val aimTicksValue = int("AimTicks", 10, 1..20, "ticks")
     private val aimTicks by aimTicksValue
+
+    /**
+     * Wait until the rotation the server sees matches the solved one before throwing. Off by default:
+     * the throw packet carries the rotation anyway, so waiting only makes the pearl leave the hand
+     * later — and while falling, later is the difference between landing on the platform and not.
+     */
+    private val aimFirst by boolean("AimFirst", false)
 
     private val silentValue = boolean("Silent", true)
     private val silent by silentValue
@@ -357,18 +383,23 @@ object ModuleAutoPearlAI : ClientModule(
             return
         }
 
-        // No turning wanted: the throw happens right now, with the solved rotation (still put on the
-        // mouse lattice, so it is a rotation a mouse could have produced) and with the same gate.
-        if (!rotate) {
-            val aim = humanize(currentRotation(me), solution.rotation, limitTurn = false)
-            if (!landsWhereWanted(aim, solution.landing, tolerance())) return
-            throwPearl(me, solution.copy(rotation = aim))
+        // Waiting for the rotation is optional: the throw packet carries it, so the pearl can leave
+        // the hand on this very tick. Only the aim pipeline (humanize + RotationManager) always runs.
+        if (rotate && aimFirst) {
+            planned = solution
+            plannedTicks = aimTicks
+            advance(me, solution)
             return
         }
 
-        planned = solution
-        plannedTicks = aimTicks
-        advance(me, solution)
+        val aim = if (rotate) {
+            humanize(currentRotation(me), solution.rotation, limitTurn = false).also { handToManager(it) }
+        } else {
+            solution.rotation
+        }
+
+        if (!landsWhereWanted(aim, solution.landing, tolerance())) return
+        throwPearl(me, solution.copy(rotation = aim))
     }
 
     /**
@@ -428,22 +459,22 @@ object ModuleAutoPearlAI : ClientModule(
     private fun landsWhereWanted(rotation: Rotation, target: Vec3, tolerance: Double): Boolean {
         if (!simulate) return true
 
-        val hit = verify(rotation) ?: run {
+        val impact = verify(rotation) ?: run {
             if (debug) chat("§7[AutoPearl] §cthe simulated arc hits nothing")
             return false
         }
 
         return when (mode) {
-            Mode.SAVE -> isSafeLanding(hit) || run {
-                if (debug) chat("§7[AutoPearl] §7would land at ${format(hit.location)}, not safe")
+            Mode.SAVE -> isSafeLanding(impact.hit) || run {
+                if (debug) chat("§7[AutoPearl] §7would land at ${format(impact.hit.location)}, not safe")
                 false
             }
 
-            Mode.ENEMY -> hit.location.distanceTo(target) <= tolerance || run {
+            Mode.ENEMY -> impact.hit.location.distanceTo(target) <= tolerance || run {
                 if (debug) {
                     chat(
-                        "§7[AutoPearl] §7would land at ${format(hit.location)}, %.2f from the target"
-                            .format(hit.location.distanceTo(target))
+                        "§7[AutoPearl] §7would land at ${format(impact.hit.location)}, %.2f from the target"
+                            .format(impact.hit.location.distanceTo(target))
                     )
                 }
                 false
@@ -559,13 +590,17 @@ object ModuleAutoPearlAI : ClientModule(
             return null
         }
 
-        // Solved one candidate at a time, stopping at the first arc the real simulation accepts: this
-        // runs on the client thread while falling, so it must not solve all of them up front.
+        // Every candidate costs real simulations and the player is falling while this runs, so the
+        // work is capped and the search stops as soon as a landing is quick. Among the landings that
+        // are found, the shortest flight wins: the pearl has to touch the ground before the player is
+        // already gone, so a spot two blocks away in eight ticks beats the perfect spot in thirty.
         var solved = 0
-        var simulated = 0
+        var simulations = 0
+        var best: Solution? = null
+        var bestTicks = Int.MAX_VALUE
 
-        for (candidate in candidates) {
-            if (solved >= MAX_SOLVED) break
+        search@ for (candidate in candidates) {
+            if (solved >= MAX_SOLVED || simulations >= MAX_SIMULATIONS) break
             solved++
 
             // The arc has to come *down* onto the spot: one that passes through it while still
@@ -580,64 +615,80 @@ object ModuleAutoPearlAI : ClientModule(
                 return Solution(fits.first().rotation, "save", candidate)
             }
 
-            simulated++
             for (fit in fits) {
                 // the fit itself first, then small offsets: a cheap fit can pass centimetres from the
                 // target and still clip the edge of the platform on the way
                 for (rotation in variants(fit.rotation)) {
-                    val hit = verify(rotation) ?: continue
-                    if (!isSafeLanding(hit)) {
-                        if (debug) chat("§7[AutoPearl] §7simulated landing at ${format(hit.location)} is not safe")
+                    if (simulations++ >= MAX_SIMULATIONS) break@search
+
+                    val impact = verify(rotation) ?: continue
+                    if (!isSafeLanding(impact.hit)) {
+                        if (debug) {
+                            chat("§7[AutoPearl] §7simulated landing at ${format(impact.hit.location)} is not safe")
+                        }
                         continue
                     }
 
-                    if (debug) chat("§7[AutoPearl] §fplan §asave§f → ${format(hit.location)}")
-                    return Solution(rotation, "save", hit.location)
+                    if (impact.ticks < bestTicks) {
+                        bestTicks = impact.ticks
+                        best = Solution(rotation, "save", impact.hit.location)
+                    }
+
+                    if (impact.ticks <= FAST_LANDING_TICKS) break@search
                 }
             }
         }
 
-        if (debug) {
-            val why = when {
-                solved == 0 -> "no candidate could be solved"
-                simulated > 0 -> "no arc survived the simulation"
-                else -> "no arc reaches the available spots"
+        val result = best
+        if (result == null) {
+            if (debug) {
+                val why = when {
+                    solved == 0 -> "no candidate could be solved"
+                    simulations > 0 -> "no arc survived the simulation"
+                    else -> "no arc reaches the available spots"
+                }
+                chat("§7[AutoPearl] §cno safe landing found ($why, ${solved}/${candidates.size} tried)")
             }
-            chat("§7[AutoPearl] §cno safe landing found ($why, ${solved}/${candidates.size} tried)")
+            return null
         }
-        return null
+
+        if (debug) {
+            chat("§7[AutoPearl] §fplan §asave§f in §7$bestTicks ticks§f → ${format(result.landing)}")
+        }
+        return result
     }
 
     /**
-     * Where the pearl should land, best first: the remembered safe spot, then solid block tops
-     * around it (closest to the player first). A candidate is the point *above* a block, which is
-     * where the pearl has to hit.
+     * Where the pearl could land, closest to the player first: the shorter the throw, the sooner the
+     * pearl is on the ground. The remembered safe spot is one of the candidates, not a privileged
+     * one — a spot two blocks away that the pearl reaches in eight ticks is worth more than the spot
+     * you were standing on, if that one takes thirty. A candidate is the point *above* a block, which
+     * is where the pearl has to hit.
      */
     private fun landingCandidates(me: LocalPlayer): List<Vec3> {
-        val result = ArrayList<Vec3>()
+        val found = ArrayList<Vec3>()
 
         val remembered = safeSpot
         if (remembered != null && Util.getMillis() - safeSpotAt <= safeMemory && isSafeSpot(remembered)) {
-            result += remembered
+            found += remembered
         }
 
         // A sumo platform floats over the void, so the only thing that makes a spot safe is the
-        // block itself: solid top, free space above it.
+        // block itself: solid top, free space above it. Everything around the remembered spot is
+        // collected, then ordered by how close it is — the shortest throw is the one that lands
+        // soonest.
         val center = BlockPos.containing(remembered ?: me.position())
         val radius = safeSearch.toInt().coerceAtLeast(1)
-        val around = ArrayList<Vec3>()
 
         for (pos in BlockPos.betweenClosed(center.offset(-radius, -2, -radius), center.offset(radius, 2, radius))) {
             val top = Vec3(pos.x + 0.5, pos.y + 1.0, pos.z + 0.5)
             if (top.distanceTo(me.position()) < 0.8) continue
             if (!isSafeSpot(top)) continue
-            around += top
+            found += top
         }
 
-        around.sortBy { it.distanceToSqr(me.position()) }
-        result += around.take(MAX_CANDIDATES)
-
-        return result.distinct()
+        found.sortBy { it.distanceToSqr(me.position()) }
+        return found.take(MAX_CANDIDATES).distinct()
     }
 
     /**
@@ -693,7 +744,7 @@ object ModuleAutoPearlAI : ClientModule(
             for (fit in fits) {
                 for (rotation in variants(fit.rotation)) {
                     val impact = verify(rotation) ?: continue
-                    if (impact.location.distanceTo(landing) > enemyTolerance.toDouble()) continue
+                    if (impact.hit.location.distanceTo(landing) > enemyTolerance.toDouble()) continue
 
                     if (debug) chat("§7[AutoPearl] §fplan §cpearl §f→ §7${target.name.string}")
                     return Solution(rotation, target.name.string, landing)
@@ -961,23 +1012,31 @@ object ModuleAutoPearlAI : ClientModule(
         return wrapped
     }
 
+    /** What the simulation says: what the pearl hits, and how many ticks it needs to get there. */
+    private data class Impact(val hit: HitResult, val ticks: Int)
+
     /**
      * Runs LiquidBounce's own simulation (block collisions included) and returns what the pearl hits,
      * or null when it hits nothing. The hit result matters, not just its position: whether the pearl
      * landed on top of a block or on its side is the difference between being saved and not.
+     *
+     * The tick count comes from the simulated path (one position per tick), and it is the number that
+     * decides between two otherwise valid throws: the pearl that lands sooner is the pearl that
+     * arrives while the player is still there.
      */
-    private fun verify(rotation: Rotation): HitResult? {
-        val hit = TrajectoryInfoRenderer.getHypotheticalTrajectory(
+    private fun verify(rotation: Rotation): Impact? {
+        val simulation = TrajectoryInfoRenderer.getHypotheticalTrajectory(
             simulationOwner = player,
             trajectoryInfo = TrajectoryInfo.GENERIC,
             trajectoryType = TrajectoryType.EnderPearl,
             rotation = rotation,
             // keep the start position identical to [throwStart], no partial-tick interpolation
             partialTicks = 0f
-        ).runSimulation(MAX_SIM_TICKS).hitResult ?: return null
+        ).runSimulation(MAX_SIM_TICKS)
 
+        val hit = simulation.hitResult ?: return null
         if (hit.type == HitResult.Type.MISS) return null
-        return hit
+        return Impact(hit, simulation.positions.size)
     }
 
     /** The rotation the aim is at: what the server sees when silent, the camera otherwise. */
