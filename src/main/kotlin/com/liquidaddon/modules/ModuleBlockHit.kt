@@ -11,54 +11,63 @@ import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.blink.BlinkManager
 import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.utils.client.chat
+import net.ccbluex.liquidbounce.utils.client.isOlderThanOrEqual1_8
+import net.ccbluex.liquidbounce.utils.entity.useItem
 import net.ccbluex.liquidbounce.utils.input.InputTracker.isPressedOnAny
 import net.ccbluex.liquidbounce.utils.item.isSword
+import net.ccbluex.liquidbounce.utils.network.releaseUsingItemInTickLoop
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.world.InteractionHand
+import net.minecraft.world.item.ItemUseAnimation
 import kotlin.random.Random
 
 /**
- * BlockHit — the block hit, done for you: **every click has a chance to turn into a block**.
+ * BlockHit — the block hit, done for you: **a click turns into a block**.
  *
- * With a sword in the main hand, right-clicking starts a block (1.8 style blocking, and since the
- * newer combat updates the same action exists on modern servers). The point of a *block hit* is to
- * be blocking in the ticks around your own attack: the opponent's hit that lands in that window is
- * cut, while your attack still lands. Doing it by hand means alternating left and right click at
- * your own CPS; this module does it for you, one block per click.
+ * A block is started the same way the right mouse button starts one (`useItem` on the hand that can
+ * block), held for [blockTicks], and released with the vanilla release action. The point of a
+ * *block hit* is to be blocking in the ticks around your own attack: the hit that lands inside that
+ * window is cut, while your attack still lands. Doing it by hand means alternating left and right
+ * click at your own CPS; this module does it for you, one block per click.
  *
  * It never clicks for you: it reacts to the clicks that happen. `MultiPlayerGameMode.attack` fires
  * [AttackEntityEvent] both for your own left clicks and for the ones an AutoClicker (or a KillAura)
- * sends through the vanilla path, so the module works with all of them and stays silent when you
- * are not clicking at all — the classic "it blocks on its own while I do nothing" is exactly what
- * this module does not do.
+ * sends through the vanilla path, so the module works with all of them and stays silent when you are
+ * not clicking at all.
+ *
+ * ## Which hand blocks
+ *
+ * The hand whose item **really blocks** is used ([ItemUseAnimation.BLOCK]): a shield, or a sword on
+ * a protocol where swords block. On a 1.8 server (ViaFabricPlus) there is no such client-side
+ * animation at all — the server treats a main-hand use as a sword block — so a main-hand sword is
+ * used there as well and the block exists on the server only.
+ *
+ * This is the difference between "BlockHit does nothing" and working: a modern client has **no**
+ * sword blocking, so with only a sword in hand and no shield there is nothing to start, and the
+ * module says so instead of pretending. With a shield in the off hand it raises the shield.
  *
  * ## What it does per click
  *
  *  - [chance] decides whether this click becomes a block hit at all;
  *  - [requireMouseDown] restricts it to the moments the right mouse button is held (physically, or
  *    by an AutoClicker's use button), so it only ever helps an input you are already making;
- *  - the block starts [delay] ticks after the click — one tick by default, the way a hand answers an
- *    attack — and lasts [blockTicks] ticks, then the sword is released with the vanilla release
- *    packet;
- *  - while the block is up, the client is *actually* blocking: `useItem` on the main hand, the same
- *    call vanilla's right click makes, so the server sees an ordinary use. Nothing is faked, no
- *    packet is rewritten, and the arm animation is vanilla's.
+ *  - the block starts [delay] ticks after the click and lasts [blockTicks] ticks, then the sword (or
+ *    shield) is released with the vanilla release action;
+ *  - while the block is up, the client really is using the item: `useItem`, the same call vanilla's
+ *    right click makes, so the server sees an ordinary use. Nothing is rewritten and the blocking
+ *    animation is vanilla's.
  *
  * ## The two modes
  *
  *  - [Mode.MANUAL] — the block hit on its own: click, block, release. Nothing else is touched.
- *  - [Mode.LAG] — the same, plus a short lag right after the block starts ([lagTicks]). The use
- *    packet that starts the block leaves normally, then the connection holds the packets that
- *    follow (the release included) for a few ticks: on the server the block stays up for that long,
- *    so an incoming hit inside the window is still reduced, and when the queue drains everything
- *    arrives in order, one burst. It uses the client's normal `BlinkManager` queue and never flushes
- *    it on its own, so it cannot steal the packets another lag module (FakeLag, Backtrack, …) is
- *    holding: they flush theirs, and ours leaves with them.
+ *  - [Mode.LAG] — the same, plus a short hold of the outgoing packets right after the block starts
+ *    ([lagTicks]). The use that starts the block leaves normally, then the packets that follow (the
+ *    release included) are queued through the client's normal `BlinkManager`: on the server the
+ *    block stays up for that long. The queue is drained as soon as the window closes and it is never
+ *    flushed from here, so a FakeLag/Backtrack holding packets keeps its own.
  *
- * If the sword is already blocking — you are holding right click, or you have Require Mouse Down on
- * — the module does not fight the client: it counts the block hit and leaves the block state to
- * vanilla, because releasing a block the player is holding is the last thing a "legit" module
- * should do.
+ * A block the player is holding down is never released: with the right button pressed vanilla owns
+ * the state, and stopping it would show up as a stutter in the animation.
  */
 object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
 
@@ -75,8 +84,7 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
 
     /**
      * Only work while the right mouse button is held — the physical button, or the use button an
-     * AutoClicker is holding. The module then never blocks unless the player is already pressing the
-     * button that blocks, so every block hit is an answer to an input instead of an input on its own.
+     * AutoClicker is holding.
      */
     private val requireMouseDown by boolean("RequireMouseDown", false)
 
@@ -89,7 +97,7 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
     /** Ticks between the click and the block. 1 by default: the block is up before the next attack. */
     private val delay by int("Delay", 1, 0..5, "ticks")
 
-    /** How long the block is held, in ticks. Two ticks cover the whole window around one click. */
+    /** How long the block is held, in ticks. Two ticks cover the window around one click. */
     private val blockTicks by int("BlockTicks", 2, 1..10, "ticks")
 
     /** `Mode = Lag` only: how many ticks the packets after the block start are held back. */
@@ -109,6 +117,12 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
 
     /** True while the block currently up is *ours*: only our own block is ever released. */
     private var owningBlock = false
+
+    /** The hand our block was started with. */
+    private var blockHand: InteractionHand? = null
+
+    /** Set once, so "there is nothing here that can block" is said once and not every click. */
+    private var warnedNoBlock = false
 
     private var clicks = 0
     private var blocks = 0
@@ -135,6 +149,8 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
         releaseAt = NO_TICK
         lagUntil = NO_TICK
         owningBlock = false
+        blockHand = null
+        warnedNoBlock = false
         clicks = 0
         blocks = 0
         lagged = 0
@@ -153,7 +169,7 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
         clicks++
 
         if (!canOperate(me)) {
-            note("skipped (${lastSkip})")
+            note("skipped ($lastSkip)")
             return@handler
         }
         if (chance <= 0 || Random.nextInt(100) >= chance) {
@@ -161,10 +177,21 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
             return@handler
         }
         if (me.isUsingItem) {
-            // The sword is already blocking: either the player holds right click or a previous block
-            // hit is still up. Leave that state alone, it is the one we wanted anyway.
+            // Already blocking — the player holds right click, or a previous block hit is still up.
+            // That state is the one we wanted anyway: leave it alone.
             counted()
             note("already blocking, counted")
+            return@handler
+        }
+        if (blockingHand(me) == null) {
+            if (!warnedNoBlock) {
+                warnedNoBlock = true
+                chat(
+                    "§7[BlockHit] §csulla tua versione la spada non blocca: " +
+                        "serve uno scudo nella mano secondaria"
+                )
+            }
+            note("no blocking item in hand")
             return@handler
         }
 
@@ -175,9 +202,9 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
     // --- the block ------------------------------------------------------------------------
 
     /**
-     * One tick: start the block when its tick comes, release it when it is over, and close the lag
-     * window. All of it on `GameTickEvent`, so the `useItem` call below lands in the tick loop and
-     * its packet goes out in the same tick as the movement packet, like vanilla's right click.
+     * One tick: start the block when its tick comes, release it when it is over, close the lag
+     * window. All of it on `GameTickEvent`, so the use call lands in the tick loop and its packet
+     * goes out in the same tick as the movement packet, like vanilla's right click.
      */
     @Suppress("unused")
     private val tickHandler = handler<GameTickEvent> {
@@ -189,9 +216,9 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
                 counted()
                 releaseAt = me.tickCount + blockTicks
                 if (mode == Mode.LAG) {
-                    // The use packet that starts the block was already sent by [startBlocking]: the
-                    // hold begins now, so what stays behind is the rest of the block — the release
-                    // first of all, which is what keeps the block up on the server.
+                    // The use packet that starts the block already left: the hold begins now, so
+                    // what stays behind is the release, which is what keeps the block up for longer
+                    // on the server.
                     lagUntil = me.tickCount + lagTicks
                     lagged++
                     note("blocking, lagging $lagTicks ticks")
@@ -213,10 +240,37 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
     }
 
     /**
-     * Starts the block exactly the way the right click does: `useItem` on the main hand. Returns
-     * `true` when the client really is using the item afterwards — a sword that is not allowed to
-     * block (an older protocol, a server that stripped the component) leaves the state untouched and
-     * the block hit is dropped instead of being counted twice.
+     * The hand whose item can block, or `null` when there is none.
+     *
+     * The rule is LiquidBounce's own (`KillAuraAutoBlock.findBlockableHand`): an item whose use
+     * animation is [ItemUseAnimation.BLOCK] — a shield, or a sword on the protocols where swords
+     * block. On a 1.8 server the server treats a main-hand use as a sword block even though this
+     * client has no animation for it, so the main hand is used there too.
+     */
+    private fun blockingHand(me: LocalPlayer): InteractionHand? {
+        val level = mc.level
+        val animated = InteractionHand.entries.firstOrNull { hand ->
+            val stack = me.getItemInHand(hand)
+            stack.useAnimation == ItemUseAnimation.BLOCK &&
+                (level == null || stack.isItemEnabled(level.enabledFeatures())) &&
+                !me.cooldowns.isOnCooldown(stack)
+        }
+        if (animated != null) {
+            return animated
+        }
+        return if (isOlderThanOrEqual1_8 && me.mainHandItem.isSword) {
+            InteractionHand.MAIN_HAND
+        } else {
+            null
+        }
+    }
+
+    /**
+     * Starts the block exactly the way the right click does: `useItem` on the hand that can block.
+     *
+     * Nothing is required afterwards beyond the call itself. On a 1.8 server the client has no use
+     * animation for a sword, so `me.isUsingItem` stays `false` although the server is blocking;
+     * demanding it here is what made the module refuse every block on those servers.
      */
     private fun startBlocking(me: LocalPlayer): Boolean {
         if (mc.gameMode == null) {
@@ -227,40 +281,34 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
             lastSkip = "screen open"
             return false
         }
-        if (!me.mainHandItem.isSword) {
-            lastSkip = "not holding a sword"
-            return false
-        }
-        if (me.isUsingItem) {
-            lastSkip = "already using an item"
+        val hand = blockingHand(me) ?: run {
+            lastSkip = "no blocking item in hand"
             return false
         }
 
-        runCatching { interaction.useItem(me, InteractionHand.MAIN_HAND) }
+        runCatching { useItem(hand) }
 
-        if (!me.isUsingItem) {
-            lastSkip = "the sword did not start blocking"
-            note("block rejected by the item")
-            return false
-        }
         owningBlock = true
+        blockHand = hand
+        note("blocking with " + hand.name.lowercase())
         return true
     }
 
     /**
-     * Ends our block with the vanilla release packet. A block the player is holding down is never
+     * Ends our block with the vanilla release action. A block the player is holding down is never
      * released: with the right button pressed vanilla owns the state and would only have to start it
-     * again on the next tick, which would show up as a stutter in the swing animation.
+     * again on the next tick, which shows up as a stutter in the animation.
      */
     private fun releaseBlock(me: LocalPlayer) {
         if (!owningBlock) {
             return
         }
         owningBlock = false
+        blockHand = null
         if (!me.isUsingItem || mc.options.keyUse.isPressedOnAny) {
             return
         }
-        runCatching { interaction.releaseUsingItem(me) }
+        runCatching { interaction.releaseUsingItemInTickLoop() }
     }
 
     /** Releases immediately, for disable: the module must not leave the player blocking. */
@@ -269,11 +317,12 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
             return
         }
         owningBlock = false
+        blockHand = null
         val me = mc.player ?: return
         if (!me.isUsingItem || mc.options.keyUse.isPressedOnAny) {
             return
         }
-        runCatching { interaction.releaseUsingItem(me) }
+        runCatching { interaction.releaseUsingItemInTickLoop() }
     }
 
     // --- the lag --------------------------------------------------------------------------
@@ -282,10 +331,10 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
      * `Mode = Lag`: while the window is open, outgoing packets are queued instead of sent.
      *
      * The null packet is `BlinkManager` asking "may I flush now?" once per frame and once per tick;
-     * answering `PASS` keeps the queue from being emptied in the middle of the window, which is the
-     * same answer every module that holds packets gives. Nothing is ever flushed from here: the
-     * manager drains the queue on its own on the first frame the window is closed, and if another
-     * module is holding packets they leave together with ours, in order.
+     * answering `PASS` keeps the queue from being emptied in the middle of the window. When the
+     * window is over nothing is answered at all, i.e. the default `FLUSH` answer stands, and the
+     * manager drains the queue on its own. Answering `PASS` there as well was the bug that left the
+     * queue stuck forever — the connection stayed frozen after the first block hit.
      */
     @Suppress("unused")
     private val blinkHandler = handler<BlinkPacketEvent> { event ->
@@ -319,10 +368,6 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
             lastSkip = "screen open"
             return false
         }
-        if (!me.mainHandItem.isSword) {
-            lastSkip = "not holding a sword"
-            return false
-        }
         // `isPressedOnAny` is the physical right button *or* a module (an AutoClicker's use button)
         // holding it: both are the player asking to block.
         if (requireMouseDown && !mc.options.keyUse.isPressedOnAny) {
@@ -337,6 +382,7 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
         if (event.world == null) {
             // A new world has no block of ours in it, and no tick count that means anything.
             owningBlock = false
+            blockHand = null
             reset()
         }
     }
