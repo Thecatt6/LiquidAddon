@@ -10,6 +10,7 @@ import net.ccbluex.liquidbounce.event.events.MouseRotationEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.utils.aiming.RotationManager
+import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
 import net.ccbluex.liquidbounce.utils.block.doPlacement
 import net.ccbluex.liquidbounce.utils.block.collisionShape
 import net.ccbluex.liquidbounce.utils.block.state
@@ -319,7 +320,10 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
         }
 
         val server = RotationManager.serverRotation
-        val offset = server.directionAngleTo(target.rotation)
+        // The goal is recomputed from the point, not read from the plan: the plan may be a few
+        // ticks old, and the eye has moved since (this is a fall, everything moves).
+        val goal = Rotation.lookingAt(target.interactionPoint, me.eyePosition)
+        val offset = server.directionAngleTo(goal)
         if (offset > rotationTolerance) {
             note("rotazione a %.1f° dalla faccia".format(offset))
             return

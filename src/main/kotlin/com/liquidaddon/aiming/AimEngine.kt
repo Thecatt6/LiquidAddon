@@ -853,7 +853,9 @@ internal class AimassistCore(
         handDrift = 1f
         handUndershoot = 10
         pauseLeft = 0
-        nextPauseAt = 0L
+        // The first beat of rest comes *later*, not now: a module that starts by doing nothing for
+        // five ticks is a module that misses the first — and for a rescue that is the only one.
+        nextPauseAt = System.currentTimeMillis() + PAUSE_EVERY_MS + Random.nextInt(PAUSE_JITTER_MS)
         aimOffset = Vec3(0.0, 0.0, 0.0)
         aimOffsetUntil = 0L
         yawCarry = 0.0
