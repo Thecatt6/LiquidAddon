@@ -71,12 +71,12 @@ import kotlin.random.Random
  * Three modes ([Mode]):
  *  - **Latency** — a constant amount of delay added to your packets. Nothing is analysed, the
  *    connection is just `Delay` milliseconds slower than it is;
- *  - **Dynamic** — the delay follows the fight. A threat score (how close the nearest enemy is to
- *    where the server thinks you are, whether they are looking at you, whether you were just hit,
- *    whether you are hitting) is scaled onto `0..Delay` and *smoothed* over [adaptTime], so the
- *    connection speed drifts instead of flickering on and off. It also refuses to lag when lagging
- *    would be a disadvantage: the frozen position is closer to the enemy than the real one, or an
- *    enemy hitbox already intersects it;
+ *  - **Dynamic** — the delay follows the fight, and follows it the *right* way round. The score is
+ *    how much the freeze is actually worth: how far the position the server has is from the real
+ *    one (a desync of zero is a delay with nothing behind it), how far outside the enemy's reach
+ *    that position is, whether they are looking straight at it, and whether you were just hit. It
+ *    is scaled onto `0..Delay` and *smoothed* over [adaptTime], so the connection speed drifts
+ *    instead of flickering;
  *  - **Repel** — treats the held ticks as a set of candidates and picks the one that keeps the
  *    opponent furthest away. The position each held tick carries is scored by how far the enemies
  *    (led by one tick of their own velocity) would be from it, minus a penalty for how long
@@ -105,6 +105,16 @@ import kotlin.random.Random
  *    interactions ([flushOn]) make the connection catch up instead of being held with everything
  *    else, so the thing that is left behind the least is your hit - and nowhere in the module is
  *    there a burst, because a burst is a merged server tick, and a merged server tick is a flag.
+ *
+ * ## Where it is an advantage at all
+ *
+ * A delayed position is a disadvantage the moment somebody can hit it: your own hits leave late,
+ * your answer to their knockback leaves late, and the server resolves the exchange on a position
+ * you have already left. So the hold is dropped whenever an enemy is inside reach of the frozen
+ * position ([HoldWhen.OUT_OF_REACH]) and for [combatGrace] milliseconds after your own attack or
+ * after you were hit - an exchange always runs at full speed. What is left is the case in which
+ * lagging does help: keeping the server, and with it the enemy's aim, on a position you have
+ * already left.
  *
  * Everything runs on the client's shared [BlinkManager] queue, so the Blink ESP, the position line
  * and every other blink-aware module keep working exactly as they do with the built-in FakeLag.
@@ -142,6 +152,18 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
 
     /** How long [flushOn] keeps the hold at zero after one of its packets, in milliseconds. */
     private const val CATCH_UP_MS = 300L
+
+    /** Blocks added to the interaction reach: inside this, the frozen position is in the fight. */
+    private const val COMBAT_MARGIN = 0.5
+
+    /** The desync, in blocks, at which the freeze is worth the whole delay. */
+    private const val USEFUL_DESYNC = 4.0
+
+    /** When the delay may be applied at all; see [holdWhen]. */
+    enum class HoldWhen(override val tag: String) : Tagged {
+        ALWAYS("Always"),
+        OUT_OF_REACH("OutOfReach")
+    }
 
     enum class Mode(override val tag: String) : Tagged {
         /** Adds a constant amount of delay to your packets. */
@@ -213,6 +235,24 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
     private val range by rangeValue
 
     private val flushOn by multiEnumChoice("FlushOn", FlushOn.ENTITY_INTERACT, FlushOn.BLOCK_INTERACT)
+
+    /**
+     * When the hold is allowed at all.
+     *
+     * `OutOfReach` (the default) drops it while an enemy can reach the position the server has, i.e.
+     * while the fight is actually happening: there a delayed hit and a delayed answer cost more than
+     * a stale position gives. `Always` is the old behaviour, for the cases in which the delay itself
+     * is the goal (a server that is lenient with lag).
+     */
+    private val holdWhenValue = enumChoice("HoldWhen", HoldWhen.OUT_OF_REACH)
+    private val holdWhen by holdWhenValue
+
+    /**
+     * Milliseconds during which the hold stays at zero after your own attack or after you were hit.
+     * The exchange - the moment a late packet is a lost fight - runs at full speed.
+     */
+    private val combatGraceValue = int("CombatGrace", 350, 0..1000, "ms")
+    private val combatGrace by combatGraceValue
 
     /** How fast [Mode.DYNAMIC] is allowed to change the connection speed, in milliseconds. */
     private val adaptTimeValue = int("AdaptTime", 250, 50..1000, "ms")
@@ -292,22 +332,15 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
 
         val serverPos = serverPosition()
 
+        // Scanned once for every mode: the gate below needs the neighbours even in Latency, and the
+        // scan is the same one Dynamic and Repel were already doing.
+        val found = scanEnemies(serverPos)
+        enemies = found
+
         when (mode) {
-            Mode.LATENCY -> {
-                enemies = emptyList()
-                holdMs = delay.toFloat()
-            }
-
-            Mode.DYNAMIC -> {
-                val found = scanEnemies(serverPos)
-                enemies = found
-                holdMs = smooth(dynamicHold(now, serverPos, found))
-            }
-
-            Mode.REPEL -> {
-                val found = scanEnemies(serverPos)
-                enemies = found
-            }
+            Mode.LATENCY -> holdMs = delay.toFloat()
+            Mode.DYNAMIC -> holdMs = smooth(dynamicHold(now, serverPos, found))
+            Mode.REPEL -> Unit
         }
 
         val desired = when {
@@ -316,6 +349,8 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
             // stays caught up for a moment. Never a burst - a burst is what merges two of our
             // ticks into one server tick, which is exactly what the "post packet" checks flag.
             now < catchUpUntil -> 0
+            // Nothing to gain, or a fight in progress: no delay at all this tick.
+            !holdPointUseful(now, serverPos) -> 0
             mode == Mode.REPEL -> chooseRepelHold(serverPos, enemies)
             else -> ticksFor(holdMs + jitterMs + spikeMs)
         }
@@ -454,30 +489,72 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
             return 0f
         }
 
-        val inner = range.start.toDouble()
-        val outer = max(range.endInclusive.toDouble(), inner + 0.5)
-        val serverDistance = sqrt(found.minOf { it.squaredBoxedDistanceTo(serverPos) })
-        val closeness = (1.0 - (serverDistance - inner) / (outer - inner)).coerceIn(0.0, 1.0).toFloat()
-        val facing = found.maxOf { lookingAtUs(it, serverPos) }
-        val hurt = decay(now - lastDamageAt, 1500L)
-        val attacking = decay(now - lastAttackAt, 1000L)
-
-        var threat = 0.45f * closeness + 0.25f * facing + 0.20f * hurt + 0.10f * attacking
-
-        val clientDistance = sqrt(found.minOf { it.squaredBoxedDistanceTo(player.position()) })
-        if (serverDistance < clientDistance) {
-            threat *= 0.35f
+        // How far the frozen position is from the nearest enemy. Inside the reach they can hit the
+        // position the server has, so holding it is a lost exchange, not an advantage.
+        val reach = reachDistance()
+        val frozenDistance = sqrt(found.minOf { it.squaredBoxedDistanceTo(serverPos) })
+        if (frozenDistance <= reach) {
+            return 0f
         }
+
+        // What the freeze is worth: the distance between the position the server has and the real
+        // one. A desync of zero is a delay with nothing behind it.
+        val desync = serverPos.distanceTo(player.position())
+        val gain = (desync / USEFUL_DESYNC).coerceIn(0.0, 1.0).toFloat()
+
+        // How much room there is outside the fight. Right at the edge of the reach the enemy closes
+        // in at once, so the hold is short; further out, nobody is answering anything.
+        val outer = max(range.endInclusive.toDouble(), reach + 1.5)
+        val room = ((frozenDistance - reach) / (outer - reach)).coerceIn(0.0, 1.0).toFloat()
+
+        // Somebody already aiming at the stale position gets the hit for free: freezing is worth
+        // half as much there.
+        val facing = found.maxOf { lookingAtUs(it, serverPos) }
+
+        val hurt = decay(now - lastDamageAt, 1500L)
+
+        var value = 0.55f * gain + 0.30f * room + 0.15f * hurt
+        value *= 1f - 0.5f * facing
 
         // getBoundingBoxAt, not dimensions.makeBoundingBox: Entity.dimensions is private and
         // LiquidBounce's access widener does not propagate to add-ons.
         val frozenBox = player.getBoundingBoxAt(serverPos)
         if (found.any { it.box.intersects(frozenBox) }) {
-            threat = 0f
+            value = 0f
         }
 
-        return threat.coerceIn(0f, 1f) * delay
+        return value.coerceIn(0f, 1f) * delay
     }
+
+    /**
+     * Whether holding packets right now can gain anything.
+     *
+     * The old version held *more* the closer the fight was, which is the wrong way round: that is
+     * exactly the moment when a delayed position, a delayed hit and a late answer cost the fight.
+     * The rule is now the opposite — no hold while an enemy can reach the position the server has,
+     * and no hold for [combatGrace] milliseconds after your own attack or after a hit — so what is
+     * left is the case lagging is actually for: keeping the server, and with it the enemy's aim, on
+     * a position you have already left.
+     */
+    private fun holdPointUseful(now: Long, serverPos: Vec3): Boolean {
+        if (now - lastAttackAt < combatGrace || now - lastDamageAt < combatGrace) {
+            return false
+        }
+
+        return when (holdWhen) {
+            HoldWhen.ALWAYS -> true
+            HoldWhen.OUT_OF_REACH -> {
+                val reach = reachDistance()
+                enemies.none { it.squaredBoxedDistanceTo(serverPos) <= reach * reach }
+            }
+        }
+    }
+
+    /** How far an enemy can reach, from either hand: inside this the frozen position is in a fight. */
+    private fun reachDistance(): Double = max(
+        player.entityInteractionRange(),
+        player.blockInteractionRange()
+    ) + COMBAT_MARGIN
 
     /** How much of [enemy]'s view is on the position the server believes we are at, 0..1. */
     private fun lookingAtUs(enemy: Entity, serverPos: Vec3): Float {
@@ -784,8 +861,25 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
             "§7[FakeLagV2] §f%s held=%dms/%dticks target=%dms jitter=%+dms queue=%d queued-total=%d enemies=%d ping=%dms→%dms".format(
                 mode.tag, held, heldTicks, holdMs.roundToInt(), (jitterMs + spikeMs).roundToInt(),
                 outgoingCount(), queued, enemies.size, ping, ping + held
-            ) + " §7server=(%.1f, %.1f, %.1f)".format(serverPos.x, serverPos.y, serverPos.z) + warnings()
+            ) + " §7server=(%.1f, %.1f, %.1f)".format(serverPos.x, serverPos.y, serverPos.z) +
+                (if (holdPointUseful(now, serverPos)) " §ahold ok" else " §7hold off (" + holdReason(now, serverPos) + ")") +
+                warnings()
         )
+    }
+
+    /** Why the hold is at zero right now, for the debug line: the exchange, or the enemy in reach. */
+    private fun holdReason(now: Long, serverPos: Vec3): String {
+        val grace = combatGrace
+        return when {
+            now - lastAttackAt < grace -> "your attack"
+            now - lastDamageAt < grace -> "just hit"
+            holdWhen == HoldWhen.OUT_OF_REACH -> {
+                val reach = reachDistance()
+                val nearest = enemies.minOfOrNull { sqrt(it.squaredBoxedDistanceTo(serverPos)) }
+                if (nearest == null) "no neighbours" else "enemy at %.1f (reach %.1f)".format(nearest, reach)
+            }
+            else -> "disabled"
+        }
     }
 
     /**
