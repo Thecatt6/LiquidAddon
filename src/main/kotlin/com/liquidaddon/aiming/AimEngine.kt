@@ -620,6 +620,21 @@ internal class AimValues(
 internal class AimassistCore(
     private val owner: ClientModule,
     private val values: AimSettings,
+    /**
+     * A target the owner hands in instead of the scan, or `null`.
+     *
+     * The scan looks for [LivingEntity]s, which a defence module does not want: the thing flying at
+     * its face is a fireball, not a player. With a provider, the engine aims at exactly what the
+     * owner names — the same maths, the same lattice, the same model — and lets go the tick the
+     * provider returns `null`.
+     */
+    private val forcedTarget: ((LocalPlayer) -> Entity?)? = null,
+    /**
+     * Priority of the rotation requests. The deflector uses one above the aim's, so a fireball on a
+     * collision course wins over a target that can wait; with the default it is an aim like any
+     * other.
+     */
+    private val rotationPriority: Priority = RotationPriority.IMPORTANT_FOR_USAGE_1,
 ) : MinecraftShortcuts {
 
     // --- the values, read as if they were fields of the engine -------------------------------
@@ -676,7 +691,7 @@ internal class AimassistCore(
     // --- state ------------------------------------------------------------------------------
 
     /** The target the assist is helping with. Kept between ticks: the mouse handler needs it. */
-    private var currentTarget: LivingEntity? = null
+    private var currentTarget: Entity? = null
     private var lastSwitch = 0L
     private var reactionUntil = 0L
 
@@ -795,7 +810,7 @@ internal class AimassistCore(
     private var resendingAttack = false
 
     /** The entity this module is currently helping with, or `null`. Read by the target circle. */
-    val target: LivingEntity?
+    val target: Entity?
         get() = currentTarget
 
     /** Short module tag: the first characters of the target name. */
@@ -1033,7 +1048,7 @@ internal class AimassistCore(
             currentTarget = target
             lastSwitch = now
             // A click the player already made is not a reaction to wait for.
-            reactionUntil = if (target === pendingAttack) now else now + reactionDelay +
+            reactionUntil = if (target is LivingEntity && target === pendingAttack) now else now + reactionDelay +
                 Random.nextInt(reactionRandom + 1)
             responseJitter = 0.85f + Random.nextFloat() * 0.3f
             strengthScale = 1f + (Random.nextFloat() - 0.5f) * 2f * (strengthSpread / 100f)
@@ -1265,7 +1280,7 @@ internal class AimassistCore(
      * drift is now a small random walk: a random number of counts, a sign that turns when it likes,
      * and ticks of complete rest in between.
      */
-    private fun stillTick(me: LocalPlayer, aim: Rotation, target: LivingEntity) {
+    private fun stillTick(me: LocalPlayer, aim: Rotation, target: Entity) {
         if (!silent) {
             hold()
             return
@@ -1312,7 +1327,7 @@ internal class AimassistCore(
         from: Rotation,
         stepYaw: Float,
         stepPitch: Float,
-        target: LivingEntity
+        target: Entity
     ) {
         val desired = Rotation(from.yaw + stepYaw, (from.pitch + stepPitch).coerceIn(-89.5f, 89.5f))
 
@@ -1340,7 +1355,7 @@ internal class AimassistCore(
             RotationManager.setRotationTarget(
                 plan(next, target),
                 // Below KillAura/Aimbot: an aim assist that overrode a real aura would be a bug.
-                RotationPriority.IMPORTANT_FOR_USAGE_1,
+                rotationPriority,
                 owner
             )
         } else if (frameInterpolation) {
@@ -1391,11 +1406,7 @@ internal class AimassistCore(
         // The aim did not move this tick: the model must see that as a zero velocity, not as the
         // step of the last tick stretched over the pause.
         previousAim = sent
-        RotationManager.setRotationTarget(
-            plan(sent, currentTarget),
-            RotationPriority.IMPORTANT_FOR_USAGE_1,
-            owner
-        )
+        RotationManager.setRotationTarget(plan(sent, currentTarget), rotationPriority, owner)
     }
 
     /**
@@ -1434,7 +1445,7 @@ internal class AimassistCore(
      * every tick (with [shape] or with the model, see [aiStep]), and letting the manager run an
      * angle smooth a second time would slow the assist down and move it off the mouse lattice.
      */
-    private fun plan(rotation: Rotation, entity: LivingEntity?) = RotationTarget(
+    private fun plan(rotation: Rotation, entity: Entity?) = RotationTarget(
         rotation = rotation,
         entity = entity,
         ticksUntilReset = 5,
@@ -1449,7 +1460,13 @@ internal class AimassistCore(
 
     // --- target selection -------------------------------------------------------------------
 
-    private fun findTarget(me: LocalPlayer): LivingEntity? {
+    private fun findTarget(me: LocalPlayer): Entity? {
+        // The owner names the target (see [forcedTarget]): a projectile is not something the scan
+        // below would ever return, and it is the owner that knows how to find one.
+        forcedTarget?.let { provider ->
+            return provider(me)?.takeUnless { it.isRemoved }
+        }
+
         // A held click decides who is aimed at: the player pointed at it, so the aim goes there
         // instead of waiting for the cone to agree.
         val forced = pendingAttack
@@ -1462,7 +1479,7 @@ internal class AimassistCore(
         // Sticky: the target already being helped stays, as long as it is still valid and inside
         // the cone. Otherwise every small movement of the cursor would re-pick somebody else and
         // the aim would wobble between two enemies.
-        val locked = currentTarget
+        val locked = currentTarget as? LivingEntity
         if (lockTarget && locked != null && isValidTarget(me, locked) &&
             inCone(me, locked) && locked.squaredBoxedDistanceTo(me) <= range * range
         ) {
@@ -1542,7 +1559,7 @@ internal class AimassistCore(
     // --- rotation math ----------------------------------------------------------------------
 
     /** Where the crosshair would be if the assist were perfect. A goal, never a value sent as-is. */
-    private fun goalRotation(me: LocalPlayer, target: LivingEntity, aim: Rotation): Rotation {
+    private fun goalRotation(me: LocalPlayer, target: Entity, aim: Rotation): Rotation {
         var point = pointOn(me, target, aim)
 
         // The point the aim is pulled to is not a constant of the box. A person keeps the crosshair
@@ -1583,10 +1600,10 @@ internal class AimassistCore(
     }
 
     /** Straight at the middle of the hitbox: used for the cone, never for the assist itself. */
-    private fun directionTo(me: LocalPlayer, target: LivingEntity): Rotation =
+    private fun directionTo(me: LocalPlayer, target: Entity): Rotation =
         Rotation.lookingAt(target.boundingBox.center, me.eyePosition)
 
-    private fun pointOn(me: LocalPlayer, target: LivingEntity, aim: Rotation): Vec3 {
+    private fun pointOn(me: LocalPlayer, target: Entity, aim: Rotation): Vec3 {
         return when (aimPoint) {
             AimPoint.HEAD -> target.eyePosition
             AimPoint.CHEST -> target.position().add(0.0, (target.bbHeight * 0.6).toDouble(), 0.0)
@@ -1600,7 +1617,7 @@ internal class AimassistCore(
      * helping *your* aim; pulling towards the geometric centre instead makes the crosshair slide to
      * the middle of the hitbox, which every rotation check reads as a magnet.
      */
-    private fun closestPoint(me: LocalPlayer, target: LivingEntity, aim: Rotation): Vec3 {
+    private fun closestPoint(me: LocalPlayer, target: Entity, aim: Rotation): Vec3 {
         val eyes = me.eyePosition
         val box = target.boundingBox
         val distance = eyes.distanceTo(box.center)
@@ -1626,7 +1643,7 @@ internal class AimassistCore(
      * exact test, not an angle: it is what decides whether the assist may touch the aim at all when
      * [onlyOnCrosshair] is on.
      */
-    private fun onCrosshair(me: LocalPlayer, target: LivingEntity): Boolean {
+    private fun onCrosshair(me: LocalPlayer, target: Entity): Boolean {
         val eyes = me.eyePosition
         val box = target.boundingBox
         if (box.contains(eyes)) return true
@@ -1646,7 +1663,7 @@ internal class AimassistCore(
      * pull is strongest exactly where the player cannot see it — they are already aiming at the
      * target — and vanishes at the distance at which it would become a snap.
      */
-    private fun bubble(me: LocalPlayer, target: LivingEntity): Float {
+    private fun bubble(me: LocalPlayer, target: Entity): Float {
         // The aimbot picked the target itself, so there is no "the crosshair is already on it"
         // to reward and no distance from the aim to fade over: the pull is full, always.
         if (values.autoAim) return 1f
@@ -1661,11 +1678,11 @@ internal class AimassistCore(
     }
 
     /** Angle between the crosshair and the direction towards [target]'s hitbox, in degrees. */
-    private fun crosshairOffset(target: LivingEntity): Float =
+    private fun crosshairOffset(target: Entity): Float =
         RotationUtil.crosshairAngleToEntity(target)
 
     /** How wide the hitbox is, seen from the eyes, in degrees. */
-    private fun hitboxRadius(me: LocalPlayer, target: LivingEntity): Float {
+    private fun hitboxRadius(me: LocalPlayer, target: Entity): Float {
         val box = target.boundingBox
         val distance = me.eyePosition.distanceTo(box.center).coerceAtLeast(0.1)
         val half = max(box.maxX - box.minX, box.maxY - box.minY) * 0.5
@@ -1732,7 +1749,7 @@ internal class AimassistCore(
         me: LocalPlayer,
         aim: Rotation,
         goal: Rotation,
-        target: LivingEntity
+        target: Entity
     ): Pair<Float, Float>? {
         if (!DeepLearningEngine.isInitialized) {
             return aiUnavailable("deep learning not initialised")
@@ -1752,7 +1769,9 @@ internal class AimassistCore(
                     playerDiff = me.position().subtract(me.lastPos),
                     targetDiff = target.position().subtract(target.lastPos),
                     distance = me.squaredBoxedDistanceTo(target).toFloat(),
-                    hurtTime = target.hurtTime,
+                    // A projectile has no hurtTime: the model was trained with the damage the
+                    // target had taken, and for a fireball that is always zero.
+                    hurtTime = (target as? LivingEntity)?.hurtTime ?: 0,
                     age = 0
                 ).asInput
             )
@@ -2002,7 +2021,7 @@ internal class AimassistCore(
 
     // --- debug ------------------------------------------------------------------------------
 
-    private fun report(me: LocalPlayer, aimed: Rotation, target: LivingEntity) {
+    private fun report(me: LocalPlayer, aimed: Rotation, target: Entity) {
         assisted++
         if (chatLog && assisted % 100 == 0) {
             chat("§7[" + owner.name + "] §f$assisted corrections" +
