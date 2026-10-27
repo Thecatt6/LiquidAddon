@@ -1,6 +1,7 @@
 package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
+import net.ccbluex.liquidbounce.config.autoconfig.AutoConfig
 import net.ccbluex.liquidbounce.config.types.list.Tagged
 import net.ccbluex.liquidbounce.event.events.AttackEntityEvent
 import net.ccbluex.liquidbounce.event.events.BlinkPacketEvent
@@ -84,6 +85,14 @@ import kotlin.random.Random
  *    server tick, or an attack and a use carrying the same rotation, are two actions no input
  *    device produces — and on a 1.8 server the first one is read as "blocking while attacking".
  *
+ * ## Presets
+ *
+ * The six sliders that decide *how* it blocks ([chance], [requireMouseDown], [mode], [delay],
+ * [blockTicks], [lagTicks]) plus the two that decide how far apart the actions are
+ * ([releaseCooldown], [attackGap]) are written together by the `Preset` setting, so the GUI always
+ * shows the profile that is really running instead of a name on top of three different values.
+ * `Custom` leaves the sliders exactly where they are.
+ *
  * ## The two modes
  *
  *  - [Mode.MANUAL] — the block hit on its own: click, block, release. Nothing else is touched.
@@ -100,6 +109,31 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
         LAG("Lag")
     }
 
+    /**
+     * A whole configuration in one choice, for the situations this module is used in.
+     *
+     * [CUSTOM] is the sliders as they are — picking it never changes anything, it is what the other
+     * presets leave behind when you start tuning by hand.
+     */
+    enum class Preset(override val tag: String) : Tagged {
+        CUSTOM("Custom"),
+
+        /** The default: only while you hold the right button, three ticks of separation. */
+        LEGIT("Legit"),
+
+        /** As many block hits as your CPS allows: one tick blocks, two ticks of separation. */
+        FAST("Fast"),
+
+        /** The most discreet: a few clicks become a block, a tick later, a single tick long. */
+        GHOST("Ghost"),
+
+        /** The block kept up by holding the packets, not by longer blocking. */
+        LAG("Lag"),
+
+        /** Every click, no separation, three ticks: the reference behaviour, and the flaggiest. */
+        BLATANT("Blatant")
+    }
+
     /** Nothing scheduled. */
     private const val IDLE = -1
 
@@ -109,32 +143,42 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
     /** Two rotations closer than this (in degrees) are the same rotation to a server. */
     private const val SAME_ROTATION_DEGREES = 0.05f
 
+    /** The whole profile, applied to the sliders below (see [applyPreset]). */
+    private val presetValue = enumChoice("Preset", Preset.CUSTOM)
+    private val preset by presetValue
+
     /** Probability that a click becomes a block hit. */
-    private val chance by int("Chance", 100, 0..100, "%")
+    private val chanceValue = int("Chance", 100, 0..100, "%")
+    private val chance by chanceValue
 
     /**
      * Only work while the right mouse button is held — the physical button, or the use button an
      * AutoClicker is holding.
      */
-    private val requireMouseDown by boolean("RequireMouseDown", false)
+    private val requireMouseDownValue = boolean("RequireMouseDown", false)
+    private val requireMouseDown by requireMouseDownValue
 
     /**
      * `Manual` — just the block hit. `Lag` — the block hit, then a short hold of the outgoing
      * packets so the server keeps the block up for [lagTicks] ticks.
      */
-    private val mode by enumChoice("Mode", Mode.MANUAL)
+    private val modeValue = enumChoice("Mode", Mode.MANUAL)
+    private val mode by modeValue
 
     /**
      * Ticks between the click and the block. A block can only open on a tick boundary, so 0 and 1
      * both mean "the next tick": the block is up before the next attack either way.
      */
-    private val delay by int("Delay", 1, 0..5, "ticks")
+    private val delayValue = int("Delay", 1, 0..5, "ticks")
+    private val delay by delayValue
 
     /** How long the block is held, in ticks. Two ticks cover the window around one click. */
-    private val blockTicks by int("BlockTicks", 2, 1..10, "ticks")
+    private val blockTicksValue = int("BlockTicks", 2, 1..10, "ticks")
+    private val blockTicks by blockTicksValue
 
     /** `Mode = Lag` only: how many ticks the packets after the block opened are held back. */
-    private val lagTicks by int("LagTicks", 4, 1..10, "ticks")
+    private val lagTicksValue = int("LagTicks", 4, 1..10, "ticks")
+    private val lagTicks by lagTicksValue
 
     /**
      * Ticks that must pass between **closing** a block and opening the next one.
@@ -146,7 +190,8 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
      * attacking" — the `AutoBlock` check. Two ticks of separation remove the pattern and cost
      * nothing, because a block hit only has to cover the ticks around the hit.
      */
-    private val releaseCooldown by int("ReleaseCooldown", 2, 0..6, "ticks")
+    private val releaseCooldownValue = int("ReleaseCooldown", 2, 0..6, "ticks")
+    private val releaseCooldown by releaseCooldownValue
 
     /**
      * Ticks that must pass between your **attack** and the block that follows it.
@@ -156,10 +201,89 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
      * angle, and have the two leave together. One tick is enough to break the coincidence, and the
      * block lands on the hit either way — the damage window of a hit is longer than a tick.
      */
-    private val attackGap by int("AttackGap", 1, 0..4, "ticks")
+    private val attackGapValue = int("AttackGap", 1, 0..4, "ticks")
+    private val attackGap by attackGapValue
 
     private val chatLog by boolean("ChatLog", false)
     private val debug by boolean("Debug", false)
+
+    // --- presets ------------------------------------------------------------------------------
+
+    /** The values a [Preset] writes. Declared once, applied by [applyPreset]. */
+    private class Profile(
+        val chance: Int,
+        val requireMouseDown: Boolean,
+        val mode: Mode,
+        val delay: Int,
+        val blockTicks: Int,
+        val lagTicks: Int,
+        val releaseCooldown: Int,
+        val attackGap: Int,
+    )
+
+    private fun profileOf(preset: Preset): Profile? = when (preset) {
+        // Custom is "the sliders as they are": nothing to write, and writing something would throw
+        // away the values the player just tuned.
+        Preset.CUSTOM -> null
+
+        // Only while the right button is down, and with room between the actions: the shield goes up
+        // after the hit, never with it.
+        Preset.LEGIT -> Profile(
+            chance = 100, requireMouseDown = true, mode = Mode.MANUAL,
+            delay = 1, blockTicks = 2, lagTicks = 4, releaseCooldown = 3, attackGap = 2
+        )
+
+        // One tick of block per hit and only two ticks of separation: the fastest profile that still
+        // never puts the release and the next use in one server tick.
+        Preset.FAST -> Profile(
+            chance = 100, requireMouseDown = false, mode = Mode.MANUAL,
+            delay = 1, blockTicks = 1, lagTicks = 4, releaseCooldown = 2, attackGap = 1
+        )
+
+        // Rare, late, one tick long and far apart: for the servers where a block hit is a luxury.
+        Preset.GHOST -> Profile(
+            chance = 70, requireMouseDown = false, mode = Mode.MANUAL,
+            delay = 2, blockTicks = 1, lagTicks = 4, releaseCooldown = 4, attackGap = 2
+        )
+
+        // The block is kept up by holding the packets instead of by blocking for longer, so the two
+        // actions stay as far apart as in Fast.
+        Preset.LAG -> Profile(
+            chance = 100, requireMouseDown = false, mode = Mode.LAG,
+            delay = 1, blockTicks = 2, lagTicks = 4, releaseCooldown = 2, attackGap = 1
+        )
+
+        // Everything on: every click, immediately, a long block and no separation at all. It is the
+        // behaviour the module was first written with, and the one an `AutoBlock` check looks for.
+        Preset.BLATANT -> Profile(
+            chance = 100, requireMouseDown = false, mode = Mode.MANUAL,
+            delay = 0, blockTicks = 3, lagTicks = 4, releaseCooldown = 0, attackGap = 0
+        )
+    }
+
+    /** Writes [applyPreset]'s profile into the sliders, so the GUI shows what is really running. */
+    private fun applyPreset(preset: Preset) {
+        val p = profileOf(preset) ?: return
+
+        chanceValue.set(p.chance)
+        requireMouseDownValue.set(p.requireMouseDown)
+        modeValue.set(p.mode)
+        delayValue.set(p.delay)
+        blockTicksValue.set(p.blockTicks)
+        lagTicksValue.set(p.lagTicks)
+        releaseCooldownValue.set(p.releaseCooldown)
+        attackGapValue.set(p.attackGap)
+
+        if (debug || chatLog) {
+            chat("§7[BlockHit] §fpreset ${preset.tag} applied")
+        }
+    }
+
+    init {
+        // Switching preset rewrites the sliders. Nothing is applied while the config is loading,
+        // otherwise a restored Preset would overwrite the sliders restored next to it.
+        presetValue.onChanged { if (!AutoConfig.loadingNow) applyPreset(it) }
+    }
 
     /** Ticks until the block opens, or [IDLE]. */
     private var startIn = IDLE
@@ -206,15 +330,17 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
         super.onEnabled()
 
         val me = mc.player ?: return
+        val profile = if (preset == Preset.CUSTOM) "" else " §7[§f${preset.tag}§7]"
         val hand = blockingHand(me)
         if (hand == null) {
             chat(
-                "§7[BlockHit] §cattivo, ma non c'è niente che blocchi: §7serve uno scudo nella " +
-                    "mano secondaria, o una spada su un server 1.8 (o 1.21.5+)"
+                "§7[BlockHit]$profile §cattivo, ma non c'è niente che blocchi: §7serve uno scudo " +
+                    "nella mano secondaria, o una spada su un server 1.8 (o 1.21.5+)"
             )
         } else {
             chat(
-                "§7[BlockHit] §aattivo §7- blocca con §f" + me.getItemInHand(hand).hoverName.string +
+                "§7[BlockHit]$profile §aattivo §7- blocca con §f" +
+                    me.getItemInHand(hand).hoverName.string +
                     " §7(" + hand.name.lowercase() + ", lato server: non vedi l'animazione)"
             )
         }
