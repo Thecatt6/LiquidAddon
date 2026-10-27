@@ -634,7 +634,7 @@ internal class AimassistCore(
      * collision course wins over a target that can wait; with the default it is an aim like any
      * other.
      */
-    private val rotationPriority: Priority = RotationPriority.IMPORTANT_FOR_USAGE_1,
+    private val rotationPriority: RotationPriority = RotationPriority.IMPORTANT_FOR_USAGE_1,
 ) : MinecraftShortcuts {
 
     // --- the values, read as if they were fields of the engine -------------------------------
