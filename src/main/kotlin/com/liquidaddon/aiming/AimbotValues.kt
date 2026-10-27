@@ -79,7 +79,7 @@ internal class AimbotValues(group: ValueGroup) : AimSettings {
      * neighbours) and then repeats the same two values forever — the two components of the
      * "machine-like rotations" flag: `Distinct` and `Baritone`.
      */
-    override val mouseNoise by group.int("MouseNoise", 1, 0..4, "counts")
+    override val mouseNoise by group.int("MouseNoise", 2, 0..4, "counts")
 
     /** How often (in %) the hand lands one count past the goal; the next tick takes it back. */
     override val overshoot by group.int("Overshoot", 8, 0..30, "%")
