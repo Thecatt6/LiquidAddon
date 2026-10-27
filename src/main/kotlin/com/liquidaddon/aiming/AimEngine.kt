@@ -33,6 +33,7 @@ import kotlin.math.atan2
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.round
+import kotlin.math.roundToInt
 import kotlin.math.tanh
 import kotlin.random.Random
 
@@ -85,6 +86,20 @@ private const val SPEED_DRIFT_STEP = 0.07f
 
 /** Chance (in %) that a resting hand does not move at all on a tick inside the dead zone. */
 private const val REST_CHANCE = 35
+
+/**
+ * The most the aim may move vertically in one tick, in degrees.
+ *
+ * Yaw and pitch are not the same movement. A hand sweeps the wrist horizontally and the vertical
+ * correction rides along in small pieces; an aim that answers a 12° vertical error with a single
+ * 12° packet, tick after tick, is a correction loop. The limit is drawn again every tick (see
+ * [AimassistCore.refreshHandProfile]) so that a clamped step never lands on the same number twice.
+ */
+private const val PITCH_STEP_MAX = 3.0f
+
+/** Mean distance between two beats of rest, and how much that distance varies (milliseconds). */
+private const val PAUSE_EVERY_MS = 1400
+private const val PAUSE_JITTER_MS = 1200
 
 /**
  * The share of the step an "idle" tick still applies when the camera is ours: a skipped tick would
@@ -376,7 +391,7 @@ internal class AimValues(
      * always does: it is what turns a handful of repeated deltas into a spread of them, and that is
      * exactly what the "machine-like rotations" checks (`distinct`, `min`/`max`, `sum`) measure.
      */
-    val mouseNoiseValue = group.int("MouseNoise", 1, 0..4, "counts")
+    val mouseNoiseValue = group.int("MouseNoise", 2, 0..4, "counts")
     override val mouseNoise by mouseNoiseValue
 
     /** How often (in %) the hand lands one count past the goal; the next tick takes it back. */
@@ -569,7 +584,7 @@ internal class AimValues(
         gcdDitherValue.set(p.gcdDither)
         // A blatant profile is the reference machine: the lattice is still handled, the hand is not.
         val blatant = preset == Preset.BLATANT
-        mouseNoiseValue.set(if (blatant) 0 else 1)
+        mouseNoiseValue.set(if (blatant) 0 else 2)
         overshootValue.set(if (blatant) 0 else 8)
         strengthSpreadValue.set(if (blatant) 0 else 15)
         switchDelayValue.set(p.switchDelay)
@@ -726,6 +741,28 @@ internal class AimassistCore(
     private var lastCountsYaw: Int? = null
     private var lastCountsPitch: Int? = null
 
+    /**
+     * The "hand" of the moment (see [refreshHandProfile]).
+     *
+     * A hand is not the same hand for a whole session: it is brisk for a while, then it gets tired
+     * and lands short, then it sharpens again. Keeping one fixed distribution for hours is exactly
+     * what a *long term* analysis is built to notice — the samples are varied, but they are always
+     * drawn from the same machine.
+     */
+    private var handProfileUntil = 0L
+    private var handNoise = 1f
+    private var handOvershoot = 1f
+    private var handDrift = 1f
+    private var handUndershoot = 10
+
+    /** Beats of complete rest, and when the next one may start. */
+    private var pauseLeft = 0
+    private var nextPauseAt = 0L
+
+    /** Where inside the hitbox the aim is pulled to, and until when that point stays put. */
+    private var aimOffset = Vec3(0.0, 0.0, 0.0)
+    private var aimOffsetUntil = 0L
+
     /** Rounding residual carried between ticks, so the aim never stalls on a sub-count difference. */
     private var yawCarry = 0.0
     private var pitchCarry = 0.0
@@ -781,6 +818,15 @@ internal class AimassistCore(
         speedDrift = 1f
         lastCountsYaw = null
         lastCountsPitch = null
+        handProfileUntil = 0L
+        handNoise = 1f
+        handOvershoot = 1f
+        handDrift = 1f
+        handUndershoot = 10
+        pauseLeft = 0
+        nextPauseAt = 0L
+        aimOffset = Vec3(0.0, 0.0, 0.0)
+        aimOffsetUntil = 0L
         yawCarry = 0.0
         pitchCarry = 0.0
         tickStepYaw = 0f
@@ -941,6 +987,10 @@ internal class AimassistCore(
         // server never sees the interpolation, only its result.
         flushPendingCamera(me)
 
+        // The hand of the moment. Drawn before anything else this tick, so the pace, the wobble and
+        // the tendency to land short all come from the same profile.
+        refreshHandProfile()
+
         // A click that was held back because the server was still looking elsewhere goes out now,
         // before this tick's movement packet and before the player's own clicks.
         resolveAttack(me)
@@ -992,6 +1042,20 @@ internal class AimassistCore(
         }
 
         if (now < reactionUntil) {
+            hold()
+            return
+        }
+
+        // A hand stops. Not once — regularly, and never on a beat you could set a clock by. A click
+        // that is waiting for the rotation is never held back by a pause: the attack goes first.
+        if (pendingAttack != null) {
+            pauseLeft = 0
+        } else if (now > nextPauseAt) {
+            pauseLeft = 3 + Random.nextInt(4)
+            nextPauseAt = now + PAUSE_EVERY_MS + Random.nextInt(PAUSE_JITTER_MS)
+        }
+        if (pauseLeft > 0) {
+            pauseLeft--
             hold()
             return
         }
@@ -1069,7 +1133,7 @@ internal class AimassistCore(
             // says how much help is granted, the bubble/turn/fade/idle gates say whether it is
             // granted at all.
             // The speed of the pull walks over the engagement instead of sitting on one value.
-            speedDrift = (speedDrift + (Random.nextFloat() - 0.5f) * SPEED_DRIFT_STEP)
+            speedDrift = (speedDrift + (Random.nextFloat() - 0.5f) * SPEED_DRIFT_STEP * handDrift)
                 .coerceIn(0.85f, 1.15f)
 
             val allowance = weight * responseJitter * speedDrift * gate * glide * fade
@@ -1123,7 +1187,14 @@ internal class AimassistCore(
         stepYaw += (Random.nextFloat() - 0.5f) * jitterYaw
         stepPitch += (Random.nextFloat() - 0.5f) * jitterPitch
 
-        applyAim(me, aim, softLimit(stepYaw, maxSpeed), softLimit(stepPitch, maxSpeed * 0.7f), target)
+        // Vertical is not horizontal: the correction is split over a few ticks instead of leaving as
+        // one tall packet, and the limit itself is drawn per tick so a bound step is never the same
+        // number twice.
+        val pitchLimit = minOf(
+            maxSpeed * 0.7f,
+            PITCH_STEP_MAX * (0.85f + Random.nextFloat() * 0.15f)
+        )
+        applyAim(me, aim, softLimit(stepYaw, maxSpeed), softLimit(stepPitch, pitchLimit), target)
     }
 
     /* ---------------------------------------------------------------------------------------
@@ -1219,6 +1290,8 @@ internal class AimassistCore(
             in 88..96 -> 3
             else -> 4 + Random.nextInt(3)
         }
+        // A busier hand drifts further while resting; a tired one barely moves.
+        driftCounts = (driftCounts * handNoise).roundToInt().coerceIn(1, 8)
         if (Random.nextInt(100) < 30) {
             driftSign = -driftSign
         }
@@ -1471,6 +1544,35 @@ internal class AimassistCore(
     /** Where the crosshair would be if the assist were perfect. A goal, never a value sent as-is. */
     private fun goalRotation(me: LocalPlayer, target: LivingEntity, aim: Rotation): Rotation {
         var point = pointOn(me, target, aim)
+
+        // The point the aim is pulled to is not a constant of the box. A person keeps the crosshair
+        // somewhere *on* the enemy and lets it drift a little; a correction loop returns to the same
+        // coordinate every time, and the sequence of the goals is then as regular as the sequence of
+        // the steps. Redrawn every few ticks, inside the box, so it changes the shape of the whole
+        // engagement and not only the noise on top of it.
+        val now = System.currentTimeMillis()
+        if (now > aimOffsetUntil) {
+            val size = target.boundingBox
+            aimOffsetUntil = now + 150 + Random.nextInt(250)
+            aimOffset = Vec3(
+                (Random.nextDouble() - 0.5) * (size.maxX - size.minX) * 0.24,
+                (Random.nextDouble() - 0.5) * (size.maxY - size.minY) * 0.18,
+                (Random.nextDouble() - 0.5) * (size.maxZ - size.minZ) * 0.24
+            )
+        }
+        // Clamped back inside: an offset that leaves the hitbox would aim at the air next to the
+        // enemy, and a missed hit is a much louder flag than a regular one. The ranges are built
+        // with an explicit `maxOf`, so a hitbox narrower than the margin cannot throw.
+        val box = target.boundingBox
+        val lowX = box.minX + 0.02
+        val lowY = box.minY + 0.02
+        val lowZ = box.minZ + 0.02
+        point = Vec3(
+            (point.x + aimOffset.x).coerceIn(lowX, maxOf(lowX, box.maxX - 0.02)),
+            (point.y + aimOffset.y).coerceIn(lowY, maxOf(lowY, box.maxY - 0.02)),
+            (point.z + aimOffset.z).coerceIn(lowZ, maxOf(lowZ, box.maxZ - 0.02))
+        )
+
         if (predict > 0f && predictSize > 0) {
             // The target's velocity of the last tick, not its whole movement: a small lead that
             // helps against strafing and cannot run ahead of a target that has stopped.
@@ -1781,13 +1883,27 @@ internal class AimassistCore(
         var yaw = countsYaw
         var pitch = countsPitch
 
-        val noise = mouseNoise
+        // Land short now and then, and finish on the next tick. A controller arrives ON the goal at
+        // the first attempt, every attempt; a hand arrives near it and takes the last counts with a
+        // separate, smaller move. It also breaks the geometric ratio between two steps, because the
+        // step after a short one is not proportional to anything — it is the leftover.
+        if (handUndershoot > 0 && Random.nextInt(100) < handUndershoot) {
+            val fold = 0.55f + Random.nextFloat() * 0.3f
+            if (abs(yaw) >= 3) {
+                yaw = (yaw * fold).roundToInt().let { if (it == 0) yaw else it }
+            }
+            if (abs(pitch) >= 3) {
+                pitch = (pitch * fold).roundToInt().let { if (it == 0) pitch else it }
+            }
+        }
+
+        val noise = (mouseNoise * handNoise).roundToInt()
         if (noise > 0) {
-            yaw += noiseCounts(noise)
-            // The hand is busier horizontally: the pitch gets one count less of noise, and only
-            // when it is moving anyway most of the time.
+            yaw += noiseCounts(noise, abs(countsYaw))
+            // The hand is busier horizontally: the pitch gets less noise, and only when it is moving
+            // anyway most of the time.
             if (deltaPitch != 0.0 || Random.nextInt(100) < 30) {
-                pitch += noiseCounts(noise.coerceAtMost(1))
+                pitch += noiseCounts(noise.coerceAtMost(2), abs(countsPitch))
             }
         }
 
@@ -1803,7 +1919,8 @@ internal class AimassistCore(
 
         // Now and then a count too far, taken back on the next tick: the most human thing in the
         // whole pipeline, and the one that keeps the sum moving instead of settling on a number.
-        if (overshoot > 0 && Random.nextInt(100) < overshoot) {
+        val overshootChance = (overshoot * handOvershoot).roundToInt()
+        if (overshootChance > 0 && Random.nextInt(100) < overshootChance) {
             val yawSign = when {
                 deltaYaw > 0.0 -> 1
                 deltaYaw < 0.0 -> -1
@@ -1824,18 +1941,57 @@ internal class AimassistCore(
         return yaw to pitch
     }
 
-    /** Noise in whole counts: mostly ±1, sometimes ±2, a third of the time nothing at all. */
-    private fun noiseCounts(bound: Int): Int {
+    /**
+     * Noise in whole counts, with the *amplitude following the size of the step*.
+     *
+     * A fixed ±1 is wrong in both directions: on a step of one count it is a tremor (and it is what
+     * produced the `minY: -0.15, maxY: +0.151` of the last sample), on a step of forty counts it is
+     * invisible, because the check only sees the numbers that come out. A hand is the other way
+     * round: it is precise on a small movement and sloppy on a fast one. So the reach of the noise
+     * grows with the step, and inside that reach the amplitude is drawn, not fixed.
+     */
+    private fun noiseCounts(bound: Int, magnitude: Int): Int {
+        val reach = when {
+            magnitude >= 40 -> 3
+            magnitude >= 12 -> 2
+            magnitude >= 4 -> 1
+            else -> 0
+        }
+        val top = (bound + reach).coerceIn(1, 6)
         val roll = Random.nextInt(100)
         val amplitude = when {
-            bound >= 2 && roll >= 84 -> 2
-            roll >= 30 -> 1
-            else -> 0
+            // A hand is still now and then: a third of the ticks add nothing at all.
+            roll < 30 -> 0
+            top >= 3 && roll >= 92 -> 3
+            top >= 2 && roll >= 76 -> 2
+            else -> 1
         }
         if (amplitude == 0) {
             return 0
         }
         return if (Random.nextBoolean()) amplitude else -amplitude
+    }
+
+    /**
+     * The hand of the moment: a new one every 20-60 seconds.
+     *
+     * This is the answer to a *long term* analysis. Everything above makes a single tick look like a
+     * person; a statistic that watches ten minutes of ticks does not care about one tick, it cares
+     * whether the samples keep coming from the same distribution. And they do, if the wobble, the
+     * overshoot, the pace and the tendency to land short are constants — a varied but stationary
+     * signal is still a machine's signal. A hand is not stationary: it is quick for a while, then
+     * tired, then quick again.
+     */
+    private fun refreshHandProfile() {
+        val now = System.currentTimeMillis()
+        if (now <= handProfileUntil) {
+            return
+        }
+        handProfileUntil = now + 20_000 + Random.nextInt(40_001)
+        handNoise = 0.6f + Random.nextFloat()
+        handOvershoot = 0.5f + Random.nextFloat() * 1.3f
+        handDrift = 0.5f + Random.nextFloat() * 1.1f
+        handUndershoot = 6 + Random.nextInt(13)
     }
 
     /** Nearest whole mouse count, with the decision boundary wobbling like a human hand. */
@@ -1859,8 +2015,9 @@ internal class AimassistCore(
                 target.name.string, target.distanceTo(me), crosshairOffset(target),
                 bubble(me, target), aimed.yaw, aimed.pitch, silent,
                 if (presetName.isEmpty()) "-" else presetName
-            ) + "§7strength=%.0f%% max=%.1f° own=%.2f° counts=%+d/%+d noise=%d".format(
-                strength, maxSpeed, lastOwnYaw, lastCountsYaw ?: 0, lastCountsPitch ?: 0, mouseNoise
+            ) + "§7strength=%.0f%% max=%.1f° own=%.2f° counts=%+d/%+d noise=%.1f (set %d) hand=%.1f under=%d".format(
+                strength, maxSpeed, lastOwnYaw, lastCountsYaw ?: 0, lastCountsPitch ?: 0,
+                mouseNoise * handNoise, mouseNoise, handNoise, handUndershoot
             ) + (if (engine == Engine.AI) " §7$lastAiNote" else "") + warnings()
         )
     }
@@ -1885,6 +2042,9 @@ internal class AimassistCore(
         if (!gcdFix) append(" §cGcdFix off (deltas off the mouse lattice)")
         if (gcdFix && mouseNoise <= 0) {
             append(" §cMouseNoise 0 (every delta repeats: Distinct flag)")
+        }
+        if (maxSpeed * 0.7f > PITCH_STEP_MAX + 0.01f) {
+            append(" §7pitch limited to %.1f°/tick".format(PITCH_STEP_MAX))
         }
         if (engine == Engine.AI && aiUnavailableReason != null) {
             append(" §cAI fallback (${aiUnavailableReason})")
