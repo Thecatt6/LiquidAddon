@@ -26,6 +26,7 @@ import net.ccbluex.liquidbounce.utils.client.SilentHotbar
 import net.ccbluex.liquidbounce.utils.client.chat
 import net.ccbluex.liquidbounce.utils.inventory.Slots
 import net.ccbluex.liquidbounce.utils.kotlin.Priority
+import net.ccbluex.liquidbounce.utils.render.placement.PlacementRenderer
 import net.ccbluex.liquidbounce.utils.raytracing.traceFromPlayer
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.core.BlockPos
@@ -67,6 +68,11 @@ import net.minecraft.world.phys.Vec3
  *    one and the aim point is a point on a face rather than the middle of a block;
  *  - the stack comes from the hotbar or the off hand and is selected **silently**
  *    ([SilentHotbar]), so the client never sees the switch.
+ *
+ * Two things keep it from spending blocks for nothing: [minFall] (a jump is not a clutch) and
+ * [waterCheck] (falling into water or lava is not a fall you die from). Every block that does go
+ * down is drawn by LiquidBounce's own [PlacementRenderer], so what the module did is visible where
+ * it happened.
  */
 object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
 
@@ -93,9 +99,22 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
     /** How close the rotation the **server** has must be before the click goes out. */
     private val rotationTolerance by float("RotationTolerance", 4f, 0.5f..20f, "°")
 
+    /** Blocks of fall before it is worth a block: a jump is not a clutch. */
+    private val minFall by float("MinFall", 1.0f, 0f..20f, "blocks")
+
+    /** Do not waste blocks falling into water or lava — you are not going to die there. */
+    private val waterCheck by boolean("WaterCheck", true)
+
     private val swingMode by enumChoice("SwingMode", SwingMode.DO_NOT_HIDE)
     private val chatLog by boolean("ChatLog", false)
     private val debug by boolean("Debug", false)
+
+    /**
+     * The render: LiquidBounce's own [PlacementRenderer] — the same one `ScaffoldLegit` and
+     * LiquidBounce's own scaffold use — so every block this module puts in the world is drawn where it
+     * was placed, with its fade-in and fade-out.
+     */
+    private val renderer = tree(PlacementRenderer("Render", true, this, keep = false))
 
     /** The engine, with this module's settings and the point this module picks. */
     private val values = ClutchValues(this)
@@ -154,6 +173,7 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
 
     override fun onDisabled() {
         clearPlan()
+        renderer.clearSilently()
         core.onDisable()
         super.onDisabled()
     }
@@ -164,6 +184,9 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
     private fun shouldClutch(me: LocalPlayer): Boolean {
         if (me.onGround()) return false
         if (me.deltaMovement.y >= -0.02) return false
+
+        if (waterCheck && (me.isInWater || me.isInLava)) return false
+        if (me.fallDistance < minFall) return false
 
         if (trigger == Trigger.AIRBORNE) return true
 
@@ -366,6 +389,8 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
         }
 
         placed++
+        // Every block that really went into the world gets its box, whatever the reason it went.
+        renderer.addBlock(target.placedBlock)
         if (chatLog) {
             chat("§7[Clutch] §f$placed blocchi piazzati in caduta")
         }
