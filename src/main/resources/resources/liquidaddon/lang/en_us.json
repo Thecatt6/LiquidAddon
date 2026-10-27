@@ -30,7 +30,7 @@
   "liquidbounce.module.aimbotAI.value.aimodel.description": "AI model to use.",
   "liquidbounce.module.aimbotAI.value.aiYawMultiplier.description": "AI yaw output multiplier.",
   "liquidbounce.module.aimbotAI.value.aiCorrection.description": "AI correction share.",
-  "liquidbounce.module.scaffoldLegit.description": "Legit upward bridge. You aim at the top of the block you jump from; it jumps and right-clicks when the cell under your feet is free, with a delay. Use LiquidBounce's Eagle too for the flat parts.",
+  "liquidbounce.module.scaffoldLegit.description": "Legit upward bridge. It finds the cell that has to be filled, looks at the face that fills it silently - your camera does not move, only the server sees the look - and clicks once that look has really arrived. Stairs: block at the edge, block on top of it in the air, jump. Step: jump on the space key. The space key is only taken over while a step is actually being made.",
   "liquidbounce.module.hitFlick.description": "Turns the yaw off the target before a hit and back on the hit, so the extra knockback (sprint hit or Knockback) goes sideways. OnlyExtraKnockback flicks only those hits.",
   "liquidbounce.module.aimassist.description": "Aim assist, not an aimbot: it never clicks and never takes the view away from your hand. It pulls a share of the way towards an enemy already under the crosshair (Assist) and damps the cursor while it glides over a hitbox (Friction).",
   "liquidbounce.module.aimassist.value.preset.description": "Ready-made configs (Blatant/Legit/Ghost/Closet); Custom leaves the sliders alone.",
@@ -141,5 +141,17 @@
   "liquidbounce.module.blockHit.value.blockTicks.description": "How long the block stays up, in ticks. Two ticks cover the window around one click.",
   "liquidbounce.module.blockHit.value.lagTicks.description": "Lag mode only: how many ticks the packets sent after the block opened are held back.",
   "liquidbounce.module.blockHit.value.chatLog.description": "Print the running total every ten block hits.",
-  "liquidbounce.module.blockHit.value.debug.description": "Print what the module decides on every click and every tick."
+  "liquidbounce.module.blockHit.value.debug.description": "Print what the module decides on every click and every tick.",
+  "liquidbounce.module.scaffoldLegit.value.mode.description": "Stairs places the block for you while you hold space; Step jumps on the space key itself.",
+  "liquidbounce.module.scaffoldLegit.value.eagle.description": "Sneak on the edge so you never walk off it. Independent of the mode.",
+  "liquidbounce.module.scaffoldLegit.value.edgeDistance.description": "How far from the edge you have to be, in blocks. Drawn once per step from the range.",
+  "liquidbounce.module.scaffoldLegit.value.jumpAt.description": "How far past the middle of the new block you walk before the jump. Negative jumps early.",
+  "liquidbounce.module.scaffoldLegit.value.placeTiming.description": "Early clicks as soon as the jump starts; Peak waits until the jump stops rising, where the block is placed higher and the look has stopped drifting.",
+  "liquidbounce.module.scaffoldLegit.value.shiftDelay.description": "Ticks before the click at the edge, drawn from the range. A pause, not a rhythm.",
+  "liquidbounce.module.scaffoldLegit.value.jumpDelay.description": "Ticks after the jump before the click in the air, drawn from the range.",
+  "liquidbounce.module.scaffoldLegit.value.range.description": "How far a click may reach. The face has to be inside it, both to look at it and to place.",
+  "liquidbounce.module.scaffoldLegit.value.swing.description": "The swing of the click, and whether the client, the server, or both get to see it.",
+  "liquidbounce.module.scaffoldLegit.value.rotations.description": "How the look travels to the block: the same engine the Aimassist uses. Angle Smooth decides how fast it turns, Reset Threshold how close it has to get before the click.",
+  "liquidbounce.module.scaffoldLegit.value.chatLog.description": "Print the running total every five steps, with the misses and the average jump.",
+  "liquidbounce.module.scaffoldLegit.value.debug.description": "Print what the module is waiting for, whenever that changes."
 }
