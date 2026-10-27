@@ -43,7 +43,7 @@ import net.minecraft.network.protocol.game.ServerboundSignUpdatePacket
 import net.minecraft.network.protocol.game.ServerboundSpectatorActionPacket
 import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket
 import net.minecraft.world.entity.Entity
-import net.minecraft.world.entity.projectile.AbstractArrow
+import net.minecraft.world.entity.projectile.arrow.AbstractArrow
 import net.minecraft.world.phys.Vec3
 import java.util.function.Predicate
 import kotlin.math.max
