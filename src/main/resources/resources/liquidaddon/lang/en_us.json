@@ -151,7 +151,7 @@
   "liquidbounce.module.scaffoldLegit.value.jumpDelay.description": "Ticks after the jump before the click in the air, drawn from the range.",
   "liquidbounce.module.scaffoldLegit.value.range.description": "How far a click may reach. The face has to be inside it, both to look at it and to place.",
   "liquidbounce.module.scaffoldLegit.value.swing.description": "The swing of the click, and whether the client, the server, or both get to see it.",
-  "liquidbounce.module.scaffoldLegit.value.rotations.description": "How the look travels to the block: the same engine the Aimassist uses. Angle Smooth decides how fast it turns, Reset Threshold how close it has to get before the click.",
+  "liquidbounce.module.scaffoldLegit.value.rotations.description": "How the look travels to the block: the same engine the Aimassist uses. Angle Smooth decides how fast it turns (at 180 deg/tick it snaps, which is exactly what a hand does not do), Reset Threshold how close to the face it has to get, and Movement Correction whether the walk is derived from the look - Silent keeps the server's picture consistent, Off leaves the walk to the keys.",
   "liquidbounce.module.scaffoldLegit.value.chatLog.description": "Print the running total every five steps, with the misses and the average jump.",
   "liquidbounce.module.scaffoldLegit.value.debug.description": "Print what the module is waiting for, whenever that changes."
 }

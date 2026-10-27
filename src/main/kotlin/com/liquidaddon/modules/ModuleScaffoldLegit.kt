@@ -110,14 +110,17 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     /**
      * The rotation engine, the same one the Aimassist and every placement in LiquidBounce use: how
      * fast the look travels (`AngleSmooth`), how it walks back to the camera when the click is done,
-     * and whether the walk is corrected for it.
+     * and whether the walk is corrected to match the look the server is being shown.
      *
-     * `MovementCorrection` starts on `Off`: the walk of a scaffold is its own thing (Eagle, the step
-     * back onto the block, the jump straight up), and a look that also steered the feet would fight
-     * with it. `Silent` tweaks the keys instead, which is the right answer for an aura and the wrong
-     * one here.
+     * `MovementCorrection` starts on `Silent`: while the look is away from the camera, the keys and
+     * the walk are derived from the look instead of from the camera, so what the server sees still
+     * holds together — a player walking where it is looking. `Off` leaves the walk exactly as the
+     * hand makes it, which is more faithful to the keys, but then the server sees a player looking
+     * one way and walking another, and that mismatch is the thing an anti-cheat looks for. It costs
+     * nothing here: the step in the air has no keys to correct, and at the edge the look is already
+     * pointed at the cell, so it is the direction the walk is going anyway.
      */
-    private val rotations = tree(RotationsValueGroup(this, MovementCorrection.OFF))
+    private val rotations = tree(RotationsValueGroup(this, MovementCorrection.SILENT))
 
     private val chatLog by boolean("ChatLog", true)
     private val debug by boolean("Debug", false)
