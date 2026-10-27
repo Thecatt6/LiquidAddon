@@ -1308,7 +1308,7 @@ internal class AimassistCore(
      * drift is now a small random walk: a random number of counts, a sign that turns when it likes,
      * and ticks of complete rest in between.
      */
-    private fun stillTick(me: LocalPlayer, aim: Rotation, target: Entity) {
+    private fun stillTick(me: LocalPlayer, aim: Rotation, target: Entity?) {
         if (!silent) {
             hold()
             return
@@ -1355,7 +1355,7 @@ internal class AimassistCore(
         from: Rotation,
         stepYaw: Float,
         stepPitch: Float,
-        target: Entity
+        target: Entity?
     ) {
         val desired = Rotation(from.yaw + stepYaw, (from.pitch + stepPitch).coerceIn(-89.5f, 89.5f))
 

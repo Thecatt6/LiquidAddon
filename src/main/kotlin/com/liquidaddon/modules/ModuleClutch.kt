@@ -264,10 +264,10 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
         }
 
         val options = BlockPlacementTargetFindingOptions(
-            BlockOffsetOptions.Default,
-            FaceHandlingOptions(CenterTargetPositionFactory),
+            offsetOptions = BlockOffsetOptions.Default,
+            faceHandlingOptions = FaceHandlingOptions(CenterTargetPositionFactory),
             stackToPlaceWith = stack,
-            PlayerLocationOnPlacement(),
+            playerLocationOnPlacement = PlayerLocationOnPlacement(),
         )
 
         for (cell in candidates) {
