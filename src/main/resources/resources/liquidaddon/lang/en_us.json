@@ -30,7 +30,7 @@
   "liquidbounce.module.aimbotAI.value.aimodel.description": "AI model to use.",
   "liquidbounce.module.aimbotAI.value.aiYawMultiplier.description": "AI yaw output multiplier.",
   "liquidbounce.module.aimbotAI.value.aiCorrection.description": "AI correction share.",
-  "liquidbounce.module.scaffoldLegit.description": "Legit upward bridge. You aim at the top of the block you jump from; it jumps and right-clicks when the cell under your feet is free, with a delay. Use LiquidBounce's Eagle too for the flat parts.",
+  "liquidbounce.module.scaffoldLegit.description": "Legit upward bridge. It finds the cell that has to be filled, looks at the face that fills it silently - your camera does not move, only the server sees the look - and clicks once that look has really arrived. Stairs: block at the edge, block on top of it in the air, jump. Step: jump on the space key. The space key is only taken over while a step is actually being made.",
   "liquidbounce.module.hitFlick.description": "Turns the yaw off the target before a hit and back on the hit, so the extra knockback (sprint hit or Knockback) goes sideways. OnlyExtraKnockback flicks only those hits.",
   "liquidbounce.module.aimassist.description": "Aim assist, not an aimbot: it never clicks and never takes the view away from your hand. It pulls a share of the way towards an enemy already under the crosshair (Assist) and damps the cursor while it glides over a hitbox (Friction).",
   "liquidbounce.module.aimassist.value.preset.description": "Ready-made configs (Blatant/Legit/Ghost/Closet); Custom leaves the sliders alone.",
@@ -143,5 +143,17 @@
   "liquidbounce.module.blockHit.value.chatLog.description": "Print the running total every ten block hits.",
   "liquidbounce.module.blockHit.value.debug.description": "Print what the module decides on every click and every tick.",
   "liquidbounce.module.fakeLagV2.value.projectileDodge.description": "Raise the delay while an arrow, spectral arrow or trident is on a flight path that crosses you. The shot was aimed at the position the shooter renders, which is the server's one: keeping the server on an older position makes the flight cross where you were, not where you are. Works in every mode, even at Delay 0.",
-  "liquidbounce.module.fakeLagV2.value.panicDelay.description": "The amount of delay (in milliseconds) the dodge raises to while a projectile is incoming, and for half a second after it stops being one - the window in which the server tests the arrow against you. Higher dodges more and costs more: everything you do in that window runs on this delay."
+  "liquidbounce.module.fakeLagV2.value.panicDelay.description": "The amount of delay (in milliseconds) the dodge raises to while a projectile is incoming, and for half a second after it stops being one - the window in which the server tests the arrow against you. Higher dodges more and costs more: everything you do in that window runs on this delay.",
+  "liquidbounce.module.scaffoldLegit.value.mode.description": "Stairs places the block for you while you hold space; Step jumps on the space key itself.",
+  "liquidbounce.module.scaffoldLegit.value.eagle.description": "Sneak on the edge so you never walk off it. Independent of the mode.",
+  "liquidbounce.module.scaffoldLegit.value.edgeDistance.description": "How far from the edge you have to be, in blocks. Drawn once per step from the range.",
+  "liquidbounce.module.scaffoldLegit.value.jumpAt.description": "How far past the middle of the new block you walk before the jump. Negative jumps early.",
+  "liquidbounce.module.scaffoldLegit.value.placeTiming.description": "Early clicks as soon as the jump starts; Peak waits until the jump stops rising, where the block is placed higher and the look has stopped drifting.",
+  "liquidbounce.module.scaffoldLegit.value.shiftDelay.description": "Ticks before the click at the edge, drawn from the range. A pause, not a rhythm.",
+  "liquidbounce.module.scaffoldLegit.value.jumpDelay.description": "Ticks after the jump before the click in the air, drawn from the range.",
+  "liquidbounce.module.scaffoldLegit.value.range.description": "How far a click may reach. The face has to be inside it, both to look at it and to place.",
+  "liquidbounce.module.scaffoldLegit.value.swing.description": "The swing of the click, and whether the client, the server, or both get to see it.",
+  "liquidbounce.module.scaffoldLegit.value.rotations.description": "How the look travels to the block: the same engine the Aimassist uses. Angle Smooth decides how fast it turns (at 180 deg/tick it snaps, which is exactly what a hand does not do), Reset Threshold how close to the face it has to get, and Movement Correction whether the walk is derived from the look - Silent keeps the server's picture consistent, Off leaves the walk to the keys.",
+  "liquidbounce.module.scaffoldLegit.value.chatLog.description": "Print the running total every five steps, with the misses and the average jump.",
+  "liquidbounce.module.scaffoldLegit.value.debug.description": "Print what the module is waiting for, whenever that changes."
 }
