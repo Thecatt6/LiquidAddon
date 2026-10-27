@@ -270,20 +270,30 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
         val predicted = me.position().add(me.deltaMovement.scale(lookAhead.toDouble()))
         val feet = BlockPos.containing(predicted.x, predicted.y, predicted.z)
 
-        val candidates = LinkedHashSet<BlockPos>()
-        candidates += feet.below()
         // A fast fall is met lower, or the block is one the player has already gone past.
-        if (me.deltaMovement.y < -0.4) {
+        val fastFall = me.deltaMovement.y < -0.4
+        val sides = listOf(Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST)
+
+        val candidates = LinkedHashSet<BlockPos>()
+        // 1. straight under the feet: the platform to land on.
+        candidates += feet.below()
+        if (fastFall) {
             candidates += feet.below(2)
             candidates += feet.below(3)
         }
-        // Against a wall the useful cell is the one beside the player, at the level of the feet.
-        for (direction in listOf(Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST)) {
+        // 2. beside the feet: against a wall this is the clutch — you click the wall's side face and
+        //    the block you get is the ledge the *next* placement under the feet can be made from.
+        for (direction in sides) {
             candidates += feet.relative(direction)
         }
-        if (me.deltaMovement.y < -0.4) {
-            for (direction in listOf(Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST)) {
-                candidates += feet.below().relative(direction)
+        // 3. beside the cell under the feet: the wall one block lower, which is what saves a fall
+        //    that has already gone past the feet-level block.
+        for (direction in sides) {
+            candidates += feet.below().relative(direction)
+        }
+        if (fastFall) {
+            for (direction in sides) {
+                candidates += feet.below(2).relative(direction)
             }
         }
 
@@ -394,9 +404,8 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
         if (chatLog) {
             chat("§7[Clutch] §f$placed blocchi piazzati in caduta")
         }
-        if (debug) {
-            note("piazzato su " + target.placedBlock.toShortString())
-        }
+        note("piazzato su " + target.placedBlock.toShortString())
+        lastNote = ""
         clearPlan()
     }
 
