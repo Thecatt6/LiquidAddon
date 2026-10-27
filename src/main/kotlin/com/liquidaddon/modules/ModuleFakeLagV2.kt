@@ -43,6 +43,7 @@ import net.minecraft.network.protocol.game.ServerboundSignUpdatePacket
 import net.minecraft.network.protocol.game.ServerboundSpectatorActionPacket
 import net.minecraft.network.protocol.game.ServerboundUseItemOnPacket
 import net.minecraft.world.entity.Entity
+import net.minecraft.world.entity.projectile.arrow.AbstractArrow
 import net.minecraft.world.phys.Vec3
 import java.util.function.Predicate
 import kotlin.math.max
@@ -104,7 +105,11 @@ import kotlin.random.Random
  *  - [MAX_HOLD_TICKS] and [MAX_QUEUE] cap the silence whatever a mode asks for, and your own
  *    interactions ([flushOn]) make the connection catch up instead of being held with everything
  *    else, so the thing that is left behind the least is your hit - and nowhere in the module is
- *    there a burst, because a burst is a merged server tick, and a merged server tick is a flag.
+ *    there a burst, because a burst is a merged server tick, and a merged server tick is a flag;
+ *  - [projectileDodge] raises the hold while an arrow or trident is on a path that crosses you, so
+ *    the shot - aimed at the position the shooter renders, i.e. the server's one - flies through
+ *    where you were; the raise outlives the sighting by [PANIC_LINGER_MS], the window in which the
+ *    server tests the arrow against you.
  *
  * ## Where it is an advantage at all
  *
@@ -158,6 +163,18 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
 
     /** The desync, in blocks, at which the freeze is worth the whole delay. */
     private const val USEFUL_DESYNC = 4.0
+
+    /** How many ticks of flight an incoming projectile is simulated ahead, i.e. how early panic sees it. */
+    private const val PANIC_LOOKAHEAD = 20
+
+    /** Radius, in blocks, inside which projectiles are tracked at all. */
+    private const val PANIC_RANGE = 64.0
+
+    /** How long the hold stays raised after the projectile stopped being a threat, in milliseconds. */
+    private const val PANIC_LINGER_MS = 500L
+
+    /** Margin around your predicted box that still counts as "this projectile is for you". */
+    private const val PANIC_BOX_MARGIN = 0.4
 
     /** When the delay may be applied at all; see [holdWhen]. */
     enum class HoldWhen(override val tag: String) : Tagged {
@@ -254,6 +271,18 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
     private val combatGraceValue = int("CombatGrace", 350, 0..1000, "ms")
     private val combatGrace by combatGraceValue
 
+/**
+     * Raise the hold while a projectile - arrow, spectral arrow, trident - is on a flight path that
+     * crosses you. Whoever shot aimed at the position their client renders, which is already the
+     * server's one, and the server is where the arrow is tested: raising the hold keeps that
+     * position older still, so the flight crosses where you *were*, not where you are. Raising is
+     * the safe direction, merges only ever happen on release, so the ramp takes it without flags.
+     */
+    private val projectileDodge by boolean("ProjectileDodge", true)
+
+    /** The hold [projectileDodge] raises to while a projectile is incoming, in milliseconds. */
+    private val panicDelay by int("PanicDelay", 400, 0..2000, "ms")
+
     /** How fast [Mode.DYNAMIC] is allowed to change the connection speed, in milliseconds. */
     private val adaptTimeValue = int("AdaptTime", 250, 50..1000, "ms")
     private val adaptTime by adaptTimeValue
@@ -288,6 +317,13 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
     /** Until when [flushOn] keeps the hold at zero, i.e. the connection is catching up. */
     private var catchUpUntil = 0L
 
+    /** Until when the projectile panic keeps the hold raised. */
+    private var panicUntil = 0L
+
+    /** Closest approach of the last scanned projectile: ticks away and blocks off, for [debugLine]. */
+    private var panicTicks = -1
+    private var panicDist = -1.0
+
     /** Enemies found on the last tick, around both the real and the frozen position. */
     private var enemies: List<Entity> = emptyList()
 
@@ -307,7 +343,8 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
     override val tag: String
         get() {
             val held = heldMs
-            return if (held > 0L) "${mode.tag} ${held}ms" else mode.tag
+            val panic = if (panicUntil > System.currentTimeMillis()) " PANIC" else ""
+            return if (held > 0L) "${mode.tag} ${held}ms$panic" else mode.tag + panic
         }
 
     // --- decisions and release, once per tick -----------------------------------------------
@@ -337,6 +374,10 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
         val found = scanEnemies(serverPos)
         enemies = found
 
+        if (projectileDodge) {
+            scanProjectiles(now)
+        }
+
         when (mode) {
             Mode.LATENCY -> holdMs = delay.toFloat()
             Mode.DYNAMIC -> holdMs = smooth(dynamicHold(now, serverPos, found))
@@ -345,6 +386,9 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
 
         val desired = when {
             !shouldHold() -> 0
+            // A projectile is on its way to you: the dodge outranks everything else, because an
+            // arrow that connects costs more than every exchange running a moment late.
+            now < panicUntil -> ticksFor(panicDelay.toFloat() + jitterMs + spikeMs)
             // An interaction just happened: the connection catches up, one tick per tick, and
             // stays caught up for a moment. Never a burst - a burst is what merges two of our
             // ticks into one server tick, which is exactly what the "post packet" checks flag.
@@ -709,6 +753,12 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
             return false
         }
 
+        // The dodge works whatever the mode wants, even at Delay 0 or with no enemy around: an
+        // arrow from an unseen shooter is exactly the case the mode-specific answers miss.
+        if (projectileDodge && panicUntil > System.currentTimeMillis()) {
+            return true
+        }
+
         return when (mode) {
             Mode.LATENCY -> delay > 0
             Mode.DYNAMIC -> holdMs > 0.5f
@@ -725,6 +775,53 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
      */
     private fun serverPosition(): Vec3 =
         outgoingSnapshots().firstNotNullOfOrNull { positionOf(it) } ?: player.position()
+
+    /**
+     * Looks for a projectile whose flight path crosses the box you will occupy, and keeps
+     * [panicUntil] alive while one exists and for [PANIC_LINGER_MS] after the last sighting, which
+     * is the window in which the server actually tests the arrow against you.
+     *
+     * The flight is integrated with the projectile's own physics - drag 0.99 and gravity 0.05 per
+     * tick - while you are extrapolated linearly from your current movement: over a second of
+     * lookahead that is close enough, and being a block optimistic only makes the panic earlier.
+     * A projectile that is not moving is stuck in something and is not a threat.
+     */
+    private fun scanProjectiles(now: Long) {
+        var bestTicks = -1
+        var bestDist = Double.MAX_VALUE
+
+        val threats = world.getEntitiesBoxInRange(player.position(), PANIC_RANGE) {
+            it is AbstractArrow && it.deltaMovement.lengthSqr() > 1.0E-4
+        }
+
+        for (arrow in threats) {
+            var pos = arrow.position()
+            var vel = arrow.deltaMovement
+            val you = player.position()
+            val motion = player.deltaMovement
+
+            for (t in 1..PANIC_LOOKAHEAD) {
+                vel = Vec3(vel.x * 0.99, vel.y * 0.99 - 0.05, vel.z * 0.99)
+                pos = pos.add(vel)
+
+                val predicted = you.add(motion.scale(t.toDouble()))
+                val off = pos.distanceTo(predicted)
+                if (player.getBoundingBoxAt(predicted).inflate(PANIC_BOX_MARGIN).contains(pos)) {
+                    if (bestTicks < 0 || t < bestTicks) {
+                        bestTicks = t
+                        bestDist = off
+                    }
+                    break
+                }
+            }
+        }
+
+        panicTicks = bestTicks
+        panicDist = bestDist
+        if (bestTicks >= 0) {
+            panicUntil = now + PANIC_LINGER_MS
+        }
+    }
 
     /** Enemies around both the real and the frozen position, either of which is where the fight is. */
     private fun scanEnemies(serverPos: Vec3): List<Entity> {
@@ -837,6 +934,9 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
         spikeMs = 0f
         spikeUntil = 0L
         catchUpUntil = 0L
+        panicUntil = 0L
+        panicTicks = -1
+        panicDist = -1.0
         enemies = emptyList()
         lastDamageAt = 0L
         lastAttackAt = 0L
@@ -863,6 +963,10 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
                 outgoingCount(), queued, enemies.size, ping, ping + held
             ) + " §7server=(%.1f, %.1f, %.1f)".format(serverPos.x, serverPos.y, serverPos.z) +
                 (if (holdPointUseful(now, serverPos)) " §ahold ok" else " §7hold off (" + holdReason(now, serverPos) + ")") +
+                (if (now < panicUntil) {
+                    if (panicTicks >= 0) " §cPANIC arrow in %dt (%.1f b off)".format(panicTicks, panicDist)
+                    else " §cPANIC lingering"
+                } else "") +
                 warnings()
         )
     }
@@ -898,6 +1002,9 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
         }
         if (flushOn.isEmpty()) {
             append(" §6FlushOn empty (your hits are delayed too)")
+        }
+        if (projectileDodge && panicDelay < delay) {
+            append(" §6PanicDelay<Delay (the dodge lowers your delay while it runs)")
         }
         if (ModuleFakeLag.enabled) {
             append(" §cLiquidBounce FakeLag is on as well (it flushes this queue)")

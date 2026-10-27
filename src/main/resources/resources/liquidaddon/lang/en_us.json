@@ -142,6 +142,8 @@
   "liquidbounce.module.blockHit.value.lagTicks.description": "Lag mode only: how many ticks the packets sent after the block opened are held back.",
   "liquidbounce.module.blockHit.value.chatLog.description": "Print the running total every ten block hits.",
   "liquidbounce.module.blockHit.value.debug.description": "Print what the module decides on every click and every tick.",
+  "liquidbounce.module.fakeLagV2.value.projectileDodge.description": "Raise the delay while an arrow, spectral arrow or trident is on a flight path that crosses you. The shot was aimed at the position the shooter renders, which is the server's one: keeping the server on an older position makes the flight cross where you were, not where you are. Works in every mode, even at Delay 0.",
+  "liquidbounce.module.fakeLagV2.value.panicDelay.description": "The amount of delay (in milliseconds) the dodge raises to while a projectile is incoming, and for half a second after it stops being one - the window in which the server tests the arrow against you. Higher dodges more and costs more: everything you do in that window runs on this delay.",
   "liquidbounce.module.scaffoldLegit.value.mode.description": "Stairs places the block for you while you hold space; Step jumps on the space key itself.",
   "liquidbounce.module.scaffoldLegit.value.eagle.description": "Sneak on the edge so you never walk off it. Independent of the mode.",
   "liquidbounce.module.scaffoldLegit.value.edgeDistance.description": "How far from the edge you have to be, in blocks. Drawn once per step from the range.",
