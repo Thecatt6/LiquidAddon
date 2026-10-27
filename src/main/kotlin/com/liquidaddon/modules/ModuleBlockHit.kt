@@ -20,8 +20,10 @@ import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket
 import net.minecraft.network.protocol.game.ServerboundUseItemPacket
+import net.minecraft.util.Mth
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.item.ItemUseAnimation
+import kotlin.math.abs
 import kotlin.random.Random
 
 /**
@@ -75,7 +77,12 @@ import kotlin.random.Random
  *  - [requireMouseDown] restricts it to the moments the right mouse button is held (physically, or
  *    by an AutoClicker's use button), so it only ever helps an input you are already making;
  *  - the block opens [delay] ticks after the click and lasts [blockTicks] ticks, then it is closed
- *    with the vanilla release action.
+ *    with the vanilla release action;
+ *  - the two actions are always kept apart: at least [releaseCooldown] ticks between closing a
+ *    block and opening the next one, and at least [attackGap] ticks between your attack and the
+ *    block (one more when the aim has not moved since the attack). A release and a use in one
+ *    server tick, or an attack and a use carrying the same rotation, are two actions no input
+ *    device produces — and on a 1.8 server the first one is read as "blocking while attacking".
  *
  * ## The two modes
  *
@@ -95,6 +102,12 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
 
     /** Nothing scheduled. */
     private const val IDLE = -1
+
+    /** Ticks a block may wait for its gates to clear before it is dropped. */
+    private const val GATE_WAIT_MAX = 3
+
+    /** Two rotations closer than this (in degrees) are the same rotation to a server. */
+    private const val SAME_ROTATION_DEGREES = 0.05f
 
     /** Probability that a click becomes a block hit. */
     private val chance by int("Chance", 100, 0..100, "%")
@@ -123,6 +136,28 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
     /** `Mode = Lag` only: how many ticks the packets after the block opened are held back. */
     private val lagTicks by int("LagTicks", 4, 1..10, "ticks")
 
+    /**
+     * Ticks that must pass between **closing** a block and opening the next one.
+     *
+     * A release and a use in the same tick are two opposite actions inside one server tick: the
+     * server applies them in order and sees a player who let go of the shield and used it again in
+     * zero time, which is not something a hand (or an input repeat) does. On a 1.8 server it is
+     * worse: the sword block is a server-side state, so the pair reads as "blocking while
+     * attacking" — the `AutoBlock` check. Two ticks of separation remove the pattern and cost
+     * nothing, because a block hit only has to cover the ticks around the hit.
+     */
+    private val releaseCooldown by int("ReleaseCooldown", 2, 0..6, "ticks")
+
+    /**
+     * Ticks that must pass between your **attack** and the block that follows it.
+     *
+     * An attack packet and a use packet carrying the same rotation inside the same tick is the
+     * shape of a script: a hand cannot swing and raise a shield at the same instant, from the same
+     * angle, and have the two leave together. One tick is enough to break the coincidence, and the
+     * block lands on the hit either way — the damage window of a hit is longer than a tick.
+     */
+    private val attackGap by int("AttackGap", 1, 0..4, "ticks")
+
     private val chatLog by boolean("ChatLog", false)
     private val debug by boolean("Debug", false)
 
@@ -143,6 +178,20 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
 
     /** Set once, so "there is nothing here that can block" is said once and not every click. */
     private var warnedNoBlock = false
+
+    /** The tick the last block of ours was closed, or [IDLE]. */
+    private var lastReleaseTick = IDLE
+
+    /** The tick (and rotation) of the last attack, for the same-rotation rule. */
+    private var lastAttackTick = IDLE
+    private var lastAttackYaw = 0f
+    private var lastAttackPitch = 0f
+
+    /**
+     * Ticks a block may keep waiting for its gates to clear. A block that opens late is a block that
+     * does not cover the hit, so a blocked one is dropped instead of being chased.
+     */
+    private var gateWait = 0
 
     private var clicks = 0
     private var blocks = 0
@@ -185,6 +234,9 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
         owningBlock = false
         blockHand = null
         warnedNoBlock = false
+        lastReleaseTick = IDLE
+        lastAttackTick = IDLE
+        gateWait = 0
         clicks = 0
         blocks = 0
         lagged = 0
@@ -201,6 +253,13 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
     private val attackHandler = handler<AttackEntityEvent> {
         val me = mc.player ?: return@handler
         clicks++
+
+        // Remembered for the same-rotation rule below: the tick the attack left in and the rotation
+        // it carried. An attack and a use with the same angles inside one tick is a script's
+        // signature, not a player's.
+        lastAttackTick = me.tickCount
+        lastAttackYaw = me.yRot
+        lastAttackPitch = me.xRot
 
         if (!canOperate(me)) {
             note("skipped ($lastSkip)")
@@ -249,28 +308,11 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
 
         val me = mc.player ?: return@handler
 
-        if (startIn != IDLE) {
-            if (startIn == 0) {
-                startIn = IDLE
-                if (openBlock(me)) {
-                    counted()
-                    releaseIn = blockTicks
-                    if (mode == Mode.LAG) {
-                        // The use packet that opens the block has already left: the hold starts
-                        // now, so what stays behind is the release, which is what keeps the block
-                        // up for longer on the server.
-                        lagIn = lagTicks
-                        lagged++
-                        note("blocking, lagging $lagTicks ticks")
-                    } else {
-                        note("blocking for $blockTicks ticks")
-                    }
-                }
-            } else {
-                startIn--
-            }
-        }
-
+        // The release comes first, and it closes the tick to a new block: one action per tick. When
+        // the release and the use of the next block would land together, the use waits — otherwise
+        // the server gets two opposite actions inside one tick, which on a 1.8 server is exactly the
+        // "blocking while attacking" pattern. It also used to overwrite `releaseIn` and leave the
+        // old block open forever.
         if (releaseIn != IDLE) {
             releaseIn--
             if (releaseIn <= 0) {
@@ -278,7 +320,83 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
                 closeBlock()
             }
         }
+
+        if (startIn != IDLE) {
+            if (startIn == 0) {
+                val gate = gateReason(me)
+                if (gate != null) {
+                    // Retried for a few ticks and then dropped: a block that opens late no longer
+                    // covers the hit it was planned for, and opening it anyway is only a packet.
+                    if (gateWait >= GATE_WAIT_MAX) {
+                        startIn = IDLE
+                        gateWait = 0
+                        note("dropped, $gate")
+                    } else {
+                        gateWait++
+                        note("waiting, $gate")
+                    }
+                } else {
+                    startIn = IDLE
+                    gateWait = 0
+                    if (openBlock(me)) {
+                        counted()
+                        releaseIn = blockTicks
+                        if (mode == Mode.LAG) {
+                            // The use packet that opens the block has already left: the hold starts
+                            // now, so what stays behind is the release, which is what keeps the
+                            // block up for longer on the server.
+                            lagIn = lagTicks
+                            lagged++
+                            note("blocking, lagging $lagTicks ticks")
+                        } else {
+                            note("blocking for $blockTicks ticks")
+                        }
+                    }
+                }
+            } else {
+                startIn--
+            }
+        }
     }
+
+    /**
+     * Why a block may not open on this tick, or `null` when it may.
+     *
+     * Two rules, both about *keeping the two actions apart*:
+     *
+     *  - [releaseCooldown] ticks must have passed since the block of ours that was just closed;
+     *  - [attackGap] ticks since your own attack — and one more when the rotation has not moved
+     *    since it, because an attack and a use carrying the same angles inside the same tick is
+     *    what a script looks like. A hand that swings and then raises the shield always has a
+     *    different angle between the two.
+     */
+    private fun gateReason(me: LocalPlayer): String? {
+        val tick = me.tickCount
+
+        if (lastReleaseTick != IDLE) {
+            val since = tick - lastReleaseTick
+            if (since < releaseCooldown) {
+                return "released $since ticks ago (cooldown $releaseCooldown)"
+            }
+        }
+
+        if (lastAttackTick != IDLE) {
+            val since = tick - lastAttackTick
+            if (since < attackGap) {
+                return "your attack was $since ticks ago (gap $attackGap)"
+            }
+            if (since < attackGap + 1 && sameRotationAsAttack(me)) {
+                return "same rotation as your attack"
+            }
+        }
+
+        return null
+    }
+
+    /** Whether the aim is (still) exactly where it was when the last attack left. */
+    private fun sameRotationAsAttack(me: LocalPlayer): Boolean =
+        abs(Mth.wrapDegrees(me.yRot - lastAttackYaw)) < SAME_ROTATION_DEGREES &&
+            abs(me.xRot - lastAttackPitch) < SAME_ROTATION_DEGREES
 
     /**
      * The hand whose item blocks, or `null` when there is none.
@@ -367,6 +485,10 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
         owningBlock = false
         val hand = blockHand
         blockHand = null
+
+        // The tick of the close, whatever happens next: a new block cannot open before the cooldown,
+        // so the release and the next use can never share a server tick.
+        lastReleaseTick = mc.player?.tickCount ?: IDLE
 
         if (mc.player?.isUsingItem == true) {
             note("client is using an item on its own, release left to vanilla")
