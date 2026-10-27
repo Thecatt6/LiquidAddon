@@ -631,6 +631,16 @@ internal class AimassistCore(
      */
     private val forcedTarget: ((LocalPlayer) -> Entity?)? = null,
     /**
+     * A world **point** to aim at, instead of an entity, or `null`.
+     *
+     * A clutch is not aimed at an entity: it is aimed at the face of a block, and everything the
+     * engine does with a rotation — the strength, the cap, the mouse lattice with its carried
+     * residual, the hand on top of it, the model under `Engine = AI`, the frame interpolation, the
+     * silent request — is exactly what a block placement wants too. With a provider, the point is
+     * the goal and the scan is skipped; the engine lets go the tick the provider returns `null`.
+     */
+    private val forcedPoint: ((LocalPlayer) -> Vec3?)? = null,
+    /**
      * Priority of the rotation requests. The deflector uses one above the aim's, so a fireball on a
      * collision course wins over a target that can wait; with the default it is an aim like any
      * other.
@@ -693,6 +703,9 @@ internal class AimassistCore(
 
     /** The target the assist is helping with. Kept between ticks: the mouse handler needs it. */
     private var currentTarget: Entity? = null
+
+    /** The point the owner asked to aim at this tick (see the constructor), or `null`. */
+    private var forcedPointValue: Vec3? = null
     private var lastSwitch = 0L
     private var reactionUntil = 0L
 
@@ -1025,9 +1038,19 @@ internal class AimassistCore(
         val blocked = (pauseOnInventory && mc.gui.screen() != null) ||
                 (pauseOnUse && me.isUsingItem)
 
-        val target = if (blocked) null else findTarget(me)
+        // The point of this tick, when the owner aims at one instead of at an entity.
+        forcedPointValue = if (forcedPoint == null || blocked) null else forcedPoint?.invoke(me)
 
-        if (target == null) {
+        val target = if (blocked || forcedPoint != null) null else findTarget(me)
+
+        if (forcedPoint != null && forcedPointValue == null) {
+            // The owner has nothing to aim at any more: same walk-back as a lost target.
+            currentTarget = null
+            release(me)
+            return
+        }
+
+        if (target == null && forcedPoint == null) {
             // No target: the assist lets go. Silent that means walking the sent rotation back to
             // the camera instead of dropping the request (see [release]).
             currentTarget = null
@@ -1039,7 +1062,11 @@ internal class AimassistCore(
         }
 
         val now = System.currentTimeMillis()
-        if (target !== currentTarget) {
+        if (forcedPoint != null) {
+            // A point has no identity to lock onto: every tick is the same "target", so the aim
+            // keeps the pace it has instead of restarting the reaction on each of them.
+            currentTarget = null
+        } else if (target !== currentTarget) {
             // Still deciding whether to commit to this target: keep the current aim alive instead
             // of dropping the request (which would hand the camera back in a single packet).
             if (currentTarget != null && now - lastSwitch < switchDelay) {
@@ -1100,10 +1127,10 @@ internal class AimassistCore(
 
         // A short grace on the crosshair gate: without it the gate flips on/off on every pixel of
         // the hitbox edge, and each flip shows on the camera as a start/stop beat.
-        if (onCrosshair(me, target)) {
+        if (target != null && onCrosshair(me, target)) {
             crosshairGraceUntil = now + CROSSHAIR_GRACE_MS
         }
-        if (onlyOnCrosshair && now > crosshairGraceUntil) {
+        if (target != null && onlyOnCrosshair && now > crosshairGraceUntil) {
             hold()
             debugLine(
                 "crosshair off the hitbox (%.2f° from the centre)".format(crosshairOffset(target))
@@ -1560,7 +1587,14 @@ internal class AimassistCore(
     // --- rotation math ----------------------------------------------------------------------
 
     /** Where the crosshair would be if the assist were perfect. A goal, never a value sent as-is. */
-    private fun goalRotation(me: LocalPlayer, target: Entity, aim: Rotation): Rotation {
+    private fun goalRotation(me: LocalPlayer, target: Entity?, aim: Rotation): Rotation {
+        // A forced point *is* the goal: the strength, the cap and the lattice below still decide how
+        // the aim travels there, and there is no hitbox to wander inside.
+        if (target == null) {
+            val point = forcedPointValue ?: me.eyePosition.add(aim.directionVector)
+            return Rotation.lookingAt(point, me.eyePosition)
+        }
+
         var point = pointOn(me, target, aim)
 
         // The point the aim is pulled to is not a constant of the box. A person keeps the crosshair
@@ -1664,7 +1698,9 @@ internal class AimassistCore(
      * pull is strongest exactly where the player cannot see it — they are already aiming at the
      * target — and vanishes at the distance at which it would become a snap.
      */
-    private fun bubble(me: LocalPlayer, target: Entity): Float {
+    private fun bubble(me: LocalPlayer, target: Entity?): Float {
+        // A point is not something the crosshair can be "already on": the pull is full.
+        if (target == null) return 1f
         // The aimbot picked the target itself, so there is no "the crosshair is already on it"
         // to reward and no distance from the aim to fade over: the pull is full, always.
         if (values.autoAim) return 1f
@@ -1750,7 +1786,7 @@ internal class AimassistCore(
         me: LocalPlayer,
         aim: Rotation,
         goal: Rotation,
-        target: Entity
+        target: Entity?
     ): Pair<Float, Float>? {
         if (!DeepLearningEngine.isInitialized) {
             return aiUnavailable("deep learning not initialised")
@@ -1768,10 +1804,15 @@ internal class AimassistCore(
                     targetVector = goal.directionVector,
                     velocityDelta = previous.rotationDeltaTo(aim).toVec2f(),
                     playerDiff = me.position().subtract(me.lastPos),
-                    targetDiff = target.position().subtract(target.lastPos),
-                    distance = me.squaredBoxedDistanceTo(target).toFloat(),
-                    // A projectile has no hurtTime: the model was trained with the damage the
-                    // target had taken, and for a fireball that is always zero.
+                    targetDiff = target?.let { it.position().subtract(it.lastPos) } ?: Vec3.ZERO,
+                    distance = if (target != null) {
+                        me.squaredBoxedDistanceTo(target).toFloat()
+                    } else {
+                        val point = forcedPointValue ?: me.eyePosition
+                        me.eyePosition.distanceTo(point).toFloat().let { it * it }
+                    },
+                    // A projectile has no hurtTime, and neither has a block: the model was trained
+                    // with the damage the target had taken, and there is none to report here.
                     hurtTime = (target as? LivingEntity)?.hurtTime ?: 0,
                     age = 0
                 ).asInput
@@ -2022,7 +2063,7 @@ internal class AimassistCore(
 
     // --- debug ------------------------------------------------------------------------------
 
-    private fun report(me: LocalPlayer, aimed: Rotation, target: Entity) {
+    private fun report(me: LocalPlayer, aimed: Rotation, target: Entity?) {
         assisted++
         if (chatLog && assisted % 100 == 0) {
             chat("§7[" + owner.name + "] §f$assisted corrections" +
@@ -2032,7 +2073,9 @@ internal class AimassistCore(
 
         debugLine(
             "assisting %s dist=%.2f offset=%.2f° bubble=%.2f → yaw=%.1f pitch=%.1f (silent=%s, preset=%s) ".format(
-                target.name.string, target.distanceTo(me), crosshairOffset(target),
+                target?.name?.string ?: "point",
+                target?.distanceTo(me) ?: (forcedPointValue?.let { me.eyePosition.distanceTo(it) } ?: 0.0),
+                target?.let { crosshairOffset(it) } ?: 0f,
                 bubble(me, target), aimed.yaw, aimed.pitch, silent,
                 if (presetName.isEmpty()) "-" else presetName
             ) + "§7strength=%.0f%% max=%.1f° own=%.2f° counts=%+d/%+d noise=%.1f (set %d) hand=%.1f under=%d".format(
