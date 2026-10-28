@@ -698,6 +698,7 @@ internal class AimassistCore(
     private val mouseNoise get() = values.mouseNoise
     private val overshoot get() = values.overshoot
     private val strengthSpread get() = values.strengthSpread
+    private val maxPitchStep get() = values.maxPitchStep
 
     /** Share of the remaining angle a step covers: [strength], spread per target ([strengthSpread]). */
     private val pull get() = (strength / 100f) * strengthScale
