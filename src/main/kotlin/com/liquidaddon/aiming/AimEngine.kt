@@ -203,6 +203,16 @@ internal interface AimSettings {
     val predictSize: Int
     val onlyOnCrosshair: Boolean
     val turnCheck: Boolean
+
+    /**
+     * Cap of the **vertical** step, in degrees per tick.
+     *
+     * The default is the one the assist was tuned with ([PITCH_STEP_MAX]): a hand that snaps its
+     * pitch 20° in one tick is not a hand. A module whose whole point is to look *down* in the few
+     * ticks a fall leaves — `Clutch` — needs the pitch to travel with the same budget as the yaw,
+     * or the aim simply never gets to the face it is supposed to click.
+     */
+    val maxPitchStep: Float get() = PITCH_STEP_MAX
     val friction: Float
     val deadZone: Float
     val reactionDelay: Int
@@ -1093,7 +1103,9 @@ internal class AimassistCore(
 
         // A hand stops. Not once — regularly, and never on a beat you could set a clock by. A click
         // that is waiting for the rotation is never held back by a pause: the attack goes first.
-        if (pendingAttack != null) {
+        if (pendingAttack != null || forcedPoint != null) {
+            // A click that is waiting for the rotation, and a module that aims at a point (a block
+            // to place) both live on a tick they cannot spare: the rest is for aim that can wait.
             pauseLeft = 0
         } else if (now > nextPauseAt) {
             pauseLeft = 3 + Random.nextInt(4)
@@ -1237,7 +1249,7 @@ internal class AimassistCore(
         // number twice.
         val pitchLimit = minOf(
             maxSpeed * 0.7f,
-            PITCH_STEP_MAX * (0.85f + Random.nextFloat() * 0.15f)
+            maxPitchStep * (0.85f + Random.nextFloat() * 0.15f)
         )
         applyAim(me, aim, softLimit(stepYaw, maxSpeed), softLimit(stepPitch, pitchLimit), target)
     }
@@ -2108,8 +2120,8 @@ internal class AimassistCore(
         if (gcdFix && mouseNoise <= 0) {
             append(" §cMouseNoise 0 (every delta repeats: Distinct flag)")
         }
-        if (maxSpeed * 0.7f > PITCH_STEP_MAX + 0.01f) {
-            append(" §7pitch limited to %.1f°/tick".format(PITCH_STEP_MAX))
+        if (maxSpeed * 0.7f > maxPitchStep + 0.01f) {
+            append(" §7pitch limited to %.1f°/tick".format(maxPitchStep))
         }
         if (engine == Engine.AI && aiUnavailableReason != null) {
             append(" §cAI fallback (${aiUnavailableReason})")
