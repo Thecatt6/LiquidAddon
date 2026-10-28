@@ -2,6 +2,8 @@ package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
 import net.ccbluex.liquidbounce.event.events.MovementInputEvent
+import net.ccbluex.liquidbounce.event.events.PacketEvent
+import net.ccbluex.liquidbounce.event.events.TransferOrigin
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
@@ -9,7 +11,9 @@ import net.ccbluex.liquidbounce.utils.client.chat
 import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
 import net.ccbluex.liquidbounce.utils.network.LocalPlayerFallDamageTracker
 import net.minecraft.client.player.LocalPlayer
+import net.minecraft.network.protocol.game.ClientboundDamageEventPacket
 import net.minecraft.world.entity.LivingEntity
+import net.minecraft.world.entity.player.Player
 import kotlin.random.Random
 
 /**
@@ -52,6 +56,12 @@ import kotlin.random.Random
  *  - [onlyWhenTargeting] only resets hits with an opponent near the crosshair (see
  *    [opponentNearCrosshair]) — the direction the sprint boost pushes you in has to be the
  *    direction the knockback comes from, otherwise the jump is just a jump;
+ *  - only a hit **dealt by a player** is ever reset: the server names the direct and the responsible
+ *    source of every damage in `ClientboundDamageEventPacket`, and when neither of the two is another
+ *    player - a mob, a fall, lava, your own arrow - the hit is ignored, because the jump reset is a
+ *    PvP mechanic and nothing else;
+ *  - a hit taken **in the air** is ignored as well: there is no ground to jump from, and a jump with
+ *    no ground under the feet resets nothing and only desyncs the input;
  *  - [waterCheck] stays quiet in water and lava: there is no sprint jump there, and attempting one
  *    would only look odd;
  *  - fall damage is never reset (LiquidBounce's [LocalPlayerFallDamageTracker]): jumping does not
@@ -72,6 +82,9 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
     /** How many ticks a mistimed ("too late") attempt waits before it presses the key anyway. */
     private const val LATE_MIN = 1
     private const val LATE_MAX = 4
+
+    /** Ticks within which a damage packet still counts as "the hit we are reacting to". */
+    private const val HIT_SOURCE_WINDOW = 2
 
     /** Percentage chance of attempting a jump reset on a hit. */
     private val chance by int("Chance", 100, 0..100, "%")
@@ -114,6 +127,9 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
     /** `tickCount` of the hit we last made a decision for, so one hit is never rolled twice. */
     private var decidedTick = -1
 
+    /** `tickCount` of the last damage the server told us came from another player. */
+    private var lastPlayerHitTick = -1000
+
     private var attempts = 0
     private var perfect = 0
     private var lastSkip = "idle"
@@ -136,9 +152,35 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
         pendingPerfect = false
         pendingLabel = ""
         decidedTick = -1
+        lastPlayerHitTick = -1000
         attempts = 0
         perfect = 0
         lastSkip = "idle"
+    }
+
+    /**
+     * The server names the source of every damage it deals: the direct entity (the sword, the arrow)
+     * and the one responsible for it (the player who swung, the player who shot). When either of the
+     * two is another player, this is a PvP hit and the tick is remembered; every other source - mobs,
+     * falls, lava, your own arrow bouncing back - leaves the module deaf, which is the whole point of
+     * a jump reset.
+     */
+    @Suppress("unused")
+    private val damageHandler = handler<PacketEvent> { event ->
+        val packet = event.packet
+        if (event.origin != TransferOrigin.INCOMING || packet !is ClientboundDamageEventPacket) {
+            return@handler
+        }
+        val me = mc.player ?: return@handler
+        if (packet.entityId != me.id) {
+            return@handler
+        }
+        val level = mc.level ?: return@handler
+        val direct = level.getEntity(packet.sourceDirectId)
+        val cause = level.getEntity(packet.sourceCauseId)
+        if ((direct is Player && direct !== me) || (cause is Player && cause !== me)) {
+            lastPlayerHitTick = me.tickCount
+        }
     }
 
     /**
@@ -195,6 +237,14 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
      *    already moved you, so it resets nothing), or no jump at all for this hit.
      */
     private fun decide(me: LocalPlayer, perfectOffset: Int) {
+        if (me.tickCount - lastPlayerHitTick > HIT_SOURCE_WINDOW) {
+            note("skipped (the hit is not from a player)")
+            return
+        }
+        if (!me.onGround()) {
+            note("skipped (hit in aria: non c'è terra da cui saltare)")
+            return
+        }
         if (!canOperate(me)) {
             note("skipped (${lastSkip})")
             return
