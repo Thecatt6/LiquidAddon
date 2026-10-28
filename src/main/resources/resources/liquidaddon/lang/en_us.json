@@ -222,5 +222,6 @@
   "liquidbounce.module.fireballJumpAI.value.gcdDither.description": "Carry the rounding residual and wobble the boundary, so no two flicks are identical.",
   "liquidbounce.module.fireballJumpAI.value.mouseNoise.description": "Whole mouse counts of noise added to the step: the hand on top of the lattice.",
   "liquidbounce.module.fireballJumpAI.value.overshoot.description": "Chance of going a little past the goal and coming back.",
-  "liquidbounce.module.fireballJumpAI.value.strengthSpread.description": "Per-episode spread of Strength, so no two jumps turn exactly alike."
+  "liquidbounce.module.fireballJumpAI.value.strengthSpread.description": "Per-episode spread of Strength, so no two jumps turn exactly alike.",
+  "liquidbounce.module.jumpReset.description": "Does the vanilla jump reset for you: on the tick a hit lands, the jump key is reported as pressed, so the sprint jump eats the knockback and you stay in range. Only hits the server says came from another player are reset, and never while airborne: mobs, falls, lava and mid-air hits leave the jump key alone."
 }

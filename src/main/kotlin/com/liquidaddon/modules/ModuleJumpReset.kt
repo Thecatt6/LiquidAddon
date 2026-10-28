@@ -2,14 +2,17 @@ package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
 import net.ccbluex.liquidbounce.event.events.MovementInputEvent
+import net.ccbluex.liquidbounce.event.events.PacketEvent
+import net.ccbluex.liquidbounce.event.events.TransferOrigin
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
-import net.ccbluex.liquidbounce.utils.aiming.data.Rotation
 import net.ccbluex.liquidbounce.utils.client.chat
 import net.ccbluex.liquidbounce.utils.combat.shouldBeAttacked
 import net.ccbluex.liquidbounce.utils.network.LocalPlayerFallDamageTracker
 import net.minecraft.client.player.LocalPlayer
+import net.minecraft.network.protocol.game.ClientboundDamageEventPacket
 import net.minecraft.world.entity.LivingEntity
+import net.minecraft.world.entity.player.Player
 import kotlin.random.Random
 
 /**
@@ -49,9 +52,14 @@ import kotlin.random.Random
  *    happened, which is the classic human error — or the hit is not jumped at all, because the
  *    player simply did not react. "Too early" would require knowing the hit before it lands, which
  *    only a prediction can do, so this module never guesses;
- *  - [onlyWhenTargeting] only resets hits with an opponent near the crosshair (see
- *    [opponentNearCrosshair]) — the direction the sprint boost pushes you in has to be the
- *    direction the knockback comes from, otherwise the jump is just a jump;
+ *  - [onlyWhenTargeting] only resets hits while an opponent is inside [targetRange] (see
+ *    [opponentInRange]) — with nobody close enough to trade, the jump is just a jump;
+ *  - only a hit **dealt by a player** is ever reset: the server names the direct and the responsible
+ *    source of every damage in `ClientboundDamageEventPacket`, and when neither of the two is another
+ *    player - a mob, a fall, lava, your own arrow - the hit is ignored, because the jump reset is a
+ *    PvP mechanic and nothing else;
+ *  - a hit taken **in the air** is ignored as well: there is no ground to jump from, and a jump with
+ *    no ground under the feet resets nothing and only desyncs the input;
  *  - [waterCheck] stays quiet in water and lava: there is no sprint jump there, and attempting one
  *    would only look odd;
  *  - fall damage is never reset (LiquidBounce's [LocalPlayerFallDamageTracker]): jumping does not
@@ -73,6 +81,9 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
     private const val LATE_MIN = 1
     private const val LATE_MAX = 4
 
+    /** Ticks within which a damage packet still counts as "the hit we are reacting to". */
+    private const val HIT_SOURCE_WINDOW = 2
+
     /** Percentage chance of attempting a jump reset on a hit. */
     private val chance by int("Chance", 100, 0..100, "%")
 
@@ -83,17 +94,14 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
      */
     private val accuracy by int("Accuracy", 85, 0..100, "%")
 
-    /** Only reset hits that come from an opponent near the crosshair — see [opponentNearCrosshair]. */
+    /** Only reset hits while an opponent is inside [targetRange] — see [opponentInRange]. */
     private val onlyWhenTargeting by boolean("OnlyWhenTargeting", false)
 
     /** Never jump in water or lava: there is no sprint jump to reset a knockback with. */
     private val waterCheck by boolean("WaterCheck", true)
 
-    /** How close the opponent has to be to count as "the one hitting you" for [onlyWhenTargeting]. */
+    /** How close the opponent has to be to count as "the one trading with you" for [onlyWhenTargeting]. */
     private val targetRange by float("TargetRange", 4f, 2f..6f, "blocks")
-
-    /** How wide around the crosshair that opponent may be, in degrees. */
-    private val targetFov by float("TargetFov", 60f, 10f..180f, "°")
 
     private val chatLog by boolean("ChatLog", false)
     private val debug by boolean("Debug", false)
@@ -113,6 +121,9 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
 
     /** `tickCount` of the hit we last made a decision for, so one hit is never rolled twice. */
     private var decidedTick = -1
+
+    /** `tickCount` of the last damage the server told us came from another player. */
+    private var lastPlayerHitTick = -1000
 
     private var attempts = 0
     private var perfect = 0
@@ -136,9 +147,35 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
         pendingPerfect = false
         pendingLabel = ""
         decidedTick = -1
+        lastPlayerHitTick = -1000
         attempts = 0
         perfect = 0
         lastSkip = "idle"
+    }
+
+    /**
+     * The server names the source of every damage it deals: the direct entity (the sword, the arrow)
+     * and the one responsible for it (the player who swung, the player who shot). When either of the
+     * two is another player, this is a PvP hit and the tick is remembered; every other source - mobs,
+     * falls, lava, your own arrow bouncing back - leaves the module deaf, which is the whole point of
+     * a jump reset.
+     */
+    @Suppress("unused")
+    private val damageHandler = handler<PacketEvent> { event ->
+        val packet = event.packet
+        if (event.origin != TransferOrigin.INCOMING || packet !is ClientboundDamageEventPacket) {
+            return@handler
+        }
+        val me = mc.player ?: return@handler
+        if (packet.entityId != me.id) {
+            return@handler
+        }
+        val level = mc.level ?: return@handler
+        val direct = level.getEntity(packet.sourceDirectId)
+        val cause = level.getEntity(packet.sourceCauseId)
+        if ((direct is Player && direct !== me) || (cause is Player && cause !== me)) {
+            lastPlayerHitTick = me.tickCount
+        }
     }
 
     /**
@@ -195,6 +232,14 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
      *    already moved you, so it resets nothing), or no jump at all for this hit.
      */
     private fun decide(me: LocalPlayer, perfectOffset: Int) {
+        if (me.tickCount - lastPlayerHitTick > HIT_SOURCE_WINDOW) {
+            note("skipped (the hit is not from a player)")
+            return
+        }
+        if (!me.onGround()) {
+            note("skipped (hit in aria: non c'è terra da cui saltare)")
+            return
+        }
         if (!canOperate(me)) {
             note("skipped (${lastSkip})")
             return
@@ -266,7 +311,7 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
      * Everything that has to hold for the module to touch the jump key at all: in game, no screen
      * open, not currently falling to damage (a jump does not cancel a fall, it only burns the fall
      * protection), not in a liquid when [waterCheck] is on, and — when [onlyWhenTargeting] is on —
-     * an opponent near the crosshair to have a direction to jump against.
+     * an opponent inside [targetRange] to have somebody to trade the knockback with.
      */
     private fun canOperate(me: LocalPlayer): Boolean {
         if (mc.gameMode == null) {
@@ -285,8 +330,8 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
             lastSkip = "in liquid"
             return false
         }
-        if (onlyWhenTargeting && !opponentNearCrosshair(me)) {
-            lastSkip = "no opponent on the crosshair"
+        if (onlyWhenTargeting && !opponentInRange(me)) {
+            lastSkip = "no opponent in range"
             return false
         }
         return true
@@ -296,15 +341,15 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
         me.isInWater || me.isInLava || me.isSwimming || me.isUnderWater
 
     /**
-     * True when an opponent is close and roughly in front of you.
+     * True when an opponent is inside [targetRange].
      *
-     * The client is never told which entity dealt the hit, so "the opponent hitting you" is taken
-     * as "an enemy inside [targetRange] near the crosshair" ([targetFov] wide). That is the only
-     * case where the mechanic makes sense anyway: the sprint boost pushes you in the direction you
-     * look, so if nobody is in front of you there is nothing for the knockback to be cancelled
-     * against. Friends and teams follow LiquidBounce's combat settings through `shouldBeAttacked()`.
+     * Which player hit you is already known from the damage packet, so this gate is not about the
+     * source any more: it is about whether the fight is real. With nobody close enough to trade, a
+     * jump reset only burns the jump, so [onlyWhenTargeting] can ask for a neighbour first. No cone,
+     * no crosshair: the knockback comes from the hitter wherever you look, and a range is the whole
+     * question. Friends and teams follow LiquidBounce's combat settings through `shouldBeAttacked()`.
      */
-    private fun opponentNearCrosshair(me: LocalPlayer): Boolean {
+    private fun opponentInRange(me: LocalPlayer): Boolean {
         val level = mc.level ?: return false
         val box = me.boundingBox.inflate(targetRange.toDouble())
         val candidates: List<LivingEntity> = try {
@@ -314,12 +359,8 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
             level.getEntities(null, box).filterIsInstance<LivingEntity>()
         }
 
-        val view = Rotation(me.yRot, me.xRot)
         return candidates.any { entity ->
-            entity !== me && entity.isAlive && entity.shouldBeAttacked() &&
-                view.directionAngleTo(
-                    Rotation.lookingAt(entity.boundingBox.center, me.eyePosition)
-                ) <= targetFov / 2f
+            entity !== me && entity.isAlive && entity.shouldBeAttacked()
         }
     }
 
