@@ -89,7 +89,8 @@ private const val SPEED_DRIFT_STEP = 0.07f
 private const val REST_CHANCE = 35
 
 /**
- * The most the aim may move vertically in one tick, in degrees.
+ * The most the aim may move vertically in one tick, in degrees — the default of
+ * [AimSettings.pitchStepMax].
  *
  * Yaw and pitch are not the same movement. A hand sweeps the wrist horizontally and the vertical
  * correction rides along in small pieces; an aim that answers a 12° vertical error with a single
@@ -213,6 +214,27 @@ internal interface AimSettings {
     val jitterPitch: Float
     val gcdFix: Boolean
     val gcdDither: Boolean
+
+    /**
+     * The most the aim may travel vertically in one tick, in degrees ([PITCH_STEP_MAX] by default).
+     *
+     * Combat tracking keeps the default: the vertical correction rides along the horizontal sweep in
+     * small pieces, and a 12° packet per tick is a correction loop. A module whose whole job is one
+     * deliberate flick raises it — looking down at its own feet to throw takes a second and a half
+     * at three degrees a tick, and by then the moment to throw has gone. A flick of 80° in three
+     * ticks is what a wrist does, so it is not the flag the default is there to avoid.
+     */
+    val pitchStepMax: Float get() = PITCH_STEP_MAX
+
+    /**
+     * Whether the hand takes its regular beats of rest ([PAUSE_EVERY_MS], three to six ticks each).
+     *
+     * On for anything that tracks a target for as long as it is alive: a pull that never stops is a
+     * machine, and the beats are where a person's hand is a person's hand. Off for a flick that has
+     * to arrive inside a handful of ticks — a beat in the middle of it is 300 ms of standing still
+     * staring at the floor, which is both visible and, for the module that asked for it, too late.
+     */
+    val restBeats: Boolean get() = true
 
     // --- the hand on the mouse lattice (see [AimassistCore.handOnLattice]) --------------------
 
@@ -641,6 +663,25 @@ internal class AimassistCore(
      */
     private val forcedPoint: ((LocalPlayer) -> Vec3?)? = null,
     /**
+     * A goal the owner computes itself, in place of the point-on-hitbox [goalRotation] derives from
+     * the target, or `null`.
+     *
+     * A throw is not aimed at a body: it is aimed at a spot — straight down at the feet, or down and
+     * behind — and the owner is the only one who knows which. The engine keeps everything else about
+     * the turn (the gates, the curve or the model, the lattice, the hand, the silent rotation), so
+     * the throw is aimed exactly like a hit is. What stops applying with a goal of one's own is
+     * [AimSettings.aimPoint] and [AimSettings.predict]: there is no hitbox to pick a point on and
+     * nothing to lead.
+     *
+     * This is a rotation and not a [forcedPoint] on purpose: a flick straight down has a horizontal
+     * component of nothing, and `lookingAt` cannot recover a yaw from a vector that points at the
+     * floor. The owner that aims at a *direction* says so here; the owner that aims at a block face
+     * says so with a point.
+     *
+     * `null` (or a goal of `null` on a tick) leaves the point-on-hitbox in charge.
+     */
+    private val forcedGoal: ((LocalPlayer) -> Rotation?)? = null,
+    /**
      * Priority of the rotation requests. The deflector uses one above the aim's, so a fireball on a
      * collision course wins over a target that can wait; with the default it is an aim like any
      * other.
@@ -685,6 +726,8 @@ internal class AimassistCore(
     private val jitterPitch get() = values.jitterPitch
     private val gcdFix get() = values.gcdFix
     private val gcdDither get() = values.gcdDither
+    private val pitchStepMax get() = values.pitchStepMax
+    private val restBeats get() = values.restBeats
     private val mouseNoise get() = values.mouseNoise
     private val overshoot get() = values.overshoot
     private val strengthSpread get() = values.strengthSpread
@@ -1091,11 +1134,12 @@ internal class AimassistCore(
             return
         }
 
-        // A hand stops. Not once — regularly, and never on a beat you could set a clock by. A click
-        // that is waiting for the rotation is never held back by a pause: the attack goes first.
-        if (pendingAttack != null || forcedPoint != null) {
-            // A click that is waiting for the rotation, and a module that aims at a point (a block
-            // to place) both live on a tick they cannot spare: the rest is for aim that can wait.
+        // A hand stops. Not once — regularly, and never on a beat you could set a clock by. Three
+        // things are never held back by a pause: a click that is waiting for the rotation (the
+        // attack goes first), a module that aims at a point (a block to place lives on a tick it
+        // cannot spare), and a module that asked for no beats at all ([restBeats]) — a flick has an
+        // appointment, and the rest is for aim that can wait.
+        if (pendingAttack != null || forcedPoint != null || !restBeats) {
             pauseLeft = 0
         } else if (now > nextPauseAt) {
             pauseLeft = 3 + Random.nextInt(4)
@@ -1236,10 +1280,11 @@ internal class AimassistCore(
 
         // Vertical is not horizontal: the correction is split over a few ticks instead of leaving as
         // one tall packet, and the limit itself is drawn per tick so a bound step is never the same
-        // number twice.
+        // number twice. A module that has to look down at its own feet raises [pitchStepMax] to the
+        // speed of a real flick (see [AimSettings.pitchStepMax]).
         val pitchLimit = minOf(
             maxSpeed * 0.7f,
-            PITCH_STEP_MAX * (0.85f + Random.nextFloat() * 0.15f)
+            pitchStepMax * (0.85f + Random.nextFloat() * 0.15f)
         )
         applyAim(me, aim, softLimit(stepYaw, maxSpeed), softLimit(stepPitch, pitchLimit), target)
     }
@@ -1592,6 +1637,10 @@ internal class AimassistCore(
 
     /** Where the crosshair would be if the assist were perfect. A goal, never a value sent as-is. */
     private fun goalRotation(me: LocalPlayer, target: Entity?, aim: Rotation): Rotation {
+        // The owner knows where to look better than a point on a hitbox does (see [forcedGoal]): a
+        // throw is aimed at a spot in the world, and the owner is the one that picked it.
+        forcedGoal?.invoke(me)?.let { return it }
+
         // A forced point *is* the goal: the strength, the cap and the lattice below still decide how
         // the aim travels there, and there is no hitbox to wander inside.
         if (target == null) {
@@ -2110,8 +2159,8 @@ internal class AimassistCore(
         if (gcdFix && mouseNoise <= 0) {
             append(" §cMouseNoise 0 (every delta repeats: Distinct flag)")
         }
-        if (maxSpeed * 0.7f > PITCH_STEP_MAX + 0.01f) {
-            append(" §7pitch limited to %.1f°/tick".format(PITCH_STEP_MAX))
+        if (maxSpeed * 0.7f > pitchStepMax + 0.01f) {
+            append(" §7pitch limited to %.1f°/tick".format(pitchStepMax))
         }
         if (engine == Engine.AI && aiUnavailableReason != null) {
             append(" §cAI fallback (${aiUnavailableReason})")
