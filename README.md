@@ -70,6 +70,23 @@ To build against a local client, run `./gradlew publishToMavenLocal` in a Liquid
 Mojang official mappings for this Minecraft version. A different mapping set produces an add-on that
 compiles and then fails on every Minecraft call.
 
+## DoubleClicks
+
+`DoubleClicks` adds **1–3** follow-up clicks to each attack-key click (`ExtraClicks`, default 1).
+`Delay` is at least one game tick (default 1), so follow-ups are not sent in the original click's
+input batch. The queue holds at most three follow-ups; very fast clicks can therefore drop some
+rather than leave a long backlog. It works on the ground and in the air, and also follows rebound
+attack keys or clicks queued by another clicker.
+
+Only a follow-up whose crosshair is still on an entity repeats the vanilla attack. On a block, while
+mining, on air, or while Minecraft's miss cooldown blocks attacks, the follow-up is the swing
+animation/packet **only**: it does not start, stop, or accelerate block digging, does not set a new
+miss cooldown and does not damage an entity. Clicks that vanilla itself swallowed during the miss
+cooldown are not copied at all. Opening a screen, changing worlds, or disabling the module clears
+pending clicks. Clicks queued by another clicker (LiquidBounce's AutoClicker) are followed too,
+so its CPS doubles as well. Other modules and the server can still affect clicks, and no setting
+guarantees that an anti-cheat will not flag them.
+
 ## What the example covers
 
 - `ExampleAddon`, the entrypoint and its lifecycle hooks

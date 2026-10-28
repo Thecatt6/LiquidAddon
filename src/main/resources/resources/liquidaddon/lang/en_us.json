@@ -1,4 +1,8 @@
 {
+  "liquidbounce.module.doubleClicks.description": "After each attack-key click, add one to three follow-ups, spaced across ticks. Only a click whose crosshair is on an entity repeats the vanilla attack; air and block clicks get a swing animation instead, so the module never adds block-dig actions or a miss cooldown of its own. Anti-cheat acceptance is not guaranteed.",
+  "liquidbounce.module.doubleClicks.value.extraClicks.description": "Number of follow-ups per click (1-3). The pending queue is capped at three, so rapid clicking can drop some follow-ups.",
+  "liquidbounce.module.doubleClicks.value.delay.description": "Minimum ticks between a click and its follow-ups. At least one tick prevents the module from putting a follow-up in the original click's input batch.",
+  "liquidbounce.module.doubleClicks.value.debug.description": "Show whether each extra was an attack or a swing and how many remain queued.",
   "liquidbounce.module.hitSelect.description": "Drops hits like HitSelect (attack cancelled, swing still sent). Improves movement, reduces KB and increases crits.",
   "liquidbounce.module.hitSelect.value.chance.description": "Chance that an attack will be considered for dropping.",
   "liquidbounce.module.hitSelect.value.onlyWhenTargetVulnerable.description": "Drop if target still has hurtTime > MaxTargetHurtTime.",
