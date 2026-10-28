@@ -1,14 +1,16 @@
 package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
+import com.liquidaddon.aiming.AimassistCore
+import com.liquidaddon.aiming.ScaffoldValues
 import net.ccbluex.liquidbounce.config.types.list.Tagged
+import net.ccbluex.liquidbounce.event.events.GameRenderEvent
 import net.ccbluex.liquidbounce.event.events.GameTickEvent
+import net.ccbluex.liquidbounce.event.events.MouseRotationEvent
 import net.ccbluex.liquidbounce.event.events.MovementInputEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.utils.aiming.RotationManager
-import net.ccbluex.liquidbounce.utils.aiming.RotationsValueGroup
-import net.ccbluex.liquidbounce.utils.aiming.features.MovementCorrection
 import net.ccbluex.liquidbounce.utils.block.SwingMode
 import net.ccbluex.liquidbounce.utils.block.doPlacement
 import net.ccbluex.liquidbounce.utils.block.targetfinding.BlockOffsetOptions
@@ -20,18 +22,15 @@ import net.ccbluex.liquidbounce.utils.block.targetfinding.FaceHandlingOptions
 import net.ccbluex.liquidbounce.utils.block.targetfinding.PlayerLocationOnPlacement
 import net.ccbluex.liquidbounce.utils.block.targetfinding.findBestBlockPlacementTarget
 import net.ccbluex.liquidbounce.utils.block.targetfinding.verifyClick
-import net.ccbluex.liquidbounce.utils.client.RestrictedSingleUseAction
-import net.ccbluex.liquidbounce.utils.kotlin.Priority
 import net.ccbluex.liquidbounce.utils.movement.DirectionalInput
 import net.ccbluex.liquidbounce.utils.render.placement.PlacementRenderer
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.core.BlockPos
 import net.minecraft.network.chat.Component
-import net.minecraft.util.Mth
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.item.BlockItem
 import net.minecraft.world.phys.AABB
-import kotlin.math.abs
+import net.minecraft.world.phys.Vec3
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
@@ -41,29 +40,37 @@ import kotlin.random.Random
  * ModuleScaffoldLegit — the Eagle up staircase, and a box on every block it places.
  *
  * **The click no longer needs the crosshair.** The module works out where the block has to go — the
- * cell over the void in front of the player, or the one on top of the block it jumped from — asks
- * LiquidBounce's target finding which face puts it there, and looks at that face *silently*: the
- * same rotation channel the Aimassist's `Silent` uses, `RotationManager`, configured in the
- * `Rotations` group (`AngleSmooth`, `MovementCorrection`, `ResetThreshold`, `TicksUntilReset`). Your
- * view never moves; the server is the one that sees the look.
+ * cell over the void in front of the player, or the one on top of the block it jumped from — and
+ * asks LiquidBounce's target finding which face puts it there. Your view never moves: whatever look
+ * a click needs goes to the server alone, through the aimbot's rotation engine.
  *
- * **The look stays down for as long as the bridge is running**, and not only for the tick of the
- * click: the rotation is asked for again every tick, on the face of the block being worked on, so what
- * the server sees is one continuous look at the block that drifts as the bridge advances — the look of
- * someone whose eyes never leave the block they are placing. A look that dropped for the click and came
- * straight back up afterwards is a look no hand makes, and it is the first thing that gives a scaffold
- * away. It comes back to the camera, slowly, only when the bridge stops: no space held, no void in
- * front, no blocks left.
+ * **The look is asked for only when a click needs it.** Every tick the module asks the question a
+ * hand would ask first: does the look the server already has place this block? When it does — and
+ * walking backwards keeps the face near the crosshair more often than not — the click leaves with no
+ * rotation at all. Only when it does not, the center of the face becomes the goal of the aim engine
+ * for as long as the click is waiting; the tick the click goes out, the goal is gone and the engine
+ * gives the look back to the camera. No stare held block after block, no head dipping to every cell:
+ * the minimum look that explains the minimum click.
  *
- * The click leaves once that look has really arrived on the face. That is the post-rotation pattern
- * every placement check is built around: a click sent from a look that is still on its way is the one
- * Grim reports as a placement the player could not have made. So the order is always look first, click
- * after — the rotation goes out in the movement packet of one tick, and the click goes out on a later
- * one, when the server already has that look.
+ * **The look that is asked for is the aimbot's.** The rotation is not written here: the face center
+ * is handed to [AimassistCore] — the engine `AimbotAI`, `Aimassist`, `Clutch` and `FireballDeflect`
+ * run — with [ScaffoldValues]: the mouse-count lattice with its carried residual (`GcdFix`,
+ * `GcdDither`), the hand on top of it (`MouseNoise`, `Overshoot`, `StrengthSpread`), the model
+ * LiquidBounce trained under `Engine = AI`, the frame interpolation, and the silent rotation through
+ * `RotationManager` with `MoveFix = Silent`. Every bypass the aimbot has, and none of the settings a
+ * placement does not need: no `Fov`, no `Range`, no cone, no reaction gates.
  *
- * Because the rotation is recomputed every tick and verified before the click, a step that is
- * interrupted (a block that appears under the cell, a face that goes out of reach, a look that drifted
- * while the player was flying up) is simply retried on the next tick instead of being sent blind.
+ * The click still leaves only once the look the **server** has really traces onto that face
+ * ([clickWouldLand]): the rotation goes out in the movement packet of one tick, the click on a later
+ * one, when the server already has it — the post-rotation pattern every placement check is built
+ * around. A step that is interrupted (a block that appears under the cell, a face that goes out of
+ * reach, a look that drifted while the player was flying up) is retried on the next tick instead of
+ * being sent blind.
+ *
+ * **The module clicks by itself.** With `AutoClick` the bridge runs on the walk alone: at the edge,
+ * holding nothing, the cell is filled and the staircase completes — walk back onto the block, jump,
+ * block on top — with no space and no mouse. With `AutoClick` off the module is driven as before:
+ * `Stairs` on the space key, `Step` on the jump key.
  *
  * `Eagle` holds the player on the edge, `Mode = STAIRS` places the block at the edge, the block on
  * top of it in the air, and jumps; `Mode = STEP` jumps on the physical space key. `Edge Distance`,
@@ -91,15 +98,6 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     /** FLAT: the edge click; WALK: going back onto that block, then the jump; AIR: the click on top. */
     private enum class Phase { FLAT, WALK, AIR }
 
-    /**
-     * How far the look the server has may sit from the one a click asked for, in degrees (yaw + pitch).
-     *
-     * Wide enough for the tick of travel between the two: the player keeps moving, so the look asked
-     * for this tick is not exactly the one the server already has. The exact check is [clickWouldLand],
-     * which is the one that decides whether the click can be explained.
-     */
-    private const val AIM_TOLERANCE = 6f
-
     /** Ticks the click of a step may keep waiting for its look before the step is given up on. */
     private const val AIR_BUDGET = 12
 
@@ -123,19 +121,30 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     private val swingMode by enumChoice("Swing", SwingMode.DO_NOT_HIDE)
 
     /**
-     * The rotation engine, the same one the Aimassist and every placement in LiquidBounce use: how
-     * fast the look travels (`AngleSmooth`), how it walks back to the camera when the click is done,
-     * and whether the walk is corrected to match the look the server is being shown.
-     *
-     * `MovementCorrection` starts on `Silent`: while the look is away from the camera, the keys and
-     * the walk are derived from the look instead of from the camera, so what the server sees still
-     * holds together — a player walking where it is looking. `Off` leaves the walk exactly as the
-     * hand makes it, which is more faithful to the keys, but then the server sees a player looking
-     * one way and walking another, and that mismatch is the thing an anti-cheat looks for. It costs
-     * nothing here: the step in the air has no keys to correct, and at the edge the look is already
-     * pointed at the cell, so it is the direction the walk is going anyway.
+     * The bridge clicks by itself: at the edge, on the walk alone, the cell is filled and the whole
+     * staircase completes — walk back onto the block, jump, block on top — with no space held and no
+     * mouse. Off, the module is driven as before: `Stairs` on the space key, `Step` on the jump key.
      */
-    private val rotations = tree(RotationsValueGroup(this, MovementCorrection.SILENT))
+    private val autoClick by boolean("AutoClick", true)
+
+    /**
+     * The rotation engine of the aimbot, pointed at a block face instead of a player: [AimassistCore]
+     * with [ScaffoldValues], i.e. every bypass the aim has — the mouse lattice and its carried
+     * residual, the hand on top of it, the trained model, the silent rotation with `MoveFix` — and
+     * none of the settings a placement does not need: no `Fov`, no `Range`, no cone. The module hands
+     * the point in through [aimPoint], and only on the ticks a click is waiting for a look it does
+     * not already have.
+     */
+    private val values = ScaffoldValues(this)
+
+    /** The face center the engine looks at this tick, or null when the look is the player's own. */
+    private var aimPoint: Vec3? = null
+
+    private val core = AimassistCore(
+        owner = this,
+        values = values,
+        forcedPoint = { aimPoint },
+    )
 
     private val chatLog by boolean("ChatLog", true)
     private val debug by boolean("Debug", false)
@@ -161,20 +170,10 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     /** The block placed at the edge (WALK) or jumped from (AIR). */
     private var stepBlock: BlockPos? = null
 
-    /**
-     * What the module wants the look on: the face, whether the click that goes with it may leave as
-     * soon as the look has arrived, and what to do once it has.
-     */
-    private class Look(val target: BlockPlacementTarget, val click: Boolean, val onPlaced: () -> Unit)
-
-    /** What this tick wants the look on, or nothing when the look only has to stay where it is. */
-    private var look: Look? = null
-
-    /**
-     * The face the look is on: held from tick to tick, so that a click does not leave the look hanging
-     * in the middle of a bridge.
-     */
-    private var heldLook: BlockPlacementTarget? = null
+    /** The face this tick works on, whether its click may leave now, and what to do once it has. */
+    private var plan: BlockPlacementTarget? = null
+    private var planClick = false
+    private var planDone: (() -> Unit)? = null
 
     /**
      * The distance from the edge drawn for this step. Edge Distance is a range, and drawing it once
@@ -209,6 +208,11 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         misses = 0
         airTickSum = 0
         pending.clear()
+        plan = null
+        planClick = false
+        planDone = null
+        aimPoint = null
+        core.onEnable()
         super.onEnabled()
     }
 
@@ -216,8 +220,12 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         // The boxes that are still on screen run their fade-out instead of vanishing.
         pending.clear()
         reset()
-        heldLook = null // the look is theirs again
+        plan = null
+        planClick = false
+        planDone = null
+        aimPoint = null // the look is theirs again
         renderer.clearSilently()
+        core.onDisable()
         super.onDisabled()
     }
 
@@ -246,8 +254,8 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         val userJump = event.jump
         spaceHeld = userJump
         if (mode == Mode.STAIRS) {
-            if (!spaceHeld) {
-                reset() // space released: only Eagle
+            if (!spaceHeld && !autoClick) {
+                reset() // space released and the bridge is driven by the key: only Eagle
             }
             // The space key belongs to the module only while it is doing something with it: a step
             // that is running, or the click it is about to make at this edge. Anywhere else — flat
@@ -279,29 +287,41 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     private val tickHandler = handler<GameTickEvent> {
         val me = mc.player ?: return@handler
         flushPendingRender()
-        look = null
         if (mc.gui.screen() != null) {
             debug(me, "schermata aperta")
-            heldLook = null
+            aimPoint = null
             return@handler
         }
         if (me.isUsingItem) {
             // The player is eating, or holding a bow: that use is theirs, and a click of ours would
             // land on whatever they are using instead of on the block.
             debug(me, "stai usando un oggetto")
+            aimPoint = null
             return@handler
         }
+        plan = null
+        planClick = false
+        planDone = null
         when (phase) {
             Phase.AIR -> airTick(me)
-            Phase.FLAT -> if (mode == Mode.STAIRS && spaceHeld && me.onGround()) {
+            Phase.FLAT -> if (me.onGround() && (autoClick || (mode == Mode.STAIRS && spaceHeld))) {
                 flatTick(me)
-            } else if (mode == Mode.STAIRS) {
+            } else if (mode == Mode.STAIRS && !autoClick) {
                 debug(me, "spazio non premuto: solo Eagle")
             }
             Phase.WALK -> if (me.onGround()) walkTick(me)
         }
-        holdLook(me)
+        aimAndClick(me)
+        core.tick()
     }
+
+    /** Friction is fixed to zero in this profile; the handler keeps the engine whole. */
+    @Suppress("unused")
+    private val mouseHandler = handler<MouseRotationEvent> { core.onMouseRotation(it) }
+
+    /** Frame interpolation: the tick's step drawn slice by slice, when the camera is ours. */
+    @Suppress("unused")
+    private val renderHandler = handler<GameRenderEvent> { core.onRender() }
 
     /** 1: at the edge, the click that puts a block behind at the level of the one under the feet. */
     private fun flatTick(me: LocalPlayer) {
@@ -328,7 +348,9 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         val ready = readyTicks++ >= delay
         debug(me, "piano: blocco in " + short(cell) + " sulla faccia " + target.direction.name.lowercase() +
             " di " + short(target.interactedBlockPos))
-        look = Look(target, ready) {
+        plan = target
+        planClick = ready
+        planDone = {
             phase = Phase.WALK
             stepBlock = cell
             waitTicks = 0
@@ -387,8 +409,9 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
             debug(me, "aria tick $airTicks: non c'è una faccia sopra il blocco di partenza")
             return
         }
-        val ready = readyTicks++ >= delay
-        look = Look(target, ready) {
+        plan = target
+        planClick = readyTicks++ >= delay
+        planDone = {
             placedInAir = true
             airTickSum += airTicks
             debug(me, "aria tick $airTicks: blocco sopra " + short(from))
@@ -396,46 +419,31 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     }
 
     /**
-     * Holds the look on the block the module is working on, and lets the click of this tick leave as
-     * soon as that look has really arrived on the face.
+     * The minimum aim, and the click it exists for.
      *
-     * This runs every tick while the bridge is running, not only on the tick of a click: the rotation
-     * asked for again and again is what makes the look the server sees one continuous look at the
-     * block, instead of a glance that drops for the click and comes straight back up. When there is
-     * nothing new to look at this tick — the walk back onto the block, the landing of a jump — the
-     * look stays on the face it was already on.
+     * First the question a hand would ask: does the look the server already has place this block?
+     * When it does, the click leaves with no rotation at all — walking backwards keeps the face near
+     * the crosshair more often than not, and a bridge that never turns the head is a bridge nobody
+     * reads. Only when it does not, the center of the face becomes [aimPoint] for this tick: the
+     * engine takes the look there, and on the tick the server's look really traces onto the face the
+     * click leaves and the point is gone, so the engine gives the look back to the camera. No stare
+     * held block after block: the look exists for exactly as long as a click is waiting for it.
      */
-    private fun holdLook(me: LocalPlayer) {
-        // Held only while the bridge is really running: a step in the air, the walk back onto the
-        // block, or a click waiting at the edge. Everything else is the player's own look again.
-        val running = when (phase) {
-            Phase.AIR -> true
-            Phase.WALK -> true
-            Phase.FLAT -> mode == Mode.STAIRS && spaceHeld && me.onGround() && atEdge(me, lastKeys)
-        }
-        if (!running || !canPlace(me)) {
-            heldLook = null
+    private fun aimAndClick(me: LocalPlayer) {
+        val target = plan
+        if (target == null || !planClick || !canPlace(me)) {
+            aimPoint = null
             return
         }
-
-        val next = look
-        if (next != null) {
-            heldLook = next.target
+        if (clickWouldLand(target)) {
+            debug(me, "click senza rotazione: il look del server è già sulla faccia")
+            place(me, target, planDone)
+            plan = null
+            aimPoint = null
+            return
         }
-        val aim = heldLook ?: return
-        RotationManager.setRotationTarget(
-            rotation = aim.rotation,
-            considerInventory = true,
-            valueGroup = rotations,
-            // Scaffold and friends: a KillAura that wants the rotation for itself outranks nothing
-            // here, and nothing here outranks safety.
-            priority = Priority.IMPORTANT_FOR_PLAYER_LIFE,
-            provider = this,
-            whenReached = RestrictedSingleUseAction(
-                { next?.click == true && canPlace(me) && lookArrived(aim) && clickWouldLand(aim) },
-                { place(me, aim, next?.onPlaced) }
-            )
-        )
+        debug(me, "il look del server non è sulla faccia: mira al centro di " + short(target.placedBlock))
+        aimPoint = target.interactionPoint
     }
 
     /** The click itself: the vanilla right click on that face, with the look that asked for it. */
@@ -447,16 +455,9 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         }
         pending[target.placedBlock] = 0
         runCatching {
-            doPlacement(target.blockHitResult, target.rotation, hand, swingMode = swingMode)
+            doPlacement(target.blockHitResult, RotationManager.serverRotation, hand, swingMode = swingMode)
         }
         onPlaced?.invoke()
-    }
-
-    /** True when the look the server has is the one this click asked for. */
-    private fun lookArrived(target: BlockPlacementTarget): Boolean {
-        val sent = RotationManager.serverRotation
-        return abs(Mth.wrapDegrees(sent.yaw - target.rotation.yaw)) +
-            abs(sent.pitch - target.rotation.pitch) <= AIM_TOLERANCE
     }
 
     /**
