@@ -653,6 +653,16 @@ internal class AimassistCore(
      */
     private val forcedTarget: ((LocalPlayer) -> Entity?)? = null,
     /**
+     * A world **point** to aim at, instead of an entity, or `null`.
+     *
+     * A block placement is not aimed at an entity: it is aimed at a point on the face of a block,
+     * and everything the engine does with a rotation — the strength, the cap, the mouse lattice with
+     * its carried residual, the hand on top of it, the model under `Engine = AI`, the frame
+     * interpolation, the silent request — is what a placement wants too. With a provider, the point
+     * is the goal and the scan is skipped; the engine lets go the tick the provider returns `null`.
+     */
+    private val forcedPoint: ((LocalPlayer) -> Vec3?)? = null,
+    /**
      * A goal the owner computes itself, in place of the point-on-hitbox [goalRotation] derives from
      * the target, or `null`.
      *
@@ -662,6 +672,11 @@ internal class AimassistCore(
      * the throw is aimed exactly like a hit is. What stops applying with a goal of one's own is
      * [AimSettings.aimPoint] and [AimSettings.predict]: there is no hitbox to pick a point on and
      * nothing to lead.
+     *
+     * This is a rotation and not a [forcedPoint] on purpose: a flick straight down has a horizontal
+     * component of nothing, and `lookingAt` cannot recover a yaw from a vector that points at the
+     * floor. The owner that aims at a *direction* says so here; the owner that aims at a block face
+     * says so with a point.
      *
      * `null` (or a goal of `null` on a tick) leaves the point-on-hitbox in charge.
      */
@@ -731,6 +746,9 @@ internal class AimassistCore(
 
     /** The target the assist is helping with. Kept between ticks: the mouse handler needs it. */
     private var currentTarget: Entity? = null
+
+    /** The point the owner asked to aim at this tick (see the constructor), or `null`. */
+    private var forcedPointValue: Vec3? = null
     private var lastSwitch = 0L
     private var reactionUntil = 0L
 
@@ -878,7 +896,9 @@ internal class AimassistCore(
         handDrift = 1f
         handUndershoot = 10
         pauseLeft = 0
-        nextPauseAt = 0L
+        // The first beat of rest comes *later*, not now: a module that starts by doing nothing for
+        // five ticks is a module that misses the first — and for a rescue that is the only one.
+        nextPauseAt = System.currentTimeMillis() + PAUSE_EVERY_MS + Random.nextInt(PAUSE_JITTER_MS)
         aimOffset = Vec3(0.0, 0.0, 0.0)
         aimOffsetUntil = 0L
         yawCarry = 0.0
@@ -1063,9 +1083,19 @@ internal class AimassistCore(
         val blocked = (pauseOnInventory && mc.gui.screen() != null) ||
                 (pauseOnUse && me.isUsingItem)
 
-        val target = if (blocked) null else findTarget(me)
+        // The point of this tick, when the owner aims at one instead of at an entity.
+        forcedPointValue = if (forcedPoint == null || blocked) null else forcedPoint?.invoke(me)
 
-        if (target == null) {
+        val target = if (blocked || forcedPoint != null) null else findTarget(me)
+
+        if (forcedPoint != null && forcedPointValue == null) {
+            // The owner has nothing to aim at any more: same walk-back as a lost target.
+            currentTarget = null
+            release(me)
+            return
+        }
+
+        if (target == null && forcedPoint == null) {
             // No target: the assist lets go. Silent that means walking the sent rotation back to
             // the camera instead of dropping the request (see [release]).
             currentTarget = null
@@ -1077,7 +1107,11 @@ internal class AimassistCore(
         }
 
         val now = System.currentTimeMillis()
-        if (target !== currentTarget) {
+        if (forcedPoint != null) {
+            // A point has no identity to lock onto: every tick is the same "target", so the aim
+            // keeps the pace it has instead of restarting the reaction on each of them.
+            currentTarget = null
+        } else if (target !== currentTarget) {
             // Still deciding whether to commit to this target: keep the current aim alive instead
             // of dropping the request (which would hand the camera back in a single packet).
             if (currentTarget != null && now - lastSwitch < switchDelay) {
@@ -1100,10 +1134,12 @@ internal class AimassistCore(
             return
         }
 
-        // A hand stops. Not once — regularly, and never on a beat you could set a clock by. A click
-        // that is waiting for the rotation is never held back by a pause: the attack goes first. So
-        // is a module that asked for no beats at all ([restBeats]): a flick has an appointment.
-        if (pendingAttack != null || !restBeats) {
+        // A hand stops. Not once — regularly, and never on a beat you could set a clock by. Three
+        // things are never held back by a pause: a click that is waiting for the rotation (the
+        // attack goes first), a module that aims at a point (a block to place lives on a tick it
+        // cannot spare), and a module that asked for no beats at all ([restBeats]) — a flick has an
+        // appointment, and the rest is for aim that can wait.
+        if (pendingAttack != null || forcedPoint != null || !restBeats) {
             pauseLeft = 0
         } else if (now > nextPauseAt) {
             pauseLeft = 3 + Random.nextInt(4)
@@ -1139,10 +1175,10 @@ internal class AimassistCore(
 
         // A short grace on the crosshair gate: without it the gate flips on/off on every pixel of
         // the hitbox edge, and each flip shows on the camera as a start/stop beat.
-        if (onCrosshair(me, target)) {
+        if (target != null && onCrosshair(me, target)) {
             crosshairGraceUntil = now + CROSSHAIR_GRACE_MS
         }
-        if (onlyOnCrosshair && now > crosshairGraceUntil) {
+        if (target != null && onlyOnCrosshair && now > crosshairGraceUntil) {
             hold()
             debugLine(
                 "crosshair off the hitbox (%.2f° from the centre)".format(crosshairOffset(target))
@@ -1321,7 +1357,7 @@ internal class AimassistCore(
      * drift is now a small random walk: a random number of counts, a sign that turns when it likes,
      * and ticks of complete rest in between.
      */
-    private fun stillTick(me: LocalPlayer, aim: Rotation, target: Entity) {
+    private fun stillTick(me: LocalPlayer, aim: Rotation, target: Entity?) {
         if (!silent) {
             hold()
             return
@@ -1368,7 +1404,7 @@ internal class AimassistCore(
         from: Rotation,
         stepYaw: Float,
         stepPitch: Float,
-        target: Entity
+        target: Entity?
     ) {
         val desired = Rotation(from.yaw + stepYaw, (from.pitch + stepPitch).coerceIn(-89.5f, 89.5f))
 
@@ -1600,10 +1636,17 @@ internal class AimassistCore(
     // --- rotation math ----------------------------------------------------------------------
 
     /** Where the crosshair would be if the assist were perfect. A goal, never a value sent as-is. */
-    private fun goalRotation(me: LocalPlayer, target: Entity, aim: Rotation): Rotation {
+    private fun goalRotation(me: LocalPlayer, target: Entity?, aim: Rotation): Rotation {
         // The owner knows where to look better than a point on a hitbox does (see [forcedGoal]): a
         // throw is aimed at a spot in the world, and the owner is the one that picked it.
         forcedGoal?.invoke(me)?.let { return it }
+
+        // A forced point *is* the goal: the strength, the cap and the lattice below still decide how
+        // the aim travels there, and there is no hitbox to wander inside.
+        if (target == null) {
+            val point = forcedPointValue ?: me.eyePosition.add(aim.directionVector)
+            return Rotation.lookingAt(point, me.eyePosition)
+        }
 
         var point = pointOn(me, target, aim)
 
@@ -1708,7 +1751,9 @@ internal class AimassistCore(
      * pull is strongest exactly where the player cannot see it — they are already aiming at the
      * target — and vanishes at the distance at which it would become a snap.
      */
-    private fun bubble(me: LocalPlayer, target: Entity): Float {
+    private fun bubble(me: LocalPlayer, target: Entity?): Float {
+        // A point is not something the crosshair can be "already on": the pull is full.
+        if (target == null) return 1f
         // The aimbot picked the target itself, so there is no "the crosshair is already on it"
         // to reward and no distance from the aim to fade over: the pull is full, always.
         if (values.autoAim) return 1f
@@ -1794,7 +1839,7 @@ internal class AimassistCore(
         me: LocalPlayer,
         aim: Rotation,
         goal: Rotation,
-        target: Entity
+        target: Entity?
     ): Pair<Float, Float>? {
         if (!DeepLearningEngine.isInitialized) {
             return aiUnavailable("deep learning not initialised")
@@ -1812,10 +1857,15 @@ internal class AimassistCore(
                     targetVector = goal.directionVector,
                     velocityDelta = previous.rotationDeltaTo(aim).toVec2f(),
                     playerDiff = me.position().subtract(me.lastPos),
-                    targetDiff = target.position().subtract(target.lastPos),
-                    distance = me.squaredBoxedDistanceTo(target).toFloat(),
-                    // A projectile has no hurtTime: the model was trained with the damage the
-                    // target had taken, and for a fireball that is always zero.
+                    targetDiff = target?.let { it.position().subtract(it.lastPos) } ?: Vec3.ZERO,
+                    distance = if (target != null) {
+                        me.squaredBoxedDistanceTo(target).toFloat()
+                    } else {
+                        val point = forcedPointValue ?: me.eyePosition
+                        me.eyePosition.distanceTo(point).toFloat().let { it * it }
+                    },
+                    // A projectile has no hurtTime, and neither has a block: the model was trained
+                    // with the damage the target had taken, and there is none to report here.
                     hurtTime = (target as? LivingEntity)?.hurtTime ?: 0,
                     age = 0
                 ).asInput
@@ -2066,7 +2116,7 @@ internal class AimassistCore(
 
     // --- debug ------------------------------------------------------------------------------
 
-    private fun report(me: LocalPlayer, aimed: Rotation, target: Entity) {
+    private fun report(me: LocalPlayer, aimed: Rotation, target: Entity?) {
         assisted++
         if (chatLog && assisted % 100 == 0) {
             chat("§7[" + owner.name + "] §f$assisted corrections" +
@@ -2076,7 +2126,9 @@ internal class AimassistCore(
 
         debugLine(
             "assisting %s dist=%.2f offset=%.2f° bubble=%.2f → yaw=%.1f pitch=%.1f (silent=%s, preset=%s) ".format(
-                target.name.string, target.distanceTo(me), crosshairOffset(target),
+                target?.name?.string ?: "point",
+                target?.distanceTo(me) ?: (forcedPointValue?.let { me.eyePosition.distanceTo(it) } ?: 0.0),
+                target?.let { crosshairOffset(it) } ?: 0f,
                 bubble(me, target), aimed.yaw, aimed.pitch, silent,
                 if (presetName.isEmpty()) "-" else presetName
             ) + "§7strength=%.0f%% max=%.1f° own=%.2f° counts=%+d/%+d noise=%.1f (set %d) hand=%.1f under=%d".format(
