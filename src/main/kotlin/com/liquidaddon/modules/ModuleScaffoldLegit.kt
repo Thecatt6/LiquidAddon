@@ -6,62 +6,40 @@ import net.ccbluex.liquidbounce.event.events.GameTickEvent
 import net.ccbluex.liquidbounce.event.events.MovementInputEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
-import net.ccbluex.liquidbounce.utils.aiming.RotationManager
-import net.ccbluex.liquidbounce.utils.block.SwingMode
-import net.ccbluex.liquidbounce.utils.block.doPlacement
-import net.ccbluex.liquidbounce.utils.block.targetfinding.BlockOffsetOptions
-import net.ccbluex.liquidbounce.utils.block.targetfinding.BlockPlacementTarget
-import net.ccbluex.liquidbounce.utils.block.targetfinding.BlockPlacementTargetFindingOptions
-import net.ccbluex.liquidbounce.utils.block.targetfinding.CenterTargetPositionFactory
-import net.ccbluex.liquidbounce.utils.block.targetfinding.ClickTrace
-import net.ccbluex.liquidbounce.utils.block.targetfinding.FaceHandlingOptions
-import net.ccbluex.liquidbounce.utils.block.targetfinding.PlayerLocationOnPlacement
-import net.ccbluex.liquidbounce.utils.block.targetfinding.findBestBlockPlacementTarget
-import net.ccbluex.liquidbounce.utils.block.targetfinding.verifyClick
 import net.ccbluex.liquidbounce.utils.movement.DirectionalInput
 import net.ccbluex.liquidbounce.utils.render.placement.PlacementRenderer
+import net.minecraft.client.KeyMapping
+import net.minecraft.client.Minecraft
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.core.BlockPos
 import net.minecraft.network.chat.Component
-import net.minecraft.world.InteractionHand
-import net.minecraft.world.item.BlockItem
 import net.minecraft.world.phys.AABB
+import net.minecraft.world.phys.BlockHitResult
+import net.minecraft.world.phys.HitResult
+import java.lang.reflect.Field
+import java.lang.reflect.Method
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.sin
 import kotlin.random.Random
 
 /**
- * ModuleScaffoldLegit — the Eagle up staircase, and a box on every block it places.
+ * ModuleScaffoldLegit — the old scaffold, and a box on every block it places.
  *
- * **The click no longer needs the crosshair.** The module works out where the block has to go — the
- * cell over the void in front of the player, or the one on top of the block it jumped from — and
- * asks LiquidBounce's target finding which face puts it there, and the click leaves only when the
- * look the server has — with no aim of any kind in between, your own camera — really traces onto
- * that face.
+ * **The behaviour is the one from before the aim existed**: the click is the vanilla use click,
+ * aimed by the player's own crosshair. `Eagle` holds the player on the edge, `Mode = STAIRS` places
+ * the block at the edge, the block on top of it in the air, and jumps; `Mode = STEP` jumps on the
+ * physical space key. `Edge Distance`, `JumpAt`, `Shift Delay`, `Jump Delay`, `PlaceTiming`,
+ * `ChatLog` and `Debug` are untouched. There is no aim group, no rotation manager, no silent
+ * rotation: what you look at is what gets clicked.
  *
- * **There is no aim at all.** No silent rotation, no rotation engine, no `Rotations` group: the
- * module never asks for a look of its own, so the rotation the server has is always exactly the one
- * your camera makes, and the only thing this module adds to your packets is the click. The price is
- * the one a hand pays: the face has to be inside the look you already have — bridge looking at the
- * edge, as you would without any module — and on the ticks it is not, the click simply waits for a
- * later one instead of being sent blind or justified by a look you never made.
- *
- * **The module clicks by itself.** With `AutoClick` the bridge runs on the walk alone: at the edge,
- * holding nothing, the cell is filled and the staircase completes — walk back onto the block, jump,
- * block on top — with no space and no mouse. With `AutoClick` off the module is driven as before:
- * `Stairs` on the space key, `Step` on the jump key.
- *
- * `Eagle` holds the player on the edge, `Mode = STAIRS` places the block at the edge, the block on
- * top of it in the air, and jumps; `Mode = STEP` jumps on the physical space key. `Edge Distance`,
- * `JumpAt`, `Shift Delay`, `Jump Delay`, `PlaceTiming`, `ChatLog` and `Debug` do what they did
- * before — and the space key is only taken away while the module is really using it: a step that is
- * running, or the click it is about to make at this edge. Anywhere else you jump as if it were off.
- *
- * **The render** is unchanged: [PlacementRenderer] — the renderer LiquidBounce's own Scaffold uses,
- * with its `Render` settings group — draws a box on *every* block this module places, the flat one of
- * the bridge included. The cell is remembered when the click goes out and the box is added as soon as
- * the block is really in the world, so a click the server refuses draws nothing.
+ * **The only addition is the render**: [PlacementRenderer] — the renderer LiquidBounce's own
+ * Scaffold uses, with its `Render` settings group (`Enabled`, `Clump`, size curves, `InTime` /
+ * `OutTime`, colours) — draws a box on *every* block this module places, the flat one of the bridge
+ * included, not only the ones of the climb. The cell is remembered when the click goes out and the
+ * box is added as soon as the block is really in the world, so a click the server refuses draws
+ * nothing.
  */
 object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDON) {
 
@@ -78,9 +56,6 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     /** FLAT: the edge click; WALK: going back onto that block, then the jump; AIR: the click on top. */
     private enum class Phase { FLAT, WALK, AIR }
 
-    /** Ticks the click of a step may keep waiting for its look before the step is given up on. */
-    private const val AIR_BUDGET = 12
-
     private val mode by enumChoice("Mode", Mode.STAIRS)
     private val eagle by boolean("Eagle", true)
 
@@ -93,19 +68,6 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     // Range Sliders con la doppia pallina per i Delay
     private val shiftDelay by intRange("Shift Delay", 0..2, 0..20, "ticks")
     private val jumpDelay by intRange("Jump Delay", 0..1, 0..20, "ticks")
-
-    /** How far a click may reach: the face has to be inside it, both to look at it and to place. */
-    private val range by float("Range", 4.5f, 2f..6f, "blocks")
-
-    /** The swing of the click: `DoNotHide` is the one a hand makes, the others hide it from someone. */
-    private val swingMode by enumChoice("Swing", SwingMode.DO_NOT_HIDE)
-
-    /**
-     * The bridge clicks by itself: at the edge, on the walk alone, the cell is filled and the whole
-     * staircase completes — walk back onto the block, jump, block on top — with no space held and no
-     * mouse. Off, the module is driven as before: `Stairs` on the space key, `Step` on the jump key.
-     */
-    private val autoClick by boolean("AutoClick", true)
 
     private val chatLog by boolean("ChatLog", true)
     private val debug by boolean("Debug", false)
@@ -122,27 +84,14 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
 
     /**
      * The cells this module has clicked, with the ticks they have been waiting. The block of a click
-     * only exists a tick later, so the box is added when the block is really there — that is what
-     * makes the box appear on *every* block, the flat ones of the bridge included, and never on a
-     * click that failed.
+     * only exists a tick later (the vanilla path sends the use on `handleKeybinds`), so the box is
+     * added when the block is really there — that is what makes the box appear on *every* block,
+     * the flat ones of the bridge included, and never on a click that failed.
      */
     private val pending = LinkedHashMap<BlockPos, Int>()
 
     /** The block placed at the edge (WALK) or jumped from (AIR). */
     private var stepBlock: BlockPos? = null
-
-    /** The face this tick works on, whether its click may leave now, and what to do once it has. */
-    private var plan: BlockPlacementTarget? = null
-    private var planClick = false
-    private var planDone: (() -> Unit)? = null
-
-    /**
-     * The distance from the edge drawn for this step. Edge Distance is a range, and drawing it once
-     * per step instead of once per check is what keeps the module from deciding it is at the edge on
-     * one tick and not on the next while the player stands still.
-     */
-    private var edgeNow = 0.5f
-
     private var waitTicks = 0
     private var readyTicks = 0
     private var delay = 0
@@ -156,12 +105,21 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     private var walkZ = 0.0
     private var lastDebug = ""
 
-    /** L'hurtTime dell'ultimo tick: serve a rilevare quando il giocatore subisce danno. */
-    private var lastHurtTime = 0
-
     private var steps = 0
     private var misses = 0
     private var airTickSum = 0
+
+    /** KeyMapping.clickCount: the clicks queued for handleKeybinds (private; 26.x names are not obfuscated). */
+    private val clickCount: Field by lazy {
+        KeyMapping::class.java.getDeclaredField("clickCount").apply { isAccessible = true }
+    }
+
+    /** Minecraft.pick(float) is private: the crosshair of this tick, before handleKeybinds reads the clicks. */
+    private val pickMethod: Method? by lazy {
+        runCatching {
+            Minecraft::class.java.getDeclaredMethod("pick", Float::class.javaPrimitiveType).apply { isAccessible = true }
+        }.getOrNull()
+    }
 
     override val tag: String
         get() = if (steps == 0) "" else steps.toString()
@@ -172,9 +130,6 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         misses = 0
         airTickSum = 0
         pending.clear()
-        plan = null
-        planClick = false
-        planDone = null
         super.onEnabled()
     }
 
@@ -182,9 +137,6 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         // The boxes that are still on screen run their fade-out instead of vanishing.
         pending.clear()
         reset()
-        plan = null
-        planClick = false
-        planDone = null
         renderer.clearSilently()
         super.onDisabled()
     }
@@ -194,7 +146,6 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         stepBlock = null
         readyTicks = 0
         jumpNow = false
-        edgeNow = getEdgeDistance()
     }
 
     @Suppress("unused")
@@ -202,7 +153,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         val me = mc.player ?: return@handler
         if (phase == Phase.AIR) {
             // the step is a jump straight up: no shift, no walking until the landing
-            event.directionalInput = DirectionalInput(forwards = false, backwards = false, left = false, right = false)
+            event.directionalInput = DirectionalInput(false, backwards = false, left = false, right = false)
             event.sneak = false
             if (mode == Mode.STAIRS) {
                 event.jump = false
@@ -214,14 +165,10 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         val userJump = event.jump
         spaceHeld = userJump
         if (mode == Mode.STAIRS) {
-            // space released: non si resetta più qui; il salto si resetta solo se colpiti
-            // The space key belongs to the module only while it is doing something with it: a step
-            // that is running, or the click it is about to make at this edge. Anywhere else — flat
-            // ground, no blocks in hand, no void in front — the player has to be able to jump exactly
-            // as if the module were off, which is what swallowing the key outright used to prevent.
-            if (phase != Phase.FLAT || (spaceHeld && me.onGround() && canPlace(me) && atEdge(me, event.directionalInput))) {
-                event.jump = false
+            if (!spaceHeld && phase != Phase.AIR) {
+                reset() // space released: only Eagle
             }
+            event.jump = false // the module jumps, at its moment
         }
         val startJump = me.onGround() && (jumpNow || (mode == Mode.STEP && userJump && phase != Phase.AIR))
         if (startJump) {
@@ -245,78 +192,54 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     private val tickHandler = handler<GameTickEvent> {
         val me = mc.player ?: return@handler
         flushPendingRender()
-        if (mc.gui.screen() != null) {
-            debug(me, "schermata aperta")
-            return@handler
+        if (phase == Phase.FLAT && !(mode == Mode.STAIRS && spaceHeld)) {
+            debug(me, "spazio non premuto: solo Eagle")
         }
-        if (me.isUsingItem) {
-            // The player is eating, or holding a bow: that use is theirs, and a click of ours would
-            // land on whatever they are using instead of on the block.
-            debug(me, "stai usando un oggetto")
-            return@handler
-        }
-        // Il salto si resetta solo se colpito da un altro giocatore, e mai mentre si è in aria.
-        if (me.hurtTime > lastHurtTime && phase != Phase.AIR) {
-            reset()
-            debug(me, "colpito: reset del salto")
-        }
-        lastHurtTime = me.hurtTime
-
-        plan = null
-        planClick = false
-        planDone = null
         when (phase) {
             Phase.AIR -> airTick(me)
-            Phase.FLAT -> if (me.onGround() && (autoClick || (mode == Mode.STAIRS && spaceHeld))) {
-                flatTick(me)
-            } else if (mode == Mode.STAIRS && !autoClick) {
-                debug(me, "spazio non premuto: solo Eagle")
-            }
+            Phase.FLAT -> if (mode == Mode.STAIRS && spaceHeld && me.onGround()) flatTick(me)
             Phase.WALK -> if (me.onGround()) walkTick(me)
         }
-        tryClick(me)
     }
 
     /** 1: at the edge, the click that puts a block behind at the level of the one under the feet. */
     private fun flatTick(me: LocalPlayer) {
-        val cell = edgeCell(me, lastKeys)
-        if (cell == null) {
+        if (!atEdge(me, lastKeys)) {
             debug(me, "piano: non sei sul bordo (tieni S verso il vuoto)")
             readyTicks = 0
             return
         }
-        if (!canPlace(me)) {
-            debug(me, "piano: nessun blocco in mano")
+        val under = underFeet(me)
+        val cell = clickCell(me) ?: run {
+            debug(me, "piano: sul bordo, ma il mirino non mette un blocco dietro (" + crosshairText() + ")")
             readyTicks = 0
             return
         }
-        val target = placement(me, cell)
-        if (target == null) {
-            debug(me, "piano: sul bordo, ma non c'è una faccia dove mettere il blocco")
+        if (cell.y != under.y) {
+            debug(me, "piano: il blocco andrebbe al livello " + cell.y + ", non a quello sotto i piedi " + under.y)
             readyTicks = 0
             return
         }
+        debug(me, "piano: clic sulla faccia laterale")
         if (readyTicks == 0) {
             delay = drawShiftDelay()
         }
-        val ready = readyTicks++ >= delay
-        debug(me, "piano: blocco in " + short(cell) + " sulla faccia " + target.direction.name.lowercase() +
-            " di " + short(target.interactedBlockPos))
-        plan = target
-        planClick = ready
-        planDone = {
-            phase = Phase.WALK
-            stepBlock = cell
-            waitTicks = 0
-            readyTicks = 0
+        if (readyTicks++ < delay) {
+            return
         }
+        click(cell)
+        phase = Phase.WALK
+        stepBlock = cell
+        waitTicks = 0
+        readyTicks = 0
     }
 
     /** 2: back onto the new block, then the jump once past its middle by JumpAt (MovementInputEvent). */
     private fun walkTick(me: LocalPlayer) {
-        val block = stepBlock ?: return
+        val block = stepBlock ?: return reset()
         if (++waitTicks > 40) {
-            debug(me, "salita: non sei arrivato sul blocco nuovo in 2 secondi (si resetta solo se colpiti)")
+            debug(me, "salita: non sei arrivato sul blocco nuovo in 2 secondi, ricomincio")
+            reset() // never got onto it
             return
         }
         // how far past the middle of the new block, along the walk
@@ -331,198 +254,126 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
 
     /** 3: in the air, the click that puts a block on top of the one jumped from. */
     private fun airTick(me: LocalPlayer) {
-        val from = stepBlock ?: return
+        val from = stepBlock ?: return reset()
         if (me.onGround()) {
             if (airTicks > 0) {
                 if (placedInAir) {
                     steps++
                 } else {
                     misses++
-                    debug(me, "aria: nessun blocco piazzato in $airTicks tick")
                 }
                 report(me)
-                // non si reset qui: il salto si resetta solo se colpiti, e mai in aria
+                reset()
             }
             return
         }
         airTicks++
-        if (placedInAir || airTicks > AIR_BUDGET) {
+        if (placedInAir || airTicks > 12) {
             return
         }
-        // Peak: the block waits until the jump stops rising, where the look also stops drifting
+        // Peak: the block waits until the jump stops rising
         if (placeTiming == Timing.PEAK && me.deltaMovement.y > 0.0) {
             return
         }
-        if (!canPlace(me)) {
-            debug(me, "aria tick $airTicks: nessun blocco in mano")
+        val cell = clickCell(me)
+        if (cell == null || cell != from.above()) {
+            debug(me, "aria tick $airTicks: il mirino non mette il blocco sopra (" + crosshairText() + ")")
             return
         }
-        val target = placement(me, from.above())
-        if (target == null) {
-            debug(me, "aria tick $airTicks: non c'è una faccia sopra il blocco di partenza")
+        if (readyTicks++ < delay) {
             return
         }
-        plan = target
-        planClick = readyTicks++ >= delay
-        planDone = {
-            placedInAir = true
-            airTickSum += airTicks
-            debug(me, "aria tick $airTicks: blocco sopra " + short(from))
-        }
+        click(cell)
+        debug(me, "aria tick $airTicks: clic sulla faccia di sopra")
+        placedInAir = true
+        airTickSum += airTicks
     }
-
-    /**
-     * The click, and the only thing that gates it: the look the server has — with no aim of any kind
-     * in this module, the camera's own — has to trace onto exactly that face, on exactly that block
-     * ([clickWouldLand]). When it does, the use packet leaves; when it does not, nothing leaves and
-     * the step is retried on the next tick. No rotation is ever asked for, so a click is never
-     * justified by a look the player did not make: bridge looking at the edge, as a hand would.
-     */
-    private fun tryClick(me: LocalPlayer) {
-        val target = plan
-        if (target == null || !planClick || !canPlace(me)) {
-            return
-        }
-        if (!clickWouldLand(target)) {
-            debug(me, "il tuo look non è sulla faccia di " + short(target.placedBlock) + ": il click aspetta")
-            return
-        }
-        debug(me, "click senza mira: il tuo look è già sulla faccia")
-        place(me, target, planDone)
-        plan = null
-    }
-
-    /** The click itself: the vanilla right click on that face, with the look that asked for it. */
-    private fun place(me: LocalPlayer, target: BlockPlacementTarget, onPlaced: (() -> Unit)?) {
-        val hand = placeHand(me) ?: return
-        val level = mc.level ?: return
-        if (!level.getBlockState(target.placedBlock).canBeReplaced()) {
-            return
-        }
-        pending[target.placedBlock] = 0
-        runCatching {
-            doPlacement(target.blockHitResult, RotationManager.serverRotation, hand, swingMode = swingMode)
-        }
-        onPlaced?.invoke()
-    }
-
-    /**
-     * True when a ray leaving the eye with the look the server has still lands on the face this click
-     * wants.
-     *
-     * The player keeps moving between the look and the click — the whole point of the step is a body
-     * in the air — so a face that left the reach, or one the look drifted off while the player was
-     * rising, is retried on the next tick instead of being clicked blind.
-     */
-    private fun clickWouldLand(target: BlockPlacementTarget): Boolean {
-        val hit = target.verifyClick(
-            rotation = RotationManager.serverRotation,
-            range = range.toDouble(),
-            trace = ClickTrace.TARGET_SHAPE,
-        ) ?: return false
-        return target.doesCrosshairTargetMatchRequirements(hit)
-    }
-
-    /**
-     * What a click that fills [cell] has to know, or null when there is nothing to click: the cell has
-     * to be free and out of the player's own box, and one of its neighbours has to have a face that
-     * puts a block there — the target finding of LiquidBounce decides which one, the same way its own
-     * Scaffold does.
-     */
-    private fun placement(me: LocalPlayer, cell: BlockPos): BlockPlacementTarget? {
-        val level = mc.level ?: return null
-        if (!level.getBlockState(cell).canBeReplaced()) {
-            return null
-        }
-        if (me.boundingBox.intersects(AABB(cell))) {
-            return null
-        }
-        val hand = placeHand(me) ?: return null
-        val target = findBestBlockPlacementTarget(
-            cell,
-            BlockPlacementTargetFindingOptions(
-                BlockOffsetOptions.Default,
-                FaceHandlingOptions(CenterTargetPositionFactory),
-                stackToPlaceWith = me.getItemInHand(hand),
-                PlayerLocationOnPlacement(),
-            )
-        ) ?: return null
-        // A face further than the click may reach is a face the server would refuse, however good the
-        // look at it is.
-        return target.takeIf { me.eyePosition.distanceTo(target.interactionPoint) <= range }
-    }
-
-    /** The hand with a block in it, or null when the player is holding something else. */
-    private fun placeHand(me: LocalPlayer): InteractionHand? =
-        InteractionHand.entries.firstOrNull { me.getItemInHand(it).item is BlockItem }
-
-    /** Whether there is anything to place with at all. */
-    private fun canPlace(me: LocalPlayer) = placeHand(me) != null
 
     private fun report(me: LocalPlayer) {
         if (!chatLog) {
             return
         }
         if (!placedInAir) {
-            me.sendSystemMessage(Component.literal("§7[ScaffoldLegit] gradino mancato: " +
-                "servono dei blocchi in mano e un bordo davanti a te"))
+            me.sendSystemMessage(Component.literal("§7[EagleUpTest] gradino mancato: tieni la visuale ferma, in basso "
+                    + "verso il ponte (circa 80 gradi)"))
         } else if (steps % 5 == 0) {
-            me.sendSystemMessage(Component.literal("§7[ScaffoldLegit] gradini $steps (mancati $misses), tick salto medio " +
-                "%.2f, %s, shift %d-%d, jump %d-%d".format(
-                    airTickSum.toDouble() / steps, placeTiming.tag,
-                    shiftDelay.first, shiftDelay.last, jumpDelay.first, jumpDelay.last
-                )))
+            me.sendSystemMessage(Component.literal("§7[EagleUpTest] gradini $steps (mancati $misses), tick salto medio "
+                    + "%.2f, %s, shift %d-%d, jump %d-%d".format(
+                airTickSum.toDouble() / steps, placeTiming.tag,
+                shiftDelay.first, shiftDelay.last, jumpDelay.first, jumpDelay.last
+            )))
         }
+    }
+
+    /**
+     * The cell the block would go into if the use key were pressed now (crosshair refreshed), if it is useful for
+     * the bridge: free, below the feet's level, next to the player's footprint and not inside the player; else null.
+     */
+    private fun clickCell(me: LocalPlayer): BlockPos? {
+        pickMethod?.let { method -> runCatching { method.invoke(mc, 1.0f) } }
+        val hit = mc.hitResult as? BlockHitResult ?: return null
+        if (hit.type != HitResult.Type.BLOCK) {
+            return null
+        }
+        val cell = hit.blockPos.relative(hit.direction)
+        if (cell.y > floor(me.y + 1.0e-3).toInt() - 1) {
+            return null
+        }
+        val cellBox = AABB(cell)
+        val box = me.boundingBox
+        if (box.intersects(cellBox) || !box.inflate(0.6, 0.0, 0.6).intersects(cellBox.minX, box.minY - 3.0, cellBox.minZ,
+                cellBox.maxX, box.maxY, cellBox.maxZ)) {
+            return null
+        }
+        val level = mc.level ?: return null
+        return if (level.getBlockState(cell).canBeReplaced()) cell else null
+    }
+
+    /** Debug: what is under the crosshair (block and face). */
+    private fun crosshairText(): String {
+        val hit = mc.hitResult as? BlockHitResult ?: return "niente"
+        if (hit.type != HitResult.Type.BLOCK) {
+            return "niente"
+        }
+        return "faccia " + hit.direction.name.lowercase() + " del blocco " + hit.blockPos.x + " " + hit.blockPos.y + " " +
+                hit.blockPos.z + ", pitch " + "%.0f".format(mc.player?.xRot ?: 0f)
     }
 
     /** Debug: one chat line whenever what the module waits for changes. */
     private fun debug(me: LocalPlayer, text: String) {
         if (debug && text != lastDebug) {
             lastDebug = text
-            me.sendSystemMessage(Component.literal("§8[ScaffoldLegit D] §7$text"))
+            me.sendSystemMessage(Component.literal("§8[EagleUpTest D] §7$text"))
         }
     }
 
     /** The walking direction of [keys] in the world (Entity.moveRelative), or nothing if no key. */
     private fun walkDirection(me: LocalPlayer, keys: DirectionalInput) {
-        val vector = walkVector(me, keys) ?: return
-        walkX = vector.first
-        walkZ = vector.second
-    }
-
-    /** Where [keys] push, as a unit vector on the ground, or null when the player is not walking. */
-    private fun walkVector(me: LocalPlayer, keys: DirectionalInput): Pair<Double, Double>? {
         val forward = (if (keys.forwards) 1.0 else 0.0) - (if (keys.backwards) 1.0 else 0.0)
         val strafe = (if (keys.left) 1.0 else 0.0) - (if (keys.right) 1.0 else 0.0)
         val length = hypot(forward, strafe)
         if (length < 1e-6) {
-            return null
+            return
         }
         val yaw = Math.toRadians(me.yRot.toDouble())
-        return ((strafe * cos(yaw) - forward * sin(yaw)) / length) to
-            ((forward * cos(yaw) + strafe * sin(yaw)) / length)
+        walkX = (strafe * cos(yaw) - forward * sin(yaw)) / length
+        walkZ = (forward * cos(yaw) + strafe * sin(yaw)) / length
     }
 
-    /** Eagle: the block under the point [edgeNow] ahead, along where the keys push, is air. */
-    private fun atEdge(me: LocalPlayer, keys: DirectionalInput) = edgeCell(me, keys) != null
+    /** One right click for this tick's handleKeybinds, as if the player had pressed the use key. */
+    private fun click() {
+        val key = mc.options.keyUse
+        clickCount.setInt(key, clickCount.getInt(key) + 1)
+    }
 
     /**
-     * The cell over the void in front of the player, at the level of the block under the feet: the one
-     * the bridge has to fill. Null when the player is not walking, or that cell is not free.
+     * The click of [cell], with the box watched from now on: [flushPendingRender] adds it to the
+     * [renderer] as soon as the block is really in the world, whatever placed it.
      */
-    private fun edgeCell(me: LocalPlayer, keys: DirectionalInput): BlockPos? {
-        val vector = walkVector(me, keys) ?: return null
-        val level = mc.level ?: return null
-        val cell = BlockPos.containing(
-            me.x + vector.first * edgeNow,
-            me.y - 0.5,
-            me.z + vector.second * edgeNow
-        )
-        return if (level.getBlockState(cell).isAir) cell else null
+    private fun click(cell: BlockPos) {
+        pending[cell] = 0
+        click()
     }
-
-    /** The block the player is standing on: the one under the feet, not the one they are inside. */
-    private fun underFeet(me: LocalPlayer): BlockPos = BlockPos.containing(me.x, me.y - 0.5, me.z)
 
     /**
      * Adds the box for the cells that were clicked a moment ago and now hold a block. A cell whose
@@ -550,6 +401,9 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         }
     }
 
+    /** The block the player is standing on: the one under the feet, not the one they are inside. */
+    private fun underFeet(me: LocalPlayer): BlockPos = BlockPos.containing(me.x, me.y - 0.5, me.z)
+
     // Estrae un ritardo casuale nell'intervallo dello slider
     private fun drawShiftDelay(): Int {
         val min = shiftDelay.first
@@ -570,6 +424,20 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         return if (max > min) Random.nextDouble(min.toDouble(), max.toDouble()).toFloat() else min
     }
 
-    /** "12 -34 5", for the debug lines. */
-    private fun short(pos: BlockPos) = pos.x.toString() + " " + pos.y + " " + pos.z
+    /** Eagle: the block below the point EdgeDistance ahead, along where the keys push, is air. */
+    private fun atEdge(me: LocalPlayer, keys: DirectionalInput): Boolean {
+        val forward = (if (keys.forwards) 1.0 else 0.0) - (if (keys.backwards) 1.0 else 0.0)
+        val strafe = (if (keys.left) 1.0 else 0.0) - (if (keys.right) 1.0 else 0.0)
+        val length = hypot(forward, strafe)
+        if (length < 1e-6) {
+            return false
+        }
+        val yaw = Math.toRadians(me.yRot.toDouble())
+        val dx = (strafe * cos(yaw) - forward * sin(yaw)) / length
+        val dz = (forward * cos(yaw) + strafe * sin(yaw)) / length
+        val level = mc.level ?: return false
+        val currentDistance = getEdgeDistance()
+        val below = BlockPos.containing(me.x + dx * currentDistance, me.y - 0.5, me.z + dz * currentDistance)
+        return level.getBlockState(below).isAir
+    }
 }
