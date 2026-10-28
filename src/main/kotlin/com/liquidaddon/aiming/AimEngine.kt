@@ -203,16 +203,6 @@ internal interface AimSettings {
     val predictSize: Int
     val onlyOnCrosshair: Boolean
     val turnCheck: Boolean
-
-    /**
-     * Cap of the **vertical** step, in degrees per tick.
-     *
-     * The default is the one the assist was tuned with ([PITCH_STEP_MAX]): a hand that snaps its
-     * pitch 20° in one tick is not a hand. A module whose whole point is to look *down* in the few
-     * ticks a fall leaves — `Clutch` — needs the pitch to travel with the same budget as the yaw,
-     * or the aim simply never gets to the face it is supposed to click.
-     */
-    val maxPitchStep: Float get() = PITCH_STEP_MAX
     val friction: Float
     val deadZone: Float
     val reactionDelay: Int
@@ -643,11 +633,11 @@ internal class AimassistCore(
     /**
      * A world **point** to aim at, instead of an entity, or `null`.
      *
-     * A clutch is not aimed at an entity: it is aimed at the face of a block, and everything the
-     * engine does with a rotation — the strength, the cap, the mouse lattice with its carried
-     * residual, the hand on top of it, the model under `Engine = AI`, the frame interpolation, the
-     * silent request — is exactly what a block placement wants too. With a provider, the point is
-     * the goal and the scan is skipped; the engine lets go the tick the provider returns `null`.
+     * A block placement is not aimed at an entity: it is aimed at a point on the face of a block,
+     * and everything the engine does with a rotation — the strength, the cap, the mouse lattice with
+     * its carried residual, the hand on top of it, the model under `Engine = AI`, the frame
+     * interpolation, the silent request — is what a placement wants too. With a provider, the point
+     * is the goal and the scan is skipped; the engine lets go the tick the provider returns `null`.
      */
     private val forcedPoint: ((LocalPlayer) -> Vec3?)? = null,
     /**
@@ -698,7 +688,6 @@ internal class AimassistCore(
     private val mouseNoise get() = values.mouseNoise
     private val overshoot get() = values.overshoot
     private val strengthSpread get() = values.strengthSpread
-    private val maxPitchStep get() = values.maxPitchStep
 
     /** Share of the remaining angle a step covers: [strength], spread per target ([strengthSpread]). */
     private val pull get() = (strength / 100f) * strengthScale
@@ -1250,7 +1239,7 @@ internal class AimassistCore(
         // number twice.
         val pitchLimit = minOf(
             maxSpeed * 0.7f,
-            maxPitchStep * (0.85f + Random.nextFloat() * 0.15f)
+            PITCH_STEP_MAX * (0.85f + Random.nextFloat() * 0.15f)
         )
         applyAim(me, aim, softLimit(stepYaw, maxSpeed), softLimit(stepPitch, pitchLimit), target)
     }
@@ -2121,8 +2110,8 @@ internal class AimassistCore(
         if (gcdFix && mouseNoise <= 0) {
             append(" §cMouseNoise 0 (every delta repeats: Distinct flag)")
         }
-        if (maxSpeed * 0.7f > maxPitchStep + 0.01f) {
-            append(" §7pitch limited to %.1f°/tick".format(maxPitchStep))
+        if (maxSpeed * 0.7f > PITCH_STEP_MAX + 0.01f) {
+            append(" §7pitch limited to %.1f°/tick".format(PITCH_STEP_MAX))
         }
         if (engine == Engine.AI && aiUnavailableReason != null) {
             append(" §cAI fallback (${aiUnavailableReason})")
