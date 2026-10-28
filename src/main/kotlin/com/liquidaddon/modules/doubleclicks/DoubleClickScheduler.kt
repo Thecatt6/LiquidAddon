@@ -1,8 +1,9 @@
 package com.liquidaddon.modules.doubleclicks
 
-/** A follow-up is either the vanilla attack path or the swing animation alone. */
+/** A follow-up is the vanilla attack path, the vanilla use path, or the swing animation alone. */
 internal enum class ExtraClick {
     ATTACK,
+    USE,
     SWING_ONLY,
 }
 
@@ -80,3 +81,15 @@ internal fun extraClickAction(
 } else {
     ExtraClick.SWING_ONLY
 }
+
+/**
+ * The right button has no animation to fall back on, so a use that cannot run is dropped instead of
+ * being turned into a swing. Vanilla itself refuses a use while a block is being destroyed, while an
+ * item is already in use and while the hands are busy (a vehicle); the same rules apply here.
+ */
+internal fun useExtraAllowed(
+    planned: ExtraClick,
+    handsBusy: Boolean,
+    usingItem: Boolean,
+    mining: Boolean,
+): Boolean = planned == ExtraClick.USE && !handsBusy && !usingItem && !mining
