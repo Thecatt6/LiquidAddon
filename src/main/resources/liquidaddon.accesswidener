@@ -10,6 +10,9 @@ accessible field net/minecraft/client/Minecraft missTime I
 # DoubleClicks runs a follow-up through the same vanilla attack path as a real key press.
 accessible method net/minecraft/client/Minecraft startAttack ()Z
 
+# Same for the right button: the follow-up is the use `handleKeybinds` performs for the use key.
+accessible method net/minecraft/client/Minecraft startUseItem ()V
+
 # Read by TriggerBotPlus (PrePress = Key): `KeyMapping.click` needs the bound key, which is exposed
 # to LiquidBounce by this very same entry in its own access widener.
 accessible field net/minecraft/client/KeyMapping key Lcom/mojang/blaze3d/platform/InputConstants$Key;

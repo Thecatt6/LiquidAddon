@@ -5,7 +5,8 @@
   "compatibilityLevel": "JAVA_25",
   "client": [
     "MixinExampleTitleScreen",
-    "MixinMinecraftAttack"
+    "MixinMinecraftAttack",
+    "MixinMinecraftUse"
   ],
   "injectors": {
     "defaultRequire": 1

@@ -72,7 +72,8 @@ compiles and then fails on every Minecraft call.
 
 ## DoubleClicks
 
-`DoubleClicks` adds **1–3** follow-up clicks to each attack-key click (`ExtraClicks`, default 1).
+`DoubleClicks` adds **1–3** follow-up clicks to each real click (`ExtraClicks`, default 1): the left
+button (attack) and, with `RightClick` (default on), the right button (use/place) as well.
 `Delay` is at least one game tick (default 1), so follow-ups are not sent in the original click's
 input batch. The queue holds at most three follow-ups; very fast clicks can therefore drop some
 rather than leave a long backlog. It works on the ground and in the air, and also follows rebound
@@ -86,6 +87,15 @@ cooldown are not copied at all. Opening a screen, changing worlds, or disabling 
 pending clicks. Clicks queued by another clicker (LiquidBounce's AutoClicker) are followed too,
 so its CPS doubles as well. Other modules and the server can still affect clicks, and no setting
 guarantees that an anti-cheat will not flag them.
+
+The right button works the same way: the follow-up is the vanilla use path, so it can place the next
+block, throw the next pearl or interact again. Only **one follow-up leaves per tick in total**, left
+or right, and the left queue is drained first; with three left follow-ups still pending a right
+click can therefore wait a tick or two longer. It is dropped (not
+turned into an animation) while a block is being mined, while an item is already in use and while
+the hands are busy in a vehicle, because vanilla refuses a use in exactly those cases. Consumables
+with a use duration (food, potions, bows) are therefore not doubled: the first use already put the
+item in use. Turn `RightClick` off to leave the right button alone.
 
 ## What the example covers
 

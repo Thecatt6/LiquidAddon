@@ -2,7 +2,9 @@ package com.liquidaddon.modules.doubleclicks
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class DoubleClickSchedulerTest {
     @Test
@@ -78,6 +80,31 @@ class DoubleClickSchedulerTest {
         assertEquals(ExtraClick.SWING_ONLY, extraClickAction(ExtraClick.ATTACK, true, true, false))
         assertEquals(ExtraClick.SWING_ONLY, extraClickAction(ExtraClick.ATTACK, true, false, true))
         assertEquals(ExtraClick.ATTACK, extraClickAction(ExtraClick.ATTACK, true, false, false))
+    }
+
+    @Test
+    fun `right and left follow-ups keep their own kind`() {
+        val left = DoubleClickScheduler()
+        val right = DoubleClickScheduler()
+        left.recordOriginal(1, ExtraClick.ATTACK)
+        right.recordOriginal(3, ExtraClick.USE)
+
+        assertNull(left.takeNext(1))
+        assertNull(right.takeNext(1))
+        assertEquals(ExtraClick.ATTACK, left.takeNext(1))
+        repeat(3) { assertEquals(ExtraClick.USE, right.takeNext(1)) }
+        assertNull(left.takeNext(1))
+        assertNull(right.takeNext(1))
+    }
+
+    @Test
+    fun `a use that vanilla would refuse is dropped, never turned into a swing`() {
+        assertTrue(useExtraAllowed(ExtraClick.USE, false, false, false))
+        assertFalse(useExtraAllowed(ExtraClick.USE, true, false, false))
+        assertFalse(useExtraAllowed(ExtraClick.USE, false, true, false))
+        assertFalse(useExtraAllowed(ExtraClick.USE, false, false, true))
+        assertFalse(useExtraAllowed(ExtraClick.ATTACK, false, false, false))
+        assertFalse(useExtraAllowed(ExtraClick.SWING_ONLY, false, false, false))
     }
 
     @Test

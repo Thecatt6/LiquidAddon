@@ -4,6 +4,7 @@ import com.liquidaddon.Categories
 import com.liquidaddon.modules.doubleclicks.DoubleClickScheduler
 import com.liquidaddon.modules.doubleclicks.ExtraClick
 import com.liquidaddon.modules.doubleclicks.extraClickAction
+import com.liquidaddon.modules.doubleclicks.useExtraAllowed
 import net.ccbluex.liquidbounce.event.events.GameTickEvent
 import net.ccbluex.liquidbounce.event.events.InputHandleEvent
 import net.ccbluex.liquidbounce.event.events.ScreenEvent
@@ -19,28 +20,37 @@ import net.minecraft.world.InteractionHand
 import net.minecraft.world.phys.HitResult
 
 /**
- * Adds one to three follow-ups to each actual attack-key click, after the original has been handled.
- * The hook is on Minecraft.startAttack rather than AttackEntityEvent: clicks on air and blocks, a
- * rebound attack key, and clicks queued by another clicker all take the same vanilla input path.
+ * Adds one to three follow-ups to each real click, after the original has been handled: left click
+ * (attack key) and, with [rightClick], right click (use key) as well.
  *
- * Follow-ups are spaced across input ticks, never recursively copied. Only a click whose current
- * crosshair is an entity repeats the vanilla attack path. A block (or active mining), a miss and a
- * click swallowed by the miss cooldown get the swing animation alone: calling startAttack there
- * would start destroy actions, set a new miss cooldown, or do nothing at all. This keeps the module
- * from adding block-dig packets of its own, but it cannot guarantee an anti-cheat accepts the clicks.
+ * Both hooks sit on the vanilla input path, `Minecraft.startAttack` and `Minecraft.startUseItem`,
+ * rather than on LiquidBounce events: clicks on air and blocks, a rebound key, and clicks queued by
+ * another clicker all take that same path.
+ *
+ * Follow-ups are spaced across input ticks, never recursively copied, and at most one extra is sent
+ * per tick. A left click only repeats the vanilla attack when the crosshair is on an entity; a block
+ * (or active mining), a miss and a click swallowed by the miss cooldown get the swing animation
+ * alone. A right click repeats the vanilla use only when vanilla would accept it (not mining, not
+ * already using an item, hands free); otherwise it is dropped, because the right button has no
+ * animation to fall back on. Nothing here can guarantee an anti-cheat accepts the extra clicks.
  */
 object ModuleDoubleClicks : ClientModule("DoubleClicks", Categories.LIQUIDADDON) {
     private val extraClicks by int("ExtraClicks", 1, 1..DoubleClickScheduler.MAX_EXTRA_CLICKS, "clicks")
     private val delay by int("Delay", 1, 1..5, "ticks")
+    private val rightClick by boolean("RightClick", true)
     private val debug by boolean("Debug", false)
 
-    private val scheduler = DoubleClickScheduler()
+    // One queue per button, so each keeps its own kind and count. Only one follow-up leaves per
+    // tick, whichever button it belongs to: that is what keeps two interactions out of one tick.
+    private val attackScheduler = DoubleClickScheduler()
+    private val useScheduler = DoubleClickScheduler()
+
     private var sendingExtra = false
     private var queuedPlayer: LocalPlayer? = null
     private var queuedWorld: ClientLevel? = null
 
     override val tag: String
-        get() = "+$extraClicks"
+        get() = if (rightClick) "+$extraClicks/+$extraClicks" else "+$extraClicks"
 
     override fun onEnabled() = reset()
 
@@ -63,18 +73,32 @@ object ModuleDoubleClicks : ClientModule("DoubleClicks", Categories.LIQUIDADDON)
         val world = mc.level ?: return
         val gameMode = mc.gameMode ?: return
         val hit = mc.hitResult ?: return
-        if (queuedPlayer !== me || queuedWorld !== world) {
-            reset()
-            queuedPlayer = me
-            queuedWorld = world
-        }
+        bind(me, world)
 
         val kind = if (hit.type == HitResult.Type.BLOCK || gameMode.isDestroying) {
             ExtraClick.SWING_ONLY
         } else {
             ExtraClick.ATTACK
         }
-        scheduler.recordOriginal(extraClicks, kind)
+        attackScheduler.recordOriginal(extraClicks, kind)
+    }
+
+    /** Called by the Minecraft.startUseItem RETURN mixin, not by our synthetic follow-up. */
+    fun onGameUse() {
+        if (!running || !rightClick || sendingExtra) return
+        if (!canClick()) {
+            reset()
+            return
+        }
+
+        val me = mc.player ?: return
+        val world = mc.level ?: return
+        val gameMode = mc.gameMode ?: return
+        // Vanilla returns before touching anything in these two cases, so there was no use to copy.
+        if (gameMode.isDestroying || mc.hitResult == null) return
+        bind(me, world)
+
+        useScheduler.recordOriginal(extraClicks, ExtraClick.USE)
     }
 
     @Suppress("unused")
@@ -85,8 +109,10 @@ object ModuleDoubleClicks : ClientModule("DoubleClicks", Categories.LIQUIDADDON)
         }
 
         // InputHandleEvent is at the end of vanilla's handleKeybinds. A newly recorded original
-        // consumes this tick, so the first extra can only run on a later tick.
-        val planned = scheduler.takeNext(delay) ?: return@handler
+        // consumes this tick, so the first extra can only run on a later tick. One follow-up per
+        // tick in total: the left queue is drained first, so a right click can wait a tick longer
+        // when three left follow-ups are still pending.
+        val planned = attackScheduler.takeNext(delay) ?: useScheduler.takeNext(delay) ?: return@handler
         sendExtra(planned)
     }
 
@@ -108,9 +134,17 @@ object ModuleDoubleClicks : ClientModule("DoubleClicks", Categories.LIQUIDADDON)
     @Suppress("unused")
     private val worldHandler = handler<WorldChangeEvent> { reset() }
 
+    private fun bind(me: LocalPlayer, world: ClientLevel) {
+        if (queuedPlayer !== me || queuedWorld !== world) {
+            reset()
+            queuedPlayer = me
+            queuedWorld = world
+        }
+    }
+
     private fun canClick(): Boolean {
         val me = mc.player ?: return false
-        // The same conditions vanilla needs before it looks at the attack key.
+        // The same conditions vanilla needs before it looks at the attack or use key.
         return mc.level != null && mc.gameMode != null && mc.connection != null &&
             mc.hitResult != null && mc.gui.screen() == null && mc.gui.overlay() == null &&
             mc.mouseHandler.isMouseGrabbed && mc.isWindowActive &&
@@ -119,6 +153,11 @@ object ModuleDoubleClicks : ClientModule("DoubleClicks", Categories.LIQUIDADDON)
 
     private fun sendExtra(planned: ExtraClick) {
         val me = mc.player ?: return
+        if (planned == ExtraClick.USE) {
+            sendUseExtra(me)
+            return
+        }
+
         val gameMode = mc.gameMode ?: return
         val hit = mc.hitResult ?: return
         val noMissCooldown = ModuleNoMissCooldown.running
@@ -148,13 +187,39 @@ object ModuleDoubleClicks : ClientModule("DoubleClicks", Categories.LIQUIDADDON)
         if (debug) {
             val type = if (action == ExtraClick.ATTACK) "attacco" else "swing"
             me.sendSystemMessage(
-                Component.literal("§8[DoubleClicks] §7extra $type, in coda ${scheduler.pendingCount}")
+                Component.literal("§8[DoubleClicks] §7extra $type, in coda ${attackScheduler.pendingCount}")
+            )
+        }
+    }
+
+    /** Second use of the right button: the same path `handleKeybinds` takes for the use key. */
+    private fun sendUseExtra(me: LocalPlayer) {
+        val gameMode = mc.gameMode ?: return
+        val allowed = useExtraAllowed(
+            planned = ExtraClick.USE,
+            handsBusy = me.isHandsBusy,
+            usingItem = me.isUsingItem,
+            mining = gameMode.isDestroying,
+        )
+        if (!allowed || mc.hitResult == null) return
+
+        sendingExtra = true
+        try {
+            mc.startUseItem()
+        } finally {
+            sendingExtra = false
+        }
+
+        if (debug) {
+            me.sendSystemMessage(
+                Component.literal("§8[DoubleClicks] §7extra uso, in coda ${useScheduler.pendingCount}")
             )
         }
     }
 
     private fun reset() {
-        scheduler.clear()
+        attackScheduler.clear()
+        useScheduler.clear()
         queuedPlayer = null
         queuedWorld = null
     }
