@@ -6,7 +6,7 @@ import net.ccbluex.liquidbounce.config.types.group.ValueGroup
  * The settings of `ScaffoldLegit`: the aimbot's rotation engine, tuned for looking at a block face
  * only when a click needs it.
  *
- * The engine is the same one `Aimassist`, `AimbotAI`, `FireballDeflect` and `Clutch` run
+ * The engine is the same one `Aimassist`, `AimbotAI` and `FireballDeflect` run
  * ([AimassistCore]) — the mouse-count lattice with its carried residual, the hand on top of it, the
  * model LiquidBounce already trained under `Engine = AI`, the per-tick pitch limit, the frame
  * interpolation and the silent rotation through `RotationManager` with `MoveFix`. Nothing about
@@ -18,7 +18,7 @@ import net.ccbluex.liquidbounce.config.types.group.ValueGroup
  * the engine wants for a forced point, and the GUI shows only the hand: how fast the look travels,
  * which curve (or the model) drives it, and the hygiene that keeps the packets looking like a mouse.
  *
- * The tuning is the one of a bridge, and it is calmer than a clutch's:
+ * The tuning is the one of a bridge, and it is calm:
  *
  *  - **no lead**: a face does not move, so `Predict` is zero;
  *  - **`AimSpeed 90`, `Strength 100`**: the look has to be on the face within a tick or two, because
