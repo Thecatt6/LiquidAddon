@@ -195,6 +195,9 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     private var walkZ = 0.0
     private var lastDebug = ""
 
+    /** L'hurtTime dell'ultimo tick: serve a rilevare quando il giocatore subisce danno. */
+    private var lastHurtTime = 0
+
     private var steps = 0
     private var misses = 0
     private var airTickSum = 0
@@ -254,9 +257,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         val userJump = event.jump
         spaceHeld = userJump
         if (mode == Mode.STAIRS) {
-            if (!spaceHeld && !autoClick) {
-                reset() // space released and the bridge is driven by the key: only Eagle
-            }
+            // space released: non si resetta più qui; il salto si resetta solo se colpiti
             // The space key belongs to the module only while it is doing something with it: a step
             // that is running, or the click it is about to make at this edge. Anywhere else — flat
             // ground, no blocks in hand, no void in front — the player has to be able to jump exactly
@@ -299,6 +300,13 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
             aimPoint = null
             return@handler
         }
+        // Il salto si resetta solo se colpito da un altro giocatore, e mai mentre si è in aria.
+        if (me.hurtTime > lastHurtTime && phase != Phase.AIR) {
+            reset()
+            debug(me, "colpito: reset del salto")
+        }
+        lastHurtTime = me.hurtTime
+
         plan = null
         planClick = false
         planDone = null
@@ -360,10 +368,9 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
 
     /** 2: back onto the new block, then the jump once past its middle by JumpAt (MovementInputEvent). */
     private fun walkTick(me: LocalPlayer) {
-        val block = stepBlock ?: return reset()
+        val block = stepBlock ?: return
         if (++waitTicks > 40) {
-            debug(me, "salita: non sei arrivato sul blocco nuovo in 2 secondi, ricomincio")
-            reset() // never got onto it
+            debug(me, "salita: non sei arrivato sul blocco nuovo in 2 secondi (si resetta solo se colpiti)")
             return
         }
         // how far past the middle of the new block, along the walk
@@ -378,7 +385,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
 
     /** 3: in the air, the click that puts a block on top of the one jumped from. */
     private fun airTick(me: LocalPlayer) {
-        val from = stepBlock ?: return reset()
+        val from = stepBlock ?: return
         if (me.onGround()) {
             if (airTicks > 0) {
                 if (placedInAir) {
@@ -388,7 +395,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
                     debug(me, "aria: nessun blocco piazzato in $airTicks tick")
                 }
                 report(me)
-                reset()
+                // non si reset qui: il salto si resetta solo se colpiti, e mai in aria
             }
             return
         }
