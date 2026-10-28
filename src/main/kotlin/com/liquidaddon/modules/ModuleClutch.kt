@@ -169,18 +169,21 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
     // --- when it works ----------------------------------------------------------------------
 
     /**
-     * Falling, with nothing to land on right below.
+     * Airborne over the void: nothing to land on within [SUPPORT_DEPTH] blocks.
      *
-     * The support check is fixed at two blocks: closer than that you are already landing and a block
-     * there would only be a block thrown away.
+     * This is deliberately *not* "already falling": the aim has to be down there **before** the fall
+     * starts, or the few ticks the pitch needs are ticks the fall does not give. A player who is
+     * about to clutch looks down first, and so does this.
+     *
+     * The support distance is fixed at two blocks: closer than that you are already landing, and a
+     * block there would only be a block thrown away.
      */
-    private fun falling(me: LocalPlayer): Boolean {
+    private fun overVoid(me: LocalPlayer): Boolean {
         if (mc.gameMode == null || me.isSpectator) return false
         if (me.onGround()) return false
-        if (me.deltaMovement.y >= -0.02) return false
         if (me.isInWater || me.isInLava) return false
-        // One block of fall: a step down is not a clutch.
-        if (me.fallDistance < 0.5) return false
+        // Still going up (a jump): not a fall yet, and the aim is not pushed down for nothing.
+        if (me.deltaMovement.y >= 0.1) return false
 
         for (depth in 1..SUPPORT_DEPTH) {
             val pos = BlockPos.containing(me.x, me.y - depth, me.z)
@@ -189,6 +192,10 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
         }
         return true
     }
+
+    /** Actually coming down: only now is a click allowed. */
+    private fun clutching(me: LocalPlayer): Boolean =
+        overVoid(me) && me.deltaMovement.y < -0.02
 
     // --- the plan ---------------------------------------------------------------------------
 
@@ -200,7 +207,7 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
             return
         }
 
-        if (!falling(me)) {
+        if (!overVoid(me)) {
             clearPlan()
             status = "non sto cadendo"
             return
@@ -380,6 +387,8 @@ object ModuleClutch : ClientModule("Clutch", Categories.LIQUIDADDON) {
      */
     private fun tryPlace(me: LocalPlayer) {
         val target = plan ?: return
+        // The aim may already be down there while the fall has not really started: the click waits.
+        if (!clutching(me)) return
         if (me.tickCount - lastPlaceTick < placeCooldown) return
 
         if (!clickable(me, target)) {
