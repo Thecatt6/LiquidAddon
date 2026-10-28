@@ -155,5 +155,14 @@
   "liquidbounce.module.scaffoldLegit.value.swing.description": "The swing of the click, and whether the client, the server, or both get to see it.",
   "liquidbounce.module.scaffoldLegit.value.rotations.description": "How the look travels to the block: the same engine the Aimassist uses. Angle Smooth decides how fast it turns (at 180 deg/tick it snaps, which is exactly what a hand does not do), Reset Threshold how close to the face it has to get, and Movement Correction whether the walk is derived from the look - Silent keeps the server's picture consistent, Off leaves the walk to the keys.",
   "liquidbounce.module.scaffoldLegit.value.chatLog.description": "Print the running total every five steps, with the misses and the average jump.",
-  "liquidbounce.module.scaffoldLegit.value.debug.description": "Print what the module is waiting for, whenever that changes."
+  "liquidbounce.module.scaffoldLegit.value.debug.description": "Print what the module is waiting for, whenever that changes.",
+  "liquidbounce.module.cpsBooster.description": "Turns one left click into up to Multiplier attacks on the same target. The follow-ups wait for the moment the server would take them (the target's half second of invulnerability is over, the weapon is charged), so the window is never missed. It cannot raise the damage on a single target past about two hits a second - that is the server's limit, not the module's - what it does is never waste a click, and never lose a hit in a fight against several enemies.",
+  "liquidbounce.module.cpsBooster.value.multiplier.description": "How many attacks one click becomes. 2 doubles the clicks, 3 triples them.",
+  "liquidbounce.module.cpsBooster.value.spread.description": "Ticks between one attack and the next, drawn at random in the range. The default sits just past the ten ticks a target is invulnerable, where a follow-up really lands.",
+  "liquidbounce.module.cpsBooster.value.maxCps.description": "Hard ceiling on the attacks this module produces, counted over the last second. Keep it at a rate a hand could keep up.",
+  "liquidbounce.module.cpsBooster.value.onlyWhenItLands.description": "Hold a follow-up until the server would accept it. Off, most follow-ups are sent inside the target's invulnerability and answered with nothing.",
+  "liquidbounce.module.cpsBooster.value.minCooldown.description": "Minimum attack strength (the 1.9+ weapon cooldown) before a follow-up goes out.",
+  "liquidbounce.module.cpsBooster.value.reach.description": "How far a follow-up may reach. The server measures its own distance, and its own is 3.0.",
+  "liquidbounce.module.cpsBooster.value.swing.description": "The swing of the follow-up, and whether the client, the server, or both get to see it.",
+  "liquidbounce.module.cpsBooster.value.debug.description": "Print the running total every ten follow-ups."
 }
