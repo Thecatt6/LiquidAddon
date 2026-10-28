@@ -4,7 +4,8 @@
   "package": "com.liquidaddon.mixin",
   "compatibilityLevel": "JAVA_25",
   "client": [
-    "MixinExampleTitleScreen"
+    "MixinExampleTitleScreen",
+    "MixinMinecraftAttack"
   ],
   "injectors": {
     "defaultRequire": 1
