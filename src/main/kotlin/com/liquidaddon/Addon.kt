@@ -13,7 +13,6 @@ import com.liquidaddon.modules.ModuleDoubleClicks
 import com.liquidaddon.modules.ModuleFireballDeflect
 import com.liquidaddon.modules.ModuleScaffoldLegit
 import com.liquidaddon.modules.ModuleTriggerBotPlus
-import com.liquidaddon.modules.ModuleCpsBooster
 import net.ccbluex.liquidbounce.features.addon.LiquidBounceAddon
 
 /**
