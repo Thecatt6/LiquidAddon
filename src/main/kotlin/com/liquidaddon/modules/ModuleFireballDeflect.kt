@@ -305,7 +305,13 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
      * you - that is what turns the knockback into lift.
      */
     private fun ownBoostCandidate(me: LocalPlayer, entity: Entity): Boolean {
-        if (!ownFireballJump || entity.owner !== me) {
+        if (!ownFireballJump) {
+            return false
+        }
+        // The owner lives on the Projectile interface, not on Entity: the scan hands over plain
+        // entities, so the jump only ever considers things that can have a shooter at all.
+        val owner = (entity as? Projectile)?.owner ?: return false
+        if (owner !== me) {
             return false
         }
         val pos = entity.position()
