@@ -53,7 +53,7 @@ import kotlin.random.Random
  * the minimum look that explains the minimum click.
  *
  * **The look that is asked for is the aimbot's.** The rotation is not written here: the face center
- * is handed to [AimassistCore] — the engine `AimbotAI`, `Aimassist`, `Clutch` and `FireballDeflect`
+ * is handed to [AimassistCore] — the engine `AimbotAI`, `Aimassist` and `FireballDeflect`
  * run — with [ScaffoldValues]: the mouse-count lattice with its carried residual (`GcdFix`,
  * `GcdDither`), the hand on top of it (`MouseNoise`, `Overshoot`, `StrengthSpread`), the model
  * LiquidBounce trained under `Engine = AI`, the frame interpolation, and the silent rotation through
