@@ -21,6 +21,7 @@ import net.ccbluex.liquidbounce.utils.kotlin.Priority
 import net.ccbluex.liquidbounce.utils.raytracing.isLookingAtEntity
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.world.entity.Entity
+import net.minecraft.world.entity.projectile.Projectile
 import net.minecraft.world.entity.projectile.ShulkerBullet
 import net.minecraft.world.entity.projectile.hurtingprojectile.Fireball
 import net.minecraft.world.entity.projectile.hurtingprojectile.windcharge.WindCharge
@@ -102,6 +103,18 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
     private val swingMode by enumChoice("SwingMode", SwingMode.DO_NOT_HIDE)
 
     private val chatLog by boolean("ChatLog", false)
+
+    /**
+     * One line per second that walks the whole chain, for the servers where the module "just does
+     * not start": how many entities the scan saw, how many of them were projectiles and of which
+     * classes, where each candidate was lost (wrong [Kind], out of the scan radius, standing still,
+     * not on a course to you), what survived as the target, and which gate stopped the hit
+     * (cooldown, reach, rotation degrees, ray-trace, chance). Every number is a fork in the road:
+     * `proiettili=0` while fireballs are visibly flying means the client is not receiving them as
+     * projectiles at all; `non-in-rotta=N` means [onlyIfHittingMe] is throwing away exactly the ones
+     * you wanted (your own, thrown at your feet to jump); `gate=rotazione/raytrace` means the aim
+     * never arrived on time.
+     */
     private val debug by boolean("Debug", false)
 
     /** The engine: this module's settings, the projectile as target, and a defence's priority. */
@@ -119,6 +132,17 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
     private var deflected = 0
     private var lastNote = ""
 
+    /** What the last scan saw, counted for the [debug] report: entities, projectiles, losses. */
+    private var scanEntities = 0
+    private var scanProjectiles = 0
+    private var scanKind = 0
+    private var scanFar = 0
+    private var scanStill = 0
+    private var scanNotComing = 0
+    private val scanClasses = LinkedHashMap<String, Int>()
+    private var bestInfo = "nessuno"
+    private var lastReportTick = -100""
+
     override val tag: String
         get() = if (deflected == 0) "" else deflected.toString()
 
@@ -129,8 +153,25 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
     /** The tick: the engine aims, then — and only then — the hit may leave. */
     @Suppress("unused")
     private val tickHandler = handler<GameTickEvent> {
+        val me = mc.player ?: return@handler
         core.tick()
         tryAttack()
+        if (debug && me.tickCount - lastReportTick >= 20) {
+            lastReportTick = me.tickCount
+            reportScan()
+        }
+    }
+
+    /** The once-per-second walk of the chain: scan, losses, target, and the gate that stopped. */
+    private fun reportScan() {
+        val classes = scanClasses.entries.joinToString(", ") { it.key + "×" + it.value }
+        chat(
+            ("§8[FireballDeflect D] §7scan %d entità, %d proiettili [%s] | persi: kind=%d fuori=%d " +
+                "fermi=%d non-in-rotta=%d | bersaglio=%s | gate=%s").format(
+                    scanEntities, scanProjectiles, classes.ifEmpty { "-" },
+                    scanKind, scanFar, scanStill, scanNotComing, bestInfo, lastNote.ifEmpty { "-" }
+                )
+        )
     }
 
     /** Frame interpolation: the tick's step drawn slice by slice, when the camera is ours. */
@@ -142,6 +183,8 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
         lastAttackTick = -100
         deflected = 0
         lastNote = ""
+        lastReportTick = -100
+        bestInfo = "nessuno"
         super.onEnabled()
         chat(
             "§7[FireballDeflect] §aattivo §7- mira dell'aimbot (" + values.engine.tag +
@@ -161,7 +204,19 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
     /** The projectile to hit: the one that reaches us soonest, among those that reach us at all. */
     private fun findProjectile(me: LocalPlayer): Entity? {
         if (mc.gameMode == null || me.isSpectator || mc.gui.screen() != null) {
+            note("scan saltato (spettatore o schermata aperta)")
             return null
+        }
+        val collecting = debug
+        if (collecting) {
+            scanEntities = 0
+            scanProjectiles = 0
+            scanKind = 0
+            scanFar = 0
+            scanStill = 0
+            scanNotComing = 0
+            scanClasses.clear()
+            bestInfo = "nessuno"
         }
 
         // Scanned a little past the aim range: the engine starts at `Range`, the hit happens closer.
@@ -172,24 +227,53 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
         var bestTicks = Double.MAX_VALUE
 
         for (entity in world.entitiesForRendering()) {
-            if (!matchesKind(entity)) continue
-            if (entity.squaredBoxedDistanceTo(me) > limitSquared) continue
+            if (collecting) {
+                scanEntities++
+                if (entity is Projectile) {
+                    scanProjectiles++
+                    val name = entity.javaClass.simpleName
+                    scanClasses[name] = (scanClasses[name] ?: 0) + 1
+                }
+            }
+
+            if (!matchesKind(entity)) {
+                if (collecting) scanKind++
+                continue
+            }
+            if (entity.squaredBoxedDistanceTo(me) > limitSquared) {
+                if (collecting) scanFar++
+                continue
+            }
 
             // One tick of its motion. A projectile standing still (in the ground, stuck) can neither
             // hit us nor be led, so it is not our business.
             val velocity = entity.position().subtract(entity.lastPos)
-            if (velocity.lengthSqr() < 1.0e-4) continue
+            if (velocity.lengthSqr() < 1.0e-4) {
+                if (collecting) scanStill++
+                continue
+            }
 
-            if (onlyIfHittingMe && !comingAtMe(me, entity, velocity)) continue
+            if (onlyIfHittingMe && !comingAtMe(me, entity, velocity)) {
+                if (collecting) scanNotComing++
+                continue
+            }
 
             // How soon it is here: the smaller, the more urgent.
             val ticks = entity.position().distanceTo(me.eyePosition) / velocity.length()
             if (ticks < bestTicks) {
                 bestTicks = ticks
                 best = entity
+                if (collecting) {
+                    bestInfo = "%s a %.1f b (%.1f tick)".format(
+                        entity.javaClass.simpleName, entity.position().distanceTo(me.eyePosition), ticks
+                    )
+                }
             }
         }
 
+        if (collecting && best == null && scanProjectiles > 0) {
+            note("scan: proiettili visti ma nessuno eleggibile")
+        }
         return best
     }
 
@@ -233,9 +317,15 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
      */
     private fun tryAttack() {
         val me = mc.player ?: return
-        val projectile = core.target ?: return
+        val projectile = core.target ?: run {
+            note("nessun proiettile eleggibile dallo scan")
+            return
+        }
 
-        if (me.tickCount - lastAttackTick < cooldownTicks) return
+        if (me.tickCount - lastAttackTick < cooldownTicks) {
+            note("cooldown tra due deviazioni")
+            return
+        }
 
         if (minCooldown > 0f && me.getAttackStrengthScale(0.5f) < minCooldown) {
             note("arma in cooldown")
