@@ -30,7 +30,7 @@
   "liquidbounce.module.aimbotAI.value.aimodel.description": "AI model to use.",
   "liquidbounce.module.aimbotAI.value.aiYawMultiplier.description": "AI yaw output multiplier.",
   "liquidbounce.module.aimbotAI.value.aiCorrection.description": "AI correction share.",
-  "liquidbounce.module.scaffoldLegit.description": "Legit upward bridge that clicks by itself. It finds the cell that has to be filled and, only when the look the server already has cannot place it, takes the look to the center of the face with the aimbot's rotation engine - mouse lattice, trained model, silent - then clicks once the server's look traces onto that face. Minimum aim, no block-by-block stare, no Fov or Range knobs; with AutoClick the whole staircase runs on the walk alone.",
+  "liquidbounce.module.scaffoldLegit.description": "Legit upward bridge. It finds the cell that has to be filled, looks at the face that fills it silently - your camera does not move, only the server sees the look - and clicks once that look has really arrived. Stairs: block at the edge, block on top of it in the air, jump. Step: jump on the space key. The space key is only taken over while a step is actually being made.",
   "liquidbounce.module.hitFlick.description": "Turns the yaw off the target before a hit and back on the hit, so the extra knockback (sprint hit or Knockback) goes sideways. OnlyExtraKnockback flicks only those hits.",
   "liquidbounce.module.aimassist.description": "Aim assist, not an aimbot: it never clicks and never takes the view away from your hand. It pulls a share of the way towards an enemy already under the crosshair (Assist) and damps the cursor while it glides over a hitbox (Friction).",
   "liquidbounce.module.aimassist.value.preset.description": "Ready-made configs (Blatant/Legit/Ghost/Closet); Custom leaves the sliders alone.",
@@ -171,5 +171,14 @@
   "liquidbounce.module.scaffoldLegit.value.gcdDither.description": "Let the rounding boundary wobble by a count, so the lattice never stalls the turn.",
   "liquidbounce.module.scaffoldLegit.value.mouseNoise.description": "Whole mouse counts of hand noise on every turn. A bridge is long: keep it light.",
   "liquidbounce.module.scaffoldLegit.value.overshoot.description": "Chance, in percent, that a turn overshoots the face by a count, the way a hand does.",
-  "liquidbounce.module.scaffoldLegit.value.strengthSpread.description": "How much the share of angle covered varies from turn to turn."
+  "liquidbounce.module.scaffoldLegit.value.strengthSpread.description": "How much the share of angle covered varies from turn to turn.",
+  "liquidbounce.module.cpsBooster.description": "Turns one left click into up to Multiplier attacks on the same target. The follow-ups wait for the moment the server would take them (the target's half second of invulnerability is over, the weapon is charged), so the window is never missed. It cannot raise the damage on a single target past about two hits a second - that is the server's limit, not the module's - what it does is never waste a click, and never lose a hit in a fight against several enemies.",
+  "liquidbounce.module.cpsBooster.value.multiplier.description": "How many attacks one click becomes. 2 doubles the clicks, 3 triples them.",
+  "liquidbounce.module.cpsBooster.value.spread.description": "Ticks between one attack and the next, drawn at random in the range. The default sits just past the ten ticks a target is invulnerable, where a follow-up really lands.",
+  "liquidbounce.module.cpsBooster.value.maxCps.description": "Hard ceiling on the attacks this module produces, counted over the last second. Keep it at a rate a hand could keep up.",
+  "liquidbounce.module.cpsBooster.value.onlyWhenItLands.description": "Hold a follow-up until the server would accept it. Off, most follow-ups are sent inside the target's invulnerability and answered with nothing.",
+  "liquidbounce.module.cpsBooster.value.minCooldown.description": "Minimum attack strength (the 1.9+ weapon cooldown) before a follow-up goes out.",
+  "liquidbounce.module.cpsBooster.value.reach.description": "How far a follow-up may reach. The server measures its own distance, and its own is 3.0.",
+  "liquidbounce.module.cpsBooster.value.swing.description": "The swing of the follow-up, and whether the client, the server, or both get to see it.",
+  "liquidbounce.module.cpsBooster.value.debug.description": "Print the running total every ten follow-ups."
 }
