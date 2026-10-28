@@ -97,6 +97,25 @@ the hands are busy in a vehicle, because vanilla refuses a use in exactly those 
 with a use duration (food, potions, bows) are therefore not doubled: the first use already put the
 item in use. Turn `RightClick` off to leave the right button alone.
 
+## Clicks that never become block digs
+
+Everything the add-on clicks goes through the vanilla input path, so a click is resolved against the
+crosshair that exists **at that moment**. A click that lands on a block becomes
+`START_DESTROY_BLOCK` — a block-dig action the player never asked for, and exactly what a nuker check
+counts (Vulcan's `BadPackets (Nuker)` among them). Every module that can queue a click therefore
+refuses a crosshair it cannot answer safely:
+
+| Module | Rule |
+|---|---|
+| `DoubleClicks` | a follow-up repeats `startAttack` only on an entity; block, air and the miss cooldown get a swing |
+| `TriggerBotPlus` | `PrePress = Key` queues the real click only on air; on a block it swings the arm instead |
+| `HitFlick` | the click is queued only after refreshing the pick: never on a block, never while mining, never when the crosshair is no longer on the flicked target |
+
+None of the modules sends a destroy action of its own, and none of them removes vanilla's miss
+cooldown to hide a click. What the rest of the chain does is still out of reach: another client
+module (LiquidBounce's own AutoClicker or AutoBreak), the server's own view of a held button, and
+latency all shape what arrives at the anti-cheat, so no setting here can promise a clean session.
+
 ## What the example covers
 
 - `ExampleAddon`, the entrypoint and its lifecycle hooks

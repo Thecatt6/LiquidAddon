@@ -27,6 +27,7 @@ import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.ai.attributes.Attributes
 import net.minecraft.world.item.enchantment.EnchantmentEffectComponents
 import net.minecraft.world.item.enchantment.EnchantmentHelper
+import net.minecraft.world.phys.HitResult
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import kotlin.math.abs
@@ -380,7 +381,7 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
 
         if (!shouldFlick) {
             // hit normale, senza flick
-            queueClick()
+            queueClick(target)
             return@handler
         }
 
@@ -573,7 +574,14 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         if (!flick.target.isAlive) {
             return
         }
-        queueClick()
+        if (!queueClick(flick.target)) {
+            if (chatLog) {
+                me.sendSystemMessage(
+                    Component.literal("§7[HitFlick] colpo annullato: il mirino non è più sul bersaglio")
+                )
+            }
+            return
+        }
         count++
         if (chatLog) {
             val away = if (flick.yawSteps.isEmpty()) "AI" else "smooth"
@@ -649,9 +657,26 @@ object ModuleHitFlick : ClientModule("HitFlick", Categories.LIQUIDADDON) {
         }
     }
 
-    private fun queueClick() {
+    /**
+     * Queues one attack click for this tick's `handleKeybinds`. Vanilla resolves that click against
+     * `mc.hitResult`, so the crosshair is refreshed and checked first: on a block the click would be
+     * a START_DESTROY_BLOCK, i.e. a block-dig action the player never asked for and nuker checks
+     * count, and on anything that is not [target] it would be a hit into a wall.
+     */
+    private fun queueClick(target: LivingEntity? = null): Boolean {
+        pickMethod?.let { method -> runCatching { method.invoke(mc, 1.0f) } }
+        val hit = mc.hitResult
+        val gameMode = mc.gameMode
+        if (hit == null || gameMode == null || gameMode.isDestroying || hit.type == HitResult.Type.BLOCK) {
+            return false
+        }
+        if (target != null && mc.crosshairPickEntity !== target) {
+            return false
+        }
+
         val key = mc.options.keyAttack
         clickCount.setInt(key, clickCount.getInt(key) + 1)
+        return true
     }
 
     private fun apply(me: LocalPlayer, flick: Flick, yawCounts: Int, pitchCounts: Int) {

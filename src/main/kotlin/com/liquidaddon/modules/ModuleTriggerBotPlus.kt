@@ -26,9 +26,10 @@ import net.minecraft.client.KeyMapping
 import net.minecraft.client.player.LocalPlayer
 import net.minecraft.util.Util
 import net.minecraft.world.InteractionHand
-import net.minecraft.world.phys.EntityHitResult
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.player.Player
+import net.minecraft.world.phys.EntityHitResult
+import net.minecraft.world.phys.HitResult
 import kotlin.math.max
 import kotlin.math.sqrt
 import kotlin.random.Random
@@ -643,7 +644,20 @@ object ModuleTriggerBotPlus : ClientModule(
                     return
                 }
 
-                KeyMapping.click(mc.options.keyAttack.key)
+                // And the same click resolved against a BLOCK is worse than a miss: vanilla answers
+                // it with START_DESTROY_BLOCK, so every early press would be a block-dig action the
+                // player never asked for - at click rate, which is what a nuker check counts. Only a
+                // press on air is queued; on a block the arm is swung instead, which is the same
+                // animation with no packet that digs anything.
+                if (mc.hitResult?.type != HitResult.Type.MISS) {
+                    swing.swing(InteractionHand.MAIN_HAND)
+                    if (debug) {
+                        chat("§7[TriggerBotPlus] §7press swung, the crosshair is not on air " +
+                            "(a queued click would dig a block)")
+                    }
+                } else {
+                    KeyMapping.click(mc.options.keyAttack.key)
+                }
             }
         }
 
