@@ -141,7 +141,7 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
     private var scanNotComing = 0
     private val scanClasses = LinkedHashMap<String, Int>()
     private var bestInfo = "nessuno"
-    private var lastReportTick = -100""
+    private var lastReportTick = -100
 
     override val tag: String
         get() = if (deflected == 0) "" else deflected.toString()
