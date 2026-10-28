@@ -1,12 +1,8 @@
 package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
-import com.liquidaddon.aiming.AimassistCore
-import com.liquidaddon.aiming.ScaffoldValues
 import net.ccbluex.liquidbounce.config.types.list.Tagged
-import net.ccbluex.liquidbounce.event.events.GameRenderEvent
 import net.ccbluex.liquidbounce.event.events.GameTickEvent
-import net.ccbluex.liquidbounce.event.events.MouseRotationEvent
 import net.ccbluex.liquidbounce.event.events.MovementInputEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
@@ -30,7 +26,6 @@ import net.minecraft.network.chat.Component
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.item.BlockItem
 import net.minecraft.world.phys.AABB
-import net.minecraft.world.phys.Vec3
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
@@ -41,31 +36,16 @@ import kotlin.random.Random
  *
  * **The click no longer needs the crosshair.** The module works out where the block has to go — the
  * cell over the void in front of the player, or the one on top of the block it jumped from — and
- * asks LiquidBounce's target finding which face puts it there. Your view never moves: whatever look
- * a click needs goes to the server alone, through the aimbot's rotation engine.
+ * asks LiquidBounce's target finding which face puts it there, and the click leaves only when the
+ * look the server has — with no aim of any kind in between, your own camera — really traces onto
+ * that face.
  *
- * **The look is asked for only when a click needs it.** Every tick the module asks the question a
- * hand would ask first: does the look the server already has place this block? When it does — and
- * walking backwards keeps the face near the crosshair more often than not — the click leaves with no
- * rotation at all. Only when it does not, the center of the face becomes the goal of the aim engine
- * for as long as the click is waiting; the tick the click goes out, the goal is gone and the engine
- * gives the look back to the camera. No stare held block after block, no head dipping to every cell:
- * the minimum look that explains the minimum click.
- *
- * **The look that is asked for is the aimbot's.** The rotation is not written here: the face center
- * is handed to [AimassistCore] — the engine `AimbotAI`, `Aimassist` and `FireballDeflect`
- * run — with [ScaffoldValues]: the mouse-count lattice with its carried residual (`GcdFix`,
- * `GcdDither`), the hand on top of it (`MouseNoise`, `Overshoot`, `StrengthSpread`), the model
- * LiquidBounce trained under `Engine = AI`, the frame interpolation, and the silent rotation through
- * `RotationManager` with `MoveFix = Silent`. Every bypass the aimbot has, and none of the settings a
- * placement does not need: no `Fov`, no `Range`, no cone, no reaction gates.
- *
- * The click still leaves only once the look the **server** has really traces onto that face
- * ([clickWouldLand]): the rotation goes out in the movement packet of one tick, the click on a later
- * one, when the server already has it — the post-rotation pattern every placement check is built
- * around. A step that is interrupted (a block that appears under the cell, a face that goes out of
- * reach, a look that drifted while the player was flying up) is retried on the next tick instead of
- * being sent blind.
+ * **There is no aim at all.** No silent rotation, no rotation engine, no `Rotations` group: the
+ * module never asks for a look of its own, so the rotation the server has is always exactly the one
+ * your camera makes, and the only thing this module adds to your packets is the click. The price is
+ * the one a hand pays: the face has to be inside the look you already have — bridge looking at the
+ * edge, as you would without any module — and on the ticks it is not, the click simply waits for a
+ * later one instead of being sent blind or justified by a look you never made.
  *
  * **The module clicks by itself.** With `AutoClick` the bridge runs on the walk alone: at the edge,
  * holding nothing, the cell is filled and the staircase completes — walk back onto the block, jump,
@@ -126,25 +106,6 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
      * mouse. Off, the module is driven as before: `Stairs` on the space key, `Step` on the jump key.
      */
     private val autoClick by boolean("AutoClick", true)
-
-    /**
-     * The rotation engine of the aimbot, pointed at a block face instead of a player: [AimassistCore]
-     * with [ScaffoldValues], i.e. every bypass the aim has — the mouse lattice and its carried
-     * residual, the hand on top of it, the trained model, the silent rotation with `MoveFix` — and
-     * none of the settings a placement does not need: no `Fov`, no `Range`, no cone. The module hands
-     * the point in through [aimPoint], and only on the ticks a click is waiting for a look it does
-     * not already have.
-     */
-    private val values = ScaffoldValues(this)
-
-    /** The face center the engine looks at this tick, or null when the look is the player's own. */
-    private var aimPoint: Vec3? = null
-
-    private val core = AimassistCore(
-        owner = this,
-        values = values,
-        forcedPoint = { aimPoint },
-    )
 
     private val chatLog by boolean("ChatLog", true)
     private val debug by boolean("Debug", false)
@@ -214,8 +175,6 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         plan = null
         planClick = false
         planDone = null
-        aimPoint = null
-        core.onEnable()
         super.onEnabled()
     }
 
@@ -226,9 +185,7 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         plan = null
         planClick = false
         planDone = null
-        aimPoint = null // the look is theirs again
         renderer.clearSilently()
-        core.onDisable()
         super.onDisabled()
     }
 
@@ -290,14 +247,12 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
         flushPendingRender()
         if (mc.gui.screen() != null) {
             debug(me, "schermata aperta")
-            aimPoint = null
             return@handler
         }
         if (me.isUsingItem) {
             // The player is eating, or holding a bow: that use is theirs, and a click of ours would
             // land on whatever they are using instead of on the block.
             debug(me, "stai usando un oggetto")
-            aimPoint = null
             return@handler
         }
         // Il salto si resetta solo se colpito da un altro giocatore, e mai mentre si è in aria.
@@ -319,17 +274,8 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
             }
             Phase.WALK -> if (me.onGround()) walkTick(me)
         }
-        aimAndClick(me)
-        core.tick()
+        tryClick(me)
     }
-
-    /** Friction is fixed to zero in this profile; the handler keeps the engine whole. */
-    @Suppress("unused")
-    private val mouseHandler = handler<MouseRotationEvent> { core.onMouseRotation(it) }
-
-    /** Frame interpolation: the tick's step drawn slice by slice, when the camera is ours. */
-    @Suppress("unused")
-    private val renderHandler = handler<GameRenderEvent> { core.onRender() }
 
     /** 1: at the edge, the click that puts a block behind at the level of the one under the feet. */
     private fun flatTick(me: LocalPlayer) {
@@ -426,31 +372,24 @@ object ModuleScaffoldLegit : ClientModule("ScaffoldLegit", Categories.LIQUIDADDO
     }
 
     /**
-     * The minimum aim, and the click it exists for.
-     *
-     * First the question a hand would ask: does the look the server already has place this block?
-     * When it does, the click leaves with no rotation at all — walking backwards keeps the face near
-     * the crosshair more often than not, and a bridge that never turns the head is a bridge nobody
-     * reads. Only when it does not, the center of the face becomes [aimPoint] for this tick: the
-     * engine takes the look there, and on the tick the server's look really traces onto the face the
-     * click leaves and the point is gone, so the engine gives the look back to the camera. No stare
-     * held block after block: the look exists for exactly as long as a click is waiting for it.
+     * The click, and the only thing that gates it: the look the server has — with no aim of any kind
+     * in this module, the camera's own — has to trace onto exactly that face, on exactly that block
+     * ([clickWouldLand]). When it does, the use packet leaves; when it does not, nothing leaves and
+     * the step is retried on the next tick. No rotation is ever asked for, so a click is never
+     * justified by a look the player did not make: bridge looking at the edge, as a hand would.
      */
-    private fun aimAndClick(me: LocalPlayer) {
+    private fun tryClick(me: LocalPlayer) {
         val target = plan
         if (target == null || !planClick || !canPlace(me)) {
-            aimPoint = null
             return
         }
-        if (clickWouldLand(target)) {
-            debug(me, "click senza rotazione: il look del server è già sulla faccia")
-            place(me, target, planDone)
-            plan = null
-            aimPoint = null
+        if (!clickWouldLand(target)) {
+            debug(me, "il tuo look non è sulla faccia di " + short(target.placedBlock) + ": il click aspetta")
             return
         }
-        debug(me, "il look del server non è sulla faccia: mira al centro di " + short(target.placedBlock))
-        aimPoint = target.interactionPoint
+        debug(me, "click senza mira: il tuo look è già sulla faccia")
+        place(me, target, planDone)
+        plan = null
     }
 
     /** The click itself: the vanilla right click on that face, with the look that asked for it. */
