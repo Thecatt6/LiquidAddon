@@ -56,7 +56,9 @@ import kotlin.random.Random
  *
  *  - the projectile is one of the selected [Kind]s and it is moving;
  *  - with `OnlyIfHittingMe` it is really coming at you — its velocity points at you (within 60°) or
- *    its path cuts your (widened) hitbox — so a fireball flying past is ignored;
+ *    its path cuts your (widened) hitbox — so a fireball flying past is ignored; the one exception
+ *    is [ownFireballJump], your own projectile at your feet, which is the fireball jump and would be
+ *    thrown away by the threat test (it moves away from you, down);
  *  - it is inside the real interaction range: the engine's `Range` is only where the *aim* starts,
  *    the attack always happens from the reach the server accepts;
  *  - the rotation the server has is on it ([attackTolerance] degrees **and** a real ray-trace hit,
@@ -87,6 +89,19 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
 
     /** Only projectiles whose path actually reaches you are deflected. */
     private val onlyIfHittingMe by boolean("OnlyIfHittingMe", true)
+
+    /**
+     * The fireball jump: hit your **own** projectile when it is at your feet, so that the knockback
+     * of the hit launches you instead of pushing you away.
+     *
+     * It needs its own gate because [onlyIfHittingMe] can never see it: a fireball thrown at your
+     * feet is moving *away* from your centre - down and out - so its path does not cut your hitbox
+     * and the threat test throws away exactly the projectile you want to punch. Here the ownership
+     * and the position are the test instead: your projectile, around foot level, close enough to
+     * swing at. A throw at an enemy starts at eye level and leaves horizontally, so it stays out of
+     * the foot window and is not eaten by the jump.
+     */
+    private val ownFireballJump by boolean("OwnFireballJump", true)
 
     /** How close the rotation the **server** has must be to the projectile before the hit leaves. */
     private val attackTolerance by float("AttackTolerance", 2.5f, 0.5f..15f, "°")
@@ -253,7 +268,7 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
                 continue
             }
 
-            if (onlyIfHittingMe && !comingAtMe(me, entity, velocity)) {
+            if (onlyIfHittingMe && !comingAtMe(me, entity, velocity) && !ownBoostCandidate(me, entity)) {
                 if (collecting) scanNotComing++
                 continue
             }
@@ -282,6 +297,20 @@ object ModuleFireballDeflect : ClientModule("FireballDeflect", Categories.LIQUID
         is WindCharge -> kinds.contains(Kind.WIND_CHARGE)
         is ShulkerBullet -> kinds.contains(Kind.SHULKER)
         else -> false
+    }
+
+    /**
+     * Your own projectile at your feet: the one the fireball jump punches. Foot level is a window
+     * around [LocalPlayer.y], not the eye, because the hit has to land while the explosion is under
+     * you - that is what turns the knockback into lift.
+     */
+    private fun ownBoostCandidate(me: LocalPlayer, entity: Entity): Boolean {
+        if (!ownFireballJump || entity.owner !== me) {
+            return false
+        }
+        val pos = entity.position()
+        val dy = pos.y - me.y
+        return dy in -1.0..0.6 && pos.distanceTo(me.position()) <= 3.0
     }
 
     /**
