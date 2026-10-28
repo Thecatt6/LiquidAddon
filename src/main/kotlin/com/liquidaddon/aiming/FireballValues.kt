@@ -95,6 +95,9 @@ internal class FireballValues(group: ValueGroup) : AimSettings {
     override val overshoot by group.int("Overshoot", 8, 0..30, "%")
     override val strengthSpread by group.int("StrengthSpread", 15, 0..50, "%")
 
+    /** The sequence check of `MousePatternGuard`, always on: a flick is the one aim a check reads. */
+    override val patternGuard get() = true
+
     /** A trace of noise in degrees, on top of the counts (see `JitterYaw` in the Aimassist). */
     override val jitterYaw get() = 0.02f
     override val jitterPitch get() = 0.02f

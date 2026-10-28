@@ -89,6 +89,15 @@ private const val SPEED_DRIFT_STEP = 0.07f
 private const val REST_CHANCE = 35
 
 /**
+ * How many mouse counts of slack the assist keeps before it corrects at all (see [restYaw]).
+ *
+ * Never below one: the lattice cannot carry less, so a correction under a count is a step that is
+ * rounded away and asked for again on the next tick — the `+1, -1, +1, -1` a "pattern" check reads
+ * as a module rather than a hand.
+ */
+private const val REST_COUNTS = 1.15f
+
+/**
  * The most the aim may move vertically in one tick, in degrees — the default of
  * [AimSettings.pitchStepMax].
  *
@@ -253,6 +262,16 @@ internal interface AimSettings {
 
     /** Per-target spread of [strength] (in %): the speed of the pull is not a constant. */
     val strengthSpread: Int
+
+    /**
+     * Never hand out a step that closes a cycle (see [MousePatternGuard]).
+     *
+     * Everything above makes *one* step look like a mouse; this is the only one that looks at the
+     * sequence of them, which is what a "pattern" check actually measures. On by default: it
+     * matters most for the Aimassist, because an assist holds the crosshair on the same target for
+     * seconds and, while the player keeps still, the steps in the packets are the module's alone.
+     */
+    val patternGuard: Boolean
 
     // --- how the rotation reaches the server ---
     val silent: Boolean
@@ -427,6 +446,15 @@ internal class AimValues(
      */
     val strengthSpreadValue = group.int("StrengthSpread", 15, 0..50, "%")
     override val strengthSpread by strengthSpreadValue
+
+    /**
+     * The sequence check of [MousePatternGuard]: a step that would close a cycle of two to six
+     * steps is nudged by a count. It is the answer to a "pattern" check, which does not look at one
+     * rotation but at the numbers coming back in the same order — exactly what a correction loop
+     * does when the crosshair is already on the target.
+     */
+    val patternGuardValue = group.boolean("PatternGuard", true)
+    override val patternGuard by patternGuardValue
 
     // --- how the rotation reaches the server ------------------------------------------------
 
@@ -731,9 +759,28 @@ internal class AimassistCore(
     private val mouseNoise get() = values.mouseNoise
     private val overshoot get() = values.overshoot
     private val strengthSpread get() = values.strengthSpread
+    private val patternGuard get() = values.patternGuard
 
     /** Share of the remaining angle a step covers: [strength], spread per target ([strengthSpread]). */
     private val pull get() = (strength / 100f) * strengthScale
+
+    /** One mouse count in degrees: the smallest step the packets can carry, 0 without [gcdFix]. */
+    private val lattice get() = if (gcdFix) RotationUtil.gcd.toFloat() else 0f
+
+    /**
+     * The angle under which nothing is corrected: [deadZone], but never less than a mouse count.
+     *
+     * A correction the mouse cannot represent is not a correction. With [gcdFix] everything is
+     * rounded to whole counts, so an error of half a count is answered with one count this tick and
+     * one back the next — `+1, -1, +1, -1` for as long as the crosshair stays on the target. That
+     * is the most *repeatable* sequence a module can produce, and the one a "pattern" check is
+     * built to find, so the dead zone is never narrower than the lattice whatever the slider says.
+     */
+    private val restYaw get() = max(deadZone, lattice * REST_COUNTS)
+
+    /** Vertical gets the same floor, on the tighter dead zone the vertical correction always had. */
+    private val restPitch get() = max(deadZone * 0.7f, lattice * REST_COUNTS)
+
     private val silent get() = values.silent
     private val moveFix get() = values.moveFix
     private val frameInterpolation get() = values.frameInterpolation
@@ -813,6 +860,9 @@ internal class AimassistCore(
     private var lastCountsYaw: Int? = null
     private var lastCountsPitch: Int? = null
 
+    /** The sequence check every step goes through before it leaves (see [MousePatternGuard]). */
+    private val patterns = MousePatternGuard()
+
     /**
      * The "hand" of the moment (see [refreshHandProfile]).
      *
@@ -890,6 +940,7 @@ internal class AimassistCore(
         speedDrift = 1f
         lastCountsYaw = null
         lastCountsPitch = null
+        patterns.reset()
         handProfileUntil = 0L
         handNoise = 1f
         handOvershoot = 1f
@@ -1213,7 +1264,7 @@ internal class AimassistCore(
                 }
             }
 
-            if (abs(deltaYaw) < deadZone && abs(deltaPitch) < deadZone * 0.7f) {
+            if (abs(deltaYaw) < restYaw && abs(deltaPitch) < restPitch) {
                 // Already there. Not silent this tick writes nothing at all, which is exactly what
                 // a vanilla client does when the hand rests.
                 stillTick(me, aim, target)
@@ -1948,20 +1999,35 @@ internal class AimassistCore(
         if (gcdDither) {
             countsYaw = handRound(rawYaw)
             countsPitch = handRound(rawPitch)
-            yawCarry = (rawYaw - countsYaw).coerceIn(-0.95, 0.95)
-            pitchCarry = (rawPitch - countsPitch).coerceIn(-0.95, 0.95)
         } else {
             countsYaw = round(rawYaw).toInt()
             countsPitch = round(rawPitch).toInt()
         }
 
-        // The hand on top of the lattice: whole counts of noise, never the same pair twice, and now
+        // What is still owed to the path: the rounding residual, kept between ticks so a fraction of
+        // a count is never lost — it is paid on a later tick, inside a step that is worth one.
+        if (gcdDither) {
+            yawCarry = (rawYaw - countsYaw).coerceIn(-0.95, 0.95)
+            pitchCarry = (rawPitch - countsPitch).coerceIn(-0.95, 0.95)
+        }
+
+        // The hand on top of the lattice: whole counts of noise, never the same value twice, and now
         // and then a count past the goal. Everything above made the step land on whole mouse counts
         // (which a real mouse does too); this is what makes two consecutive steps different, and
         // that is the only part a check can actually measure.
         val hand = handOnLattice(countsYaw, countsPitch, deltaYaw, deltaPitch)
         countsYaw = hand.first
         countsPitch = hand.second
+
+        // The last word, and the only one that looks at the sequence instead of the step: no two to
+        // six steps may come back in the same order (see [MousePatternGuard]).
+        if (patternGuard) {
+            val guarded = patterns.guard(countsYaw, countsPitch)
+            countsYaw = guarded.first
+            countsPitch = guarded.second
+        }
+        lastCountsYaw = countsYaw
+        lastCountsPitch = countsPitch
 
         // pitch is clamped by the caller on the absolute value, so the +-90 boundary that servers
         // treat as an untouched pitch is never crossed here either
@@ -1997,6 +2063,13 @@ internal class AimassistCore(
         var yaw = countsYaw
         var pitch = countsPitch
 
+        // A hand that is not moving does not shake. Noise and overshoot are the wobble *of* a
+        // movement, not movements of their own: a step that rounded to nothing is a tick on which
+        // the aim was already where it had to be, and inventing a count there is how a crosshair
+        // sitting on the target gets a tremble nobody asked for — `+1, 0, -1, +1, ...` for as long
+        // as the target stands still, which is a sequence a check reads and a hand never writes.
+        if (countsYaw == 0 && countsPitch == 0) return 0 to 0
+
         // Land short now and then, and finish on the next tick. A controller arrives ON the goal at
         // the first attempt, every attempt; a hand arrives near it and takes the last counts with a
         // separate, smaller move. It also breaks the geometric ratio between two steps, because the
@@ -2021,14 +2094,14 @@ internal class AimassistCore(
             }
         }
 
-        // A step that repeats the previous one to the count is a repeated computation. Break the tie
-        // on one axis only, so the aim is not pushed away from the goal twice in the same tick.
-        if (lastCountsYaw != null && yaw == lastCountsYaw && pitch == lastCountsPitch) {
-            if (Random.nextBoolean()) {
-                yaw += if (Random.nextBoolean()) 1 else -1
-            } else {
-                pitch += if (Random.nextBoolean()) 1 else -1
-            }
+        // A step that repeats the previous one to the count is a repeated computation — and it is
+        // per axis, not per pair: the assist spends most of a fight with a pitch of zero and a yaw
+        // of one or two counts, so the *pair* almost never repeats while each of its numbers does.
+        // Break the tie on the axis that repeated, never on both, so the aim is not pushed away
+        // from the goal twice in the same tick. The long window is [MousePatternGuard]'s job.
+        if (lastCountsYaw != null) {
+            if (yaw != 0 && yaw == lastCountsYaw) yaw += if (Random.nextBoolean()) 1 else -1
+            if (pitch != 0 && pitch == lastCountsPitch) pitch += if (Random.nextBoolean()) 1 else -1
         }
 
         // Now and then a count too far, taken back on the next tick: the most human thing in the
@@ -2050,8 +2123,6 @@ internal class AimassistCore(
             }
         }
 
-        lastCountsYaw = yaw
-        lastCountsPitch = pitch
         return yaw to pitch
     }
 
@@ -2134,7 +2205,7 @@ internal class AimassistCore(
             ) + "§7strength=%.0f%% max=%.1f° own=%.2f° counts=%+d/%+d noise=%.1f (set %d) hand=%.1f under=%d".format(
                 strength, maxSpeed, lastOwnYaw, lastCountsYaw ?: 0, lastCountsPitch ?: 0,
                 mouseNoise * handNoise, mouseNoise, handNoise, handUndershoot
-            ) + (if (engine == Engine.AI) " §7$lastAiNote" else "") + warnings()
+            ) + " guard=%d".format(patterns.repairs) + (if (engine == Engine.AI) " §7$lastAiNote" else "") + warnings()
         )
     }
 

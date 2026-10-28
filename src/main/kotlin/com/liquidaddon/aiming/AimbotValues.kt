@@ -87,6 +87,14 @@ internal class AimbotValues(group: ValueGroup) : AimSettings {
     /** Spread of [strength] drawn per target: the speed of the pull is not a constant. */
     override val strengthSpread by group.int("StrengthSpread", 15, 0..50, "%")
 
+    /**
+     * The sequence check of `MousePatternGuard`: a step that would close a cycle of two to six
+     * steps is nudged by a count. An aimbot flicks through most fights and rarely leaves the same
+     * couple of numbers in the packets twice; it is the assist that sits on a target, which is why
+     * this one matters there — but it is the same engine, so it is the same switch.
+     */
+    override val patternGuard by group.boolean("PatternGuard", true)
+
     /** A trace of noise on the step, in degrees, so the path is not a perfect curve. */
     private val jitter by group.float("Jitter", 0.03f, 0f..2f, "°")
 

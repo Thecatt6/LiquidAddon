@@ -116,6 +116,31 @@ cooldown to hide a click. What the rest of the chain does is still out of reach:
 module (LiquidBounce's own AutoClicker or AutoBreak), the server's own view of a held button, and
 latency all shape what arrives at the anti-cheat, so no setting here can promise a clean session.
 
+## A rotation that never repeats itself
+
+An anti-cheat cannot see *why* a rotation moved; it can only see the numbers, over and over.
+`Killaura (Pattern)` is the check that reads them as a sequence, and the Aimassist is the worst
+case for it of everything in this add-on: an assist holds the crosshair on the same target for
+seconds, and while the player keeps still the steps in the packets are the module's alone — no
+hand mixed in. A slow pull through a mouse-count lattice then emits the same couple of numbers on
+every tick, which is exactly the shape the check is built to find.
+
+Three rules in `AimassistCore` / `MousePatternGuard` (shared with `AimbotAI`, `FireballDeflect`
+and `FireballJumpAI`) make sure the sequence never settles:
+
+| Rule | What it removes |
+|---|---|
+| the dead zone is never narrower than one mouse count | a correction the mouse cannot represent is rounded to `0` and asked again next tick: the `+1, -1, +1, -1` metronome |
+| a step that rounds to nothing is not sent with noise on top | the tremble a crosshair gets when it is already on the target |
+| no cycle of two to six steps may repeat three times (`PatternGuard`) | the same handful of numbers coming back in the same order, whatever produced them |
+
+The third one is the only part that looks at the sequence instead of a single step. When a step
+would close a cycle it is nudged by one or two counts — never across the goal, so the aim keeps
+going where it was going — and the count is written down as a debt, paid back on a later step in
+the same direction, so the path still adds up to what the engine planned. A hand at rest (`0, 0`)
+is never touched: resting is not a pattern. `Debug` prints the repairs next to the step
+(`guard=N`) so the switch can be checked against the anti-cheat log.
+
 ## What the example covers
 
 - `ExampleAddon`, the entrypoint and its lifecycle hooks
