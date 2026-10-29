@@ -39,7 +39,7 @@
   "liquidbounce.module.scaffoldLegit.description": "Legit upward bridge that clicks by itself and never aims. It finds the cell that has to be filled and clicks only when the look the server has - with no silent rotation of any kind, your own camera - traces onto the face that fills it; with AutoClick the whole staircase runs on the walk alone. Bridge looking at the edge, as a hand would: the module adds clicks to your packets, nothing else.",
   "liquidbounce.module.hitFlick.description": "Turns the yaw off the target before a hit and back on the hit, so the extra knockback (sprint hit or Knockback) goes sideways. OnlyExtraKnockback flicks only those hits.",
   "liquidbounce.module.aimassist.description": "Aim assist, not an aimbot: it never clicks and never takes the view away from your hand. It pulls a share of the way towards an enemy already under the crosshair (Assist) and damps the cursor while it glides over a hitbox (Friction).",
-  "liquidbounce.module.aimassist.value.preset.description": "Ready-made configs (Blatant/Legit/Ghost/Closet); Custom leaves the sliders alone.",
+  "liquidbounce.module.aimassist.value.preset.description": "Profile A (default) and Profile B are the daily settings: they change how the module behaves and leave Range/Fov/Strength/MaxSpeed to you. Blatant, Legit, Ghost, Closet and AI write every slider; Custom leaves them alone.",
   "liquidbounce.module.aimassist.value.mode.description": "Assist = magnetic pull, Friction = the cursor slows over a hitbox, Both.",
   "liquidbounce.module.aimassist.value.range.description": "Max distance to an enemy.",
   "liquidbounce.module.aimassist.value.fov.description": "Radius of the assist cone around where you are already pointing.",

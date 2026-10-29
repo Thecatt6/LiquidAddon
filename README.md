@@ -116,6 +116,41 @@ cooldown to hide a click. What the rest of the chain does is still out of reach:
 module (LiquidBounce's own AutoClicker or AutoBreak), the server's own view of a held button, and
 latency all shape what arrives at the anti-cheat, so no setting here can promise a clean session.
 
+## Two profiles, one click
+
+The two settings this add-on is meant to be run on are presets, not a list of numbers to type:
+**`Preset = Profile A`** (the default) and **`Preset = Profile B`** in the Aimassist. They are
+declared once in `AimValues.dailyProfile`, so B is literally A with the engine swapped — they
+cannot drift apart.
+
+| | Profile A (default) | Profile B |
+|---|---|---|
+| Engine | `Math` — the curve | `AI` — LiquidBounce's trained combat model |
+| `AIYawMultiplier` / `AICorrection` | 1.2 / 10 | 1.2 / 10 |
+| everything else | the same | the same |
+
+Both write the whole *behaviour* of the module:
+
+| Knob | Value | Why |
+|---|---|---|
+| `OnlyOnCrosshair` | on | the assist may only help a crosshair that is already on the hitbox |
+| `TurnCheck` | on | it never fights the player's own turn |
+| `Mode` / `Friction` | Both / 20 | the damping rides the vanilla cursor path, no rotation of its own |
+| `DeadZone` | 0.4° | fewer corrections, and never under one mouse count |
+| `Smoothing` / `PitchAssist` | Bezier / 50 | a human tracks yaw better than pitch |
+| `Predict` | 0.05 | far less "telepathic" lead than the old default |
+| `ReactionDelay` / `Random` / `FadeIn` | 200 / 100 / 300 ms | the first correction of an engagement is not instant |
+| `IdleChance` | 15% | a pull that never stops is a machine |
+| `MouseNoise` / `Overshoot` / `StrengthSpread` | 2 / 10 / 20 | the hand on the mouse lattice |
+| `PatternGuard` | on | no window of two to six steps repeats three times |
+| `Silent` | **off** | the server sees what the player sees: nothing to call a post rotation |
+| `AttackSync` | on | a click never leaves before the rotation is on the entity |
+
+`Range`, `Fov`, `Strength` and `MaxSpeed` are **not** part of either profile: they are the four
+numbers that describe the player's own aim, and the preset leaves them exactly where they are. If
+you pick one of the two while `Strength`/`MaxSpeed` are above what a nudge can be (50% / 12°), the
+module says so in chat once instead of quietly pretending.
+
 ## A rotation that never repeats itself
 
 An anti-cheat cannot see *why* a rotation moved; it can only see the numbers, over and over.
