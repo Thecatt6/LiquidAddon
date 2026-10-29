@@ -1,0 +1,257 @@
+{
+  "name": "autoconfig",
+  "modules": {
+    "name": "modules",
+    "value": [
+      {
+        "name": "Aimassist",
+        "value": [
+          { "name": "Enabled", "value": true },
+          { "name": "Preset", "value": "Profile A" },
+          { "name": "Range", "value": 3.4 },
+          { "name": "Fov", "value": 24.0 },
+          { "name": "Strength", "value": 35.0 },
+          { "name": "MaxSpeed", "value": 7.0 },
+          { "name": "PatternGuard", "value": true }
+        ]
+      },
+      {
+        "name": "JumpReset",
+        "value": [
+          { "name": "Enabled", "value": true },
+          { "name": "Chance", "value": 60 },
+          { "name": "Accuracy", "value": 85 },
+          { "name": "OnlyWhenTargeting", "value": true },
+          { "name": "WaterCheck", "value": true },
+          { "name": "TargetRange", "value": 4.0 },
+          { "name": "ChatLog", "value": false },
+          { "name": "Debug", "value": false }
+        ]
+      },
+      {
+        "name": "HitSelect",
+        "value": [
+          { "name": "Enabled", "value": true },
+          { "name": "Chance", "value": 100 },
+          { "name": "OnlyWhenTargetVulnerable", "value": true },
+          { "name": "MaxTargetHurtTime", "value": 0 },
+          { "name": "AlwaysWhenHurt", "value": true },
+          { "name": "OnlyWhenHurt", "value": false },
+          { "name": "PauseMode", "value": true },
+          { "name": "PreferKBReduction", "value": true },
+          { "name": "PauseTicks", "value": 10 },
+          { "name": "ChatLog", "value": false }
+        ]
+      },
+      {
+        "name": "BlockHit",
+        "value": [
+          { "name": "Enabled", "value": false },
+          { "name": "ChatLog", "value": false },
+          { "name": "Debug", "value": false }
+        ]
+      },
+      {
+        "name": "DoubleClicks",
+        "value": [
+          { "name": "Enabled", "value": false },
+          { "name": "ExtraClicks", "value": 1 },
+          { "name": "Delay", "value": 1 },
+          { "name": "RightClick", "value": true },
+          { "name": "Debug", "value": false }
+        ]
+      },
+      {
+        "name": "HitFlick",
+        "value": [
+          { "name": "Enabled", "value": false }
+        ]
+      },
+      {
+        "name": "TriggerBotPlus",
+        "value": [
+          { "name": "Enabled", "value": false }
+        ]
+      },
+      {
+        "name": "ScaffoldLegit",
+        "value": [
+          { "name": "Enabled", "value": false }
+        ]
+      },
+      {
+        "name": "FakeLagV2",
+        "value": [
+          { "name": "Enabled", "value": false }
+        ]
+      },
+      {
+        "name": "AutoPearl AI",
+        "value": [
+          { "name": "Enabled", "value": false }
+        ]
+      },
+      {
+        "name": "FireballDeflect",
+        "value": [
+          { "name": "Enabled", "value": false }
+        ]
+      },
+      {
+        "name": "FireballJumpAI",
+        "value": [
+          { "name": "Enabled", "value": false }
+        ]
+      },
+      {
+        "name": "AimbotAI",
+        "value": [
+          { "name": "Enabled", "value": false }
+        ]
+      },
+      {
+        "name": "AutoClicker",
+        "value": [
+          { "name": "Enabled", "value": true },
+          {
+            "name": "Attack",
+            "value": [
+              { "name": "Enabled", "value": true },
+              { "name": "RequiresNoInput", "value": false },
+              { "name": "DelayOnBroken", "value": true },
+              { "name": "Objective", "value": "Any" },
+              {
+                "name": "Clicker",
+                "value": [
+                  { "name": "Technique", "value": "Human" },
+                  { "name": "CPS", "value": { "from": 8, "to": 12 } },
+                  { "name": "MaxPerTick", "value": 1 },
+                  { "name": "MissCooldown", "value": true }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Use",
+            "value": [
+              { "name": "Enabled", "value": false }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "SuperKnockback",
+        "value": [
+          { "name": "Enabled", "value": true },
+          { "name": "HurtTime", "value": 10 },
+          {
+            "name": "Mode",
+            "active": "WTap",
+            "value": [],
+            "choices": {
+              "Packet": {
+                "name": "Packet",
+                "value": []
+              },
+              "SprintTap": {
+                "name": "SprintTap",
+                "value": []
+              },
+              "WTap": {
+                "name": "WTap",
+                "value": [
+                  { "name": "UntilMovementBlock", "value": { "from": 0, "to": 1 } },
+                  { "name": "UntilAllowedMovement", "value": { "from": 0, "to": 1 } }
+                ]
+              }
+            }
+          },
+          {
+            "name": "OnlyOnMove",
+            "value": [
+              { "name": "Enabled", "value": true },
+              { "name": "OnlyForward", "value": true }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Sprint",
+        "value": [
+          { "name": "Enabled", "value": true },
+          { "name": "Mode", "value": "Legit" }
+        ]
+      },
+      {
+        "name": "ESP",
+        "value": [
+          { "name": "Enabled", "value": true },
+          { "name": "MaximumDistance", "value": 64.0 },
+          {
+            "name": "Mode",
+            "active": "2D",
+            "value": [],
+            "choices": {
+              "Box": {
+                "name": "Box",
+                "value": []
+              },
+              "2D": {
+                "name": "2D",
+                "value": [
+                  {
+                    "name": "HealthBar",
+                    "value": [
+                      { "name": "Enabled", "value": false }
+                    ]
+                  },
+                  { "name": "Fill", "value": true }
+                ]
+              },
+              "Legacy2D": {
+                "name": "Legacy2D",
+                "value": []
+              },
+              "Glow": {
+                "name": "Glow",
+                "value": []
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "AntiBot",
+        "value": [
+          { "name": "Enabled", "value": true }
+        ]
+      },
+      {
+        "name": "Velocity",
+        "value": [
+          { "name": "Enabled", "value": false }
+        ]
+      },
+      {
+        "name": "NoSlow",
+        "value": [
+          { "name": "Enabled", "value": false }
+        ]
+      },
+      {
+        "name": "Reach",
+        "value": [
+          { "name": "Enabled", "value": false }
+        ]
+      }
+    ]
+  },
+  "author": "razzo715",
+  "date": "29/10/2026",
+  "time": "13:00:00",
+  "type": "Legit",
+  "status": "Bypassing",
+  "chat": [
+    "LiquidAddon base config - 1.8-style PvP, ghost profile"
+  ]
+}

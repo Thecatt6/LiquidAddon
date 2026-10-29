@@ -151,6 +151,50 @@ numbers that describe the player's own aim, and the preset leaves them exactly w
 you pick one of the two while `Strength`/`MaxSpeed` are above what a nudge can be (50% / 12°), the
 module says so in chat once instead of quietly pretending.
 
+## A base config for 1.8-style PvP (ghost)
+
+`configs/liquidaddon-pvp189-ghost.json` is a **local config** for LiquidBounce: one file that sets
+the two modules of this add-on that belong in a fight plus the client's own ones, tuned to stay on
+the quiet side. It is not a "win every fight" setup — KillAura, Velocity, Reach and NoSlow are
+left **off** on purpose, because a ghost base is a base, not a rage config.
+
+Install it by copying the file into `.liquidbounce/configs/` (next to `modules.json`) and loading it
+in game:
+
+```
+/localconfig load liquidaddon-pvp189-ghost
+```
+
+| Module | What the config does |
+|---|---|
+| `Aimassist` | on, `Preset = Profile A`, `Range 3.4`, `Fov 24`, `Strength 35%`, `MaxSpeed 7°`, `PatternGuard` on |
+| `JumpReset` | on, `Chance 60%`, `OnlyWhenTargeting`, `TargetRange 4` |
+| `HitSelect` | on, vulnerable-target only, `ChatLog` off |
+| `AutoClicker` | on, `Attack` only, `CPS 8..12`, `Technique = Human`, vanilla miss cooldown |
+| `SuperKnockback` | on, `Mode = WTap`, `OnlyOnMove` with `OnlyForward`, `HurtTime 10` |
+| `Sprint` | on, `Mode = Legit` |
+| `ESP` | on, `Mode = 2D`, `MaximumDistance 64`, no health bar |
+| `AntiBot` | on |
+| `BlockHit`, `DoubleClicks`, `HitFlick`, `TriggerBotPlus`, `ScaffoldLegit`, `FakeLagV2`, `AutoPearl AI`, `Fireball*`, `AimbotAI` | explicitly **off** |
+| `Velocity`, `NoSlow`, `Reach` | explicitly **off** |
+
+Two things worth knowing before you load it:
+
+- the client only persists the enabled state of combat/movement modules, so an ESP enabled by a
+  config is on for this session and off after a restart — turn it on with its bind instead;
+- a config writes what it names and leaves the rest alone, so anything you tuned yourself and this
+  file does not mention stays exactly as it is.
+
+`configs/check_config.py` is the check that keeps the file honest: it parses the config, finds every
+module and every group it names in the LiquidBounce source, and fails if a value name does not exist
+or the JSON type is not the one that value expects. Both failures are silent in the client — an
+unknown name is skipped, a wrong type is caught and logged — so without it a config can look
+applied and do nothing:
+
+```
+python3 configs/check_config.py     # 21 modules, every value verified against the source
+```
+
 ## A rotation that never repeats itself
 
 An anti-cheat cannot see *why* a rotation moved; it can only see the numbers, over and over.
