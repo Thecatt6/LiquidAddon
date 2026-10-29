@@ -225,5 +225,7 @@
   "liquidbounce.module.fireballJumpAI.value.mouseNoise.description": "Whole mouse counts of noise added to the step: the hand on top of the lattice.",
   "liquidbounce.module.fireballJumpAI.value.overshoot.description": "Chance of going a little past the goal and coming back.",
   "liquidbounce.module.fireballJumpAI.value.strengthSpread.description": "Per-episode spread of Strength, so no two jumps turn exactly alike.",
-  "liquidbounce.module.jumpReset.description": "Does the vanilla jump reset for you: on the tick a hit lands, the jump key is reported as pressed, so the sprint jump eats the knockback and you stay in range. Only hits the server says came from another player are reset, and never while airborne: mobs, falls, lava and mid-air hits leave the jump key alone."
+  "liquidbounce.module.jumpReset.description": "Does the vanilla jump reset for you: on the tick a hit lands, the jump key is reported as pressed, so the sprint jump eats the knockback and you stay in range. Only hits the server says came from another player are reset, and never while airborne: mobs, falls, lava and mid-air hits leave the jump key alone.",
+  "liquidbounce.module.jumpReset.value.chance.description": "Chance that a hit worth resetting is answered with a jump at all. The HUD shows it next to the module name, followed by how many of those jumps were timed on the exact tick (for example 60% 3/4).",
+  "liquidbounce.module.jumpReset.value.accuracy.description": "Of the attempts that are made, the chance that the jump lands on the exact tick. The rest are human misses: the jump arrives a few ticks late, or it does not arrive at all."
 }
