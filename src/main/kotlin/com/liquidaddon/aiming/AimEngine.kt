@@ -171,7 +171,19 @@ enum class MoveFix(override val tag: String) : Tagged {
 
 enum class Preset(override val tag: String) : Tagged {
     CUSTOM("Custom"), BLATANT("Blatant"), LEGIT("Legit"), GHOST("Ghost"), CLOSET("Closet"),
-    AI("AI")
+    AI("AI"),
+
+    /**
+     * The two daily profiles: everything the module does *by itself*, tuned for a strict server
+     * (see `profileOf`). They deliberately leave `Range`, `Fov`, `Strength` and `MaxSpeed` alone,
+     * because those four are the player's own aim, not the module's manners.
+     *
+     * [PROFILE_A] is the one to run: the curve, the camera helped and never a rotation the server
+     * sees and the player does not. [PROFILE_B] is the same profile with the trained combat model
+     * instead of the curve — better through direction changes, but a machine's answer rather than
+     * a known formula, so it is the one to move to once the log is clean.
+     */
+    PROFILE_A("Profile A"), PROFILE_B("Profile B")
 }
 
 /**
@@ -323,19 +335,22 @@ internal class AimValues(
     val fovValue = group.float("Fov", 24f, 5f..120f, "°")
     override val fov by fovValue
 
-    override val priority by group.enumChoice("Priority", Priority.FOV)
+    val priorityValue = group.enumChoice("Priority", Priority.FOV)
+    override val priority by priorityValue
     val throughWallsValue = group.boolean("ThroughWalls", false)
     override val throughWalls by throughWallsValue
     val antiBotValue = group.boolean("AntiBot", true)
     override val antiBot by antiBotValue
-    override val minHealth by group.int("MinHealth", 0, 0..20, "HP")
-    override val lockTarget by group.boolean("LockTarget", true)
-    val switchDelayValue = group.int("SwitchDelay", 350, 0..2000, "ms")
+    val minHealthValue = group.int("MinHealth", 0, 0..20, "HP")
+    override val minHealth by minHealthValue
+    val lockTargetValue = group.boolean("LockTarget", true)
+    override val lockTarget by lockTargetValue
+    val switchDelayValue = group.int("SwitchDelay", 450, 0..2000, "ms")
     override val switchDelay by switchDelayValue
 
     // --- how much the aim is helped ---------------------------------------------------------
 
-    val presetValue = group.enumChoice("Preset", Preset.LEGIT)
+    val presetValue = group.enumChoice("Preset", Preset.PROFILE_A)
     val preset by presetValue
 
     val modeValue = group.enumChoice("Mode", Mode.BOTH)
@@ -364,7 +379,7 @@ internal class AimValues(
     override val aiModel by aiModelValue
 
     /** The per-axis gain of the model's answer, the same knob LiquidBounce's AI smooth has. */
-    val aiYawMultiplierValue = group.float("AIYawMultiplier", 1.5f, 0.5f..2f)
+    val aiYawMultiplierValue = group.float("AIYawMultiplier", 1.2f, 0.5f..2f)
     override val aiYawMultiplier by aiYawMultiplierValue
     val aiPitchMultiplierValue = group.float("AIPitchMultiplier", 1f, 0.5f..2f)
     override val aiPitchMultiplier by aiPitchMultiplierValue
@@ -373,22 +388,22 @@ internal class AimValues(
      * Share of the remaining angle added on top of the model's answer, so the assist still
      * converges when the model under-shoots. It is what LiquidBounce calls "Correction".
      */
-    val aiCorrectionValue = group.float("AICorrection", 12f, 0f..100f, "%")
+    val aiCorrectionValue = group.float("AICorrection", 10f, 0f..100f, "%")
     override val aiCorrection by aiCorrectionValue
 
     /** Share of the vertical correction, relative to the horizontal one (humans track yaw better). */
-    val pitchAssistValue = group.float("PitchAssist", 55f, 0f..100f, "%")
+    val pitchAssistValue = group.float("PitchAssist", 50f, 0f..100f, "%")
     override val pitchAssist by pitchAssistValue
 
     val aimPointValue = group.enumChoice("AimPoint", AimPoint.CLOSEST)
     override val aimPoint by aimPointValue
-    val predictValue = group.float("Predict", 0.1f, 0f..1f)
+    val predictValue = group.float("Predict", 0.05f, 0f..1f)
     override val predict by predictValue
     val predictSizeValue = group.int("PredictSize", 2, 0..10, "ticks")
     override val predictSize by predictSizeValue
 
     /** Assist only while the crosshair ray crosses the hitbox ([onCrosshair]). */
-    val onlyOnCrosshairValue = group.boolean("OnlyOnCrosshair", false)
+    val onlyOnCrosshairValue = group.boolean("OnlyOnCrosshair", true)
     override val onlyOnCrosshair by onlyOnCrosshairValue
 
     /** Do not fight the player: the pull fades out while the mouse is pushed away from the target. */
@@ -400,24 +415,24 @@ internal class AimValues(
     override val friction by frictionValue
 
     /** Inside this angle nothing is corrected: the aim is already where it should be. */
-    val deadZoneValue = group.float("DeadZone", 0.12f, 0f..3f, "°")
+    val deadZoneValue = group.float("DeadZone", 0.4f, 0f..3f, "°")
     override val deadZone by deadZoneValue
 
-    val reactionDelayValue = group.int("ReactionDelay", 140, 0..500, "ms")
+    val reactionDelayValue = group.int("ReactionDelay", 200, 0..500, "ms")
     override val reactionDelay by reactionDelayValue
-    val reactionRandomValue = group.int("ReactionRandom", 70, 0..300, "ms")
+    val reactionRandomValue = group.int("ReactionRandom", 100, 0..300, "ms")
     override val reactionRandom by reactionRandomValue
 
     /** Time over which the help ramps back in after a reaction pause or a switch: no initial kick. */
-    val fadeInValue = group.int("FadeIn", 220, 0..800, "ms")
+    val fadeInValue = group.int("FadeIn", 300, 0..800, "ms")
     override val fadeIn by fadeInValue
 
-    val idleChanceValue = group.int("IdleChance", 8, 0..40, "%")
+    val idleChanceValue = group.int("IdleChance", 15, 0..40, "%")
     override val idleChance by idleChanceValue
 
-    val jitterYawValue = group.float("JitterYaw", 0.12f, 0f..2f, "°")
+    val jitterYawValue = group.float("JitterYaw", 0.1f, 0f..2f, "°")
     override val jitterYaw by jitterYawValue
-    val jitterPitchValue = group.float("JitterPitch", 0.08f, 0f..2f, "°")
+    val jitterPitchValue = group.float("JitterPitch", 0.06f, 0f..2f, "°")
     override val jitterPitch by jitterPitchValue
 
     val gcdFixValue = group.boolean("GcdFix", true)
@@ -437,14 +452,14 @@ internal class AimValues(
     override val mouseNoise by mouseNoiseValue
 
     /** How often (in %) the hand lands one count past the goal; the next tick takes it back. */
-    val overshootValue = group.int("Overshoot", 8, 0..30, "%")
+    val overshootValue = group.int("Overshoot", 10, 0..30, "%")
     override val overshoot by overshootValue
 
     /**
      * Spread of [strength] drawn per target: two engagements never pull at exactly the same speed,
      * and a pull whose ratio is constant is a straight line, i.e. a pathfinder, not a hand.
      */
-    val strengthSpreadValue = group.int("StrengthSpread", 15, 0..50, "%")
+    val strengthSpreadValue = group.int("StrengthSpread", 20, 0..50, "%")
     override val strengthSpread by strengthSpreadValue
 
     /**
@@ -497,11 +512,16 @@ internal class AimValues(
     /**
      * The values each preset writes, declared once ([Preset] -> [applyPreset]). A full profile, not
      * just a speed, so picking a preset leaves the GUI showing exactly what the engine does.
+     *
+     * `Range`, `Fov`, `Strength` and `MaxSpeed` are the exception, and they are `null` by default:
+     * those four describe *the player's* aim — how far they reach, how wide they look, how much
+     * help they want and how fast they allow it — while everything else describes how the module
+     * behaves. A profile that does not name them leaves the slider exactly where the player put it.
      */
-    private class Profile(
+    private data class Profile(
         val mode: Mode,
-        val strength: Float,
-        val maxSpeed: Float,
+        val strength: Float? = null,
+        val maxSpeed: Float? = null,
         val smoothing: Smoothing,
         val pitchAssist: Float,
         val aimPoint: AimPoint,
@@ -520,17 +540,47 @@ internal class AimValues(
         val gcdFix: Boolean,
         val gcdDither: Boolean,
         val switchDelay: Int,
-        val range: Float,
-        val fov: Float,
+        val range: Float? = null,
+        val fov: Float? = null,
         val silent: Boolean,
         val moveFix: MoveFix,
         val throughWalls: Boolean,
         val antiBot: Boolean,
+        val priority: Priority = Priority.FOV,
+        val minHealth: Int = 0,
+        val lockTarget: Boolean = true,
+        val mouseNoise: Int = 2,
+        val overshoot: Int = 8,
+        val strengthSpread: Int = 15,
+        val patternGuard: Boolean = true,
         val engine: Engine = Engine.MATH,
         val aiModel: AiModel = AiModel.MODEL_19KC8KP,
         val aiYawMultiplier: Float = 1.5f,
         val aiPitchMultiplier: Float = 1f,
         val aiCorrection: Float = 12f
+    )
+
+    /**
+     * The profile the module ships with, and the one `Profile B` differs from by its engine alone.
+     *
+     * Everything here is a *setting of the module*: what it is allowed to do (the cone, the
+     * crosshair gate, no friction beyond the vanilla cursor), how slowly it does it (the curve, the
+     * reaction, the fade, the idle beats) and what it leaves in the packets (whole counts, a hand's
+     * noise, no cycle). `Range`, `Fov`, `Strength` and `MaxSpeed` are not part of it on purpose:
+     * those are the four the player tunes to their own hand, and a preset that overwrote them would
+     * turn "give me the safe behaviour" into "give me somebody else's aim".
+     */
+    private val dailyProfile = Profile(
+        mode = Mode.BOTH, smoothing = Smoothing.BEZIER, pitchAssist = 50f,
+        aimPoint = AimPoint.CLOSEST, predict = 0.05f, predictSize = 2,
+        onlyOnCrosshair = true, turnCheck = true, friction = 20f, deadZone = 0.4f,
+        reactionDelay = 200, reactionRandom = 100, fadeIn = 300, idleChance = 15,
+        jitterYaw = 0.1f, jitterPitch = 0.06f, gcdFix = true, gcdDither = true,
+        switchDelay = 450, silent = false, moveFix = MoveFix.SILENT,
+        throughWalls = false, antiBot = true,
+        priority = Priority.FOV, minHealth = 0, lockTarget = true,
+        mouseNoise = 2, overshoot = 10, strengthSpread = 20, patternGuard = true,
+        engine = Engine.MATH, aiYawMultiplier = 1.2f, aiPitchMultiplier = 1f, aiCorrection = 10f
     )
 
     /** The values each preset writes. Add or tweak here; the GUI follows automatically. */
@@ -547,7 +597,9 @@ internal class AimValues(
             reactionDelay = 40, reactionRandom = 20, fadeIn = 60, idleChance = 0,
             jitterYaw = 0.05f, jitterPitch = 0.05f, gcdFix = true, gcdDither = false,
             switchDelay = 100, range = 4.2f, fov = 90f, silent = true, moveFix = MoveFix.SILENT,
-            throughWalls = false, antiBot = true
+            throughWalls = false, antiBot = true,
+            // The reference machine: the lattice is still handled, the hand is not.
+            mouseNoise = 0, overshoot = 0, strengthSpread = 0
         )
 
         // The default: the camera is helped, the mouse is damped on the hitbox, nothing is taken
@@ -599,18 +651,35 @@ internal class AimValues(
             engine = Engine.AI, aiModel = AiModel.MODEL_19KC8KP,
             aiYawMultiplier = 1.5f, aiPitchMultiplier = 1f, aiCorrection = 12f
         )
+
+        // The profile the module ships with: the curve, the camera helped, the server never told a
+        // rotation the player is not already seeing. `Silent` off is the whole point — what the
+        // server receives and what is on screen are the same numbers, so there is no "post
+        // rotation" to find. Range/Fov/Strength/MaxSpeed are the player's (see [dailyProfile]).
+        Preset.PROFILE_A -> dailyProfile
+
+        // The same profile with the trained model instead of the curve: a better shape through
+        // direction changes, at the price of an answer we cannot read from the code when something
+        // is flagged. The gains that were tuned for the model are all here, not in the sliders.
+        Preset.PROFILE_B -> dailyProfile.copy(
+            engine = Engine.AI, aiModel = AiModel.MODEL_19KC8KP,
+            aiYawMultiplier = 1.2f, aiPitchMultiplier = 1f, aiCorrection = 10f
+        )
     }
+
+    /** The two profiles that leave `Range`, `Fov`, `Strength` and `MaxSpeed` to the player. */
+    private fun isDailyProfile(preset: Preset) =
+        preset == Preset.PROFILE_A || preset == Preset.PROFILE_B
 
     /**
      * Writes [Preset] into the module's values, so the GUI always shows what is actually being
-     * used. Called whenever the preset changes; [Preset.CUSTOM] does nothing.
+     * used. Called whenever the preset changes; [Preset.CUSTOM] does nothing, and the two "Profile"
+     * presets leave the four knobs of the player's own aim alone (see [Profile]).
      */
     private fun applyPreset(preset: Preset) {
         val p = profileOf(preset) ?: return
 
         modeValue.set(p.mode)
-        strengthValue.set(p.strength)
-        maxSpeedValue.set(p.maxSpeed)
         smoothingValue.set(p.smoothing)
         engineValue.set(p.engine)
         aiModelValue.set(p.aiModel)
@@ -633,21 +702,41 @@ internal class AimValues(
         jitterPitchValue.set(p.jitterPitch)
         gcdFixValue.set(p.gcdFix)
         gcdDitherValue.set(p.gcdDither)
-        // A blatant profile is the reference machine: the lattice is still handled, the hand is not.
-        val blatant = preset == Preset.BLATANT
-        mouseNoiseValue.set(if (blatant) 0 else 2)
-        overshootValue.set(if (blatant) 0 else 8)
-        strengthSpreadValue.set(if (blatant) 0 else 15)
+        mouseNoiseValue.set(p.mouseNoise)
+        overshootValue.set(p.overshoot)
+        strengthSpreadValue.set(p.strengthSpread)
+        patternGuardValue.set(p.patternGuard)
         switchDelayValue.set(p.switchDelay)
-        rangeValue.set(p.range)
-        fovValue.set(p.fov)
         silentValue.set(p.silent)
         moveFixValue.set(p.moveFix)
         throughWallsValue.set(p.throughWalls)
         antiBotValue.set(p.antiBot)
+        priorityValue.set(p.priority)
+        minHealthValue.set(p.minHealth)
+        lockTargetValue.set(p.lockTarget)
+
+        // The player's own aim: written only by a profile that names it. The two "Profile" presets
+        // do not, so they change how the module behaves and leave how far you reach, how wide you
+        // look, how much help you want and how fast you allow it exactly where you put them.
+        p.strength?.let { strengthValue.set(it) }
+        p.maxSpeed?.let { maxSpeedValue.set(it) }
+        p.range?.let { rangeValue.set(it) }
+        p.fov?.let { fovValue.set(it) }
 
         if (debug && mc.player != null) {
             chat("§7[" + group.name + "] §fpreset ${preset.tag} applied")
+        }
+
+        // The daily profiles are designed around a nudge, and they do not touch these two: an "A"
+        // running at Strength 90 is no longer the profile that was designed, and saying so here beats
+        // reading it off an anti-cheat log.
+        if (isDailyProfile(preset) && (strength > 50f || maxSpeed > 12f)) {
+            // One line, built first: `format` binds to a single literal, so a concatenation has to
+            // be put together before the placeholders are filled.
+            val note = "§7[" + group.name + "] §e" + preset.tag +
+                    " leaves Strength (%.0f%%) and MaxSpeed (%.0f°) as they are: " +
+                    "it is designed for a nudge (up to 50%%, 12°)"
+            chat(note.format(strength, maxSpeed))
         }
     }
 

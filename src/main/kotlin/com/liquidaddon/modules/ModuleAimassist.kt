@@ -47,8 +47,12 @@ import net.ccbluex.liquidbounce.utils.render.TargetRenderer
  * `RotationManager` with `MoveFix`, at `IMPORTANT_FOR_USAGE_1` — i.e. below KillAura/Aimbot, which
  * always keep the rotation to themselves.
  *
- * Presets (`Blatant`, `Legit`, `Ghost`, `Closet`, `AI`) are full profiles, not just a speed: picking
- * one writes every slider, so the ClickGUI always shows what the module is really doing.
+ * The module ships on `Preset = Profile A`: the curve, the camera helped, `Silent` off, the
+ * crosshair gate on, and the whole humanization of the engine underneath. `Profile B` is the same
+ * profile with the trained model instead of the curve (see [AimValues]). Both of them leave `Range`,
+ * `Fov`, `Strength` and `MaxSpeed` alone — those four are the player's own aim — while `Blatant`,
+ * `Legit`, `Ghost`, `Closet` and `AI` are complete profiles that write every slider, so the ClickGUI
+ * always shows what the module is really doing.
  *
  * The blue circle under the current target is LiquidBounce's own [TargetRenderer], the same one
  * KillAura and Aimbot draw, configured in the `TargetRendering` group.
