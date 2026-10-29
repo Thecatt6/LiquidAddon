@@ -1,6 +1,7 @@
 package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
+import com.liquidaddon.modules.jumpreset.JumpResetHud
 import net.ccbluex.liquidbounce.event.events.MovementInputEvent
 import net.ccbluex.liquidbounce.event.events.PacketEvent
 import net.ccbluex.liquidbounce.event.events.TransferOrigin
@@ -129,8 +130,16 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
     private var perfect = 0
     private var lastSkip = "idle"
 
+    /**
+     * HUD tag: the chance of a jump reset, and how often the timing was right — `60%`, then
+     * `60% 3/4` once the module has jumped (see [JumpResetHud]).
+     *
+     * The probability is the half that cannot be guessed from the outside: a module sitting at 20%
+     * reads exactly like a module that is not working, and this is where that is visible without
+     * opening the ClickGUI.
+     */
     override val tag: String
-        get() = if (attempts == 0) "" else "$perfect/$attempts"
+        get() = JumpResetHud.tag(chance, perfect, attempts)
 
     override fun onEnabled() {
         reset()
@@ -237,7 +246,7 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
             return
         }
         if (!me.onGround()) {
-            note("skipped (hit in aria: non c'è terra da cui saltare)")
+            note("skipped (hit in the air: there is no ground to jump from)")
             return
         }
         if (!canOperate(me)) {
