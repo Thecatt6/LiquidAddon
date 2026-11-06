@@ -12,7 +12,10 @@
           { "name": "Fov", "value": 24.0 },
           { "name": "Strength", "value": 35.0 },
           { "name": "MaxSpeed", "value": 7.0 },
-          { "name": "PatternGuard", "value": true }
+          { "name": "PatternGuard", "value": true },
+          { "name": "HandOnly", "value": true },
+          { "name": "HandThreshold", "value": 1.0 },
+          { "name": "HandFade", "value": 4 }
         ]
       },
       {

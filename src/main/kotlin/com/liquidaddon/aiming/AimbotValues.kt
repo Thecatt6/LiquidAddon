@@ -95,6 +95,16 @@ internal class AimbotValues(group: ValueGroup) : AimSettings {
      */
     override val patternGuard by group.boolean("PatternGuard", true)
 
+    /**
+     * Fixed off: this module picks the target and goes there on its own, so there is no hand to
+     * wait for. A gate that waited for the mouse would make it do nothing at all — and the reason
+     * the assist has it (a step nobody asked for, on a view nobody moved) does not apply to a
+     * module whose whole job is to move the view.
+     */
+    override val handOnly get() = false
+    override val handThreshold get() = 0f
+    override val handFade get() = 0
+
     /** A trace of noise on the step, in degrees, so the path is not a perfect curve. */
     private val jitter by group.float("Jitter", 0.03f, 0f..2f, "°")
 
