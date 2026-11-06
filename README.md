@@ -230,6 +230,72 @@ resting case, it only has to break the residual cycles in a signal the hand is a
 movement by construction). The aimbot, the fireball throw and the flick leave `HandOnly` fixed
 **off**: they exist to move the view with no hand on it.
 
+## Training the AI on your own aim
+
+`Preset = Profile B` swaps the curve for LiquidBounce's combat model: a `6 → 2` regression that sees
+the remaining Δyaw/Δpitch, the two deltas of the previous tick, the closing speed and the distance,
+and answers with the step a human hand took next. The client can be taught *your* hand, because the
+whole pipeline ships with it:
+
+| Step | In the client |
+|---|---|
+| Record | `DebugRecorder` → `Mode = CombatTrainer` (a client-side slime 2–3 blocks away, one sample per tick until you hit it) or `Mode = Combat` (real fights, only while the target is in the crosshair) |
+| Files | `.liquidbounce/debug-recorder/<Mode>/<date>.json` — one array of `CombatSample` per session |
+| Train | `/models improve 19KC8KP` (fine-tune a bundled model) or `/models create <name>` (from zero): 100 epochs, batch 32, Adam `1e-3`, progress bar at the top of the screen |
+| Use | the result lands in `.liquidbounce/deeplearning/models/<name>/`; a user model with the same name as a bundled one **replaces** it, so `improve 19KC8KP` needs no configuration change |
+
+What it learns is the *velocity profile* of the hand: how much of the remaining angle you cover per
+tick, where you overshoot, where you slow down onto the hitbox. Not the strafe, not the click timing,
+and nothing about flicks — a 60° step is outside the data the model was fitted on. `hurtTime` and
+`age` are written to the file but are not part of the six inputs, so knockback reactions cannot be
+learned from them either.
+
+### The data stage the client does not have
+
+`/models` globs **every** `.json` under `debug-recorder/Combat` and `debug-recorder/CombatTrainer`,
+concatenates the lot and fits it for a fixed 100 epochs with L2 loss and no validation set. Nothing
+is filtered, nothing is ever removed, and there is no metric that would tell you a session was bad.
+Three ways a recording goes bad, all invisible afterwards:
+
+- **a module was on** — the recorder reads the rotation the client *sends*, so a silent rotation is
+  labelled as "the player's hand" and the model learns to copy the module;
+- **another sensitivity** — the labels sit on a different mouse lattice, and the fit averages two;
+- **a lag spike** — one 90° step among thousands of 1° steps dominates an L2 loss.
+
+`configs/model_data.py` is that missing stage:
+
+```
+python3 configs/model_data.py report                    # what is in the recordings
+python3 configs/model_data.py clean  --dry-run          # what would be dropped, why
+python3 configs/model_data.py clean  --install --snap auto
+```
+
+`report` prints one row per session — sample count, the lattice one mouse count comes out as, the
+median/p95 target angle, the same for the step, the share of rows that are a still hand, the longest
+run of identical steps, and how many rows `clean` would drop — then the sessions worth a second look.
+A run of eight identical steps or more is a module or a target that never moved; a lattice that
+differs from the other sessions is a recording made at another sensitivity.
+
+`clean` drops the rows a hand cannot have produced, and says why for each:
+
+| Rule | Dropped |
+|---|---|
+| `not-a-number` / `not-a-direction` | corrupt rows: NaN, or a direction vector that is not unit length |
+| `step-too-big` | more than 30° in one tick (`--max-label`) |
+| `target-behind` | the target was more than 90° away (`--max-target`): a swing, not a track |
+| `out-of-range` | further than 5.5 blocks (`--max-distance`), where no profile fights |
+
+`--install` renames the two live folders to `Combat.bak-<date>` / `CombatTrainer.bak-<date>` and
+puts the clean copies in their place, because `/models` reads the live folders and a filtered copy
+next to them would change nothing. `--snap auto` rounds every label to the mouse lattice the client
+quantizes to at inference anyway, so the model is fitted in whole counts instead of in a resolution
+the client then throws away.
+
+Two things it cannot fix, because they are in the client: `improve` reuses the training learning
+rate of a model being trained from zero, and 100 epochs with no validation set will memorise a few
+hundred samples. Record a few thousand, prefer `improve` over `create`, and if the result is worse
+than the bundled model, `/models delete 19KC8KP` brings the original back — it lives in the JAR.
+
 ## A rotation that never repeats itself
 
 An anti-cheat cannot see *why* a rotation moved; it can only see the numbers, over and over.
@@ -237,7 +303,7 @@ An anti-cheat cannot see *why* a rotation moved; it can only see the numbers, ov
 case for it of everything in this add-on: an assist holds the crosshair on the same target for
 seconds, and with the hand still the steps in the packets would be the module's alone — no hand
 mixed in. A slow pull through a mouse-count lattice then emits the same couple of numbers on every
-tick, which is exactly the shape the check is built to find. `HandOnly` (below) removes that case
+tick, which is exactly the shape the check is built to find. `HandOnly` (above) removes that case
 before it exists; what follows is what handles the case that is left, a hand that is moving.
 
 Three rules in `AimassistCore` / `MousePatternGuard` (shared with `AimbotAI`, `FireballDeflect`
