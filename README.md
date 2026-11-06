@@ -143,6 +143,7 @@ Both write the whole *behaviour* of the module:
 | `IdleChance` | 15% | a pull that never stops is a machine |
 | `MouseNoise` / `Overshoot` / `StrengthSpread` | 2 / 10 / 20 | the hand on the mouse lattice |
 | `PatternGuard` | on | no window of two to six steps repeats three times |
+| `HandOnly` / `HandThreshold` / `HandFade` | on / 1 count / 4 ticks | the assist only helps while the mouse is moving |
 | `Silent` | **off** | the server sees what the player sees: nothing to call a post rotation |
 | `AttackSync` | on | a click never leaves before the rotation is on the entity |
 
@@ -195,14 +196,49 @@ applied and do nothing:
 python3 configs/check_config.py     # 21 modules, every value verified against the source
 ```
 
+## Help only while the hand moves
+
+`Killaura (Pattern)` reads a sequence. The worst sequence the assist can produce is the one where
+**nothing of the player's is in it**: crosshair on the target, mouse still, and every step in the
+packets written by the module. That case is not a rare edge, it is what happens for as long as two
+players stand in front of each other.
+
+So the assist is now gated on the hand: `HandOnly` (on in both daily profiles) grants help only
+while the mouse is actually moving.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `HandOnly` | on | grants no help while the hand is still — not even a drift |
+| `HandThreshold` | 1 count | how far the mouse has to move in one tick to count; `0` turns the gate off |
+| `HandFade` | 4 ticks | the pull runs out over a few ticks after the last movement, so the gate has no edge |
+
+Two things make it exact rather than a guess:
+
+- the measurement is the player's own turn, already computed every tick **with the module's
+  contribution subtracted** (`me.yRot - lastCameraYaw - lastAssistYaw`), so the gate can never
+  certify itself;
+- it is compared in **mouse counts** (`÷ RotationUtil.gcd`), the unit a hand works in: half a count
+  is not a movement, it is the camera sitting still. Both axes are added, so a diagonal movement of
+  half a count each is still a movement.
+
+The cost is real and it is the point: **a target that slides away while the mouse is still is not
+followed.** That is what an assist is. What it buys is that no correction the server ever sees is a
+step the player did not take — and the `PatternGuard` no longer has to invent anything to cover the
+resting case, it only has to break the residual cycles in a signal the hand is already varying.
+
+`Mode = Friction` never needed the gate (it damps the cursor's own deltas, so it can only act on
+movement by construction). The aimbot, the fireball throw and the flick leave `HandOnly` fixed
+**off**: they exist to move the view with no hand on it.
+
 ## A rotation that never repeats itself
 
 An anti-cheat cannot see *why* a rotation moved; it can only see the numbers, over and over.
 `Killaura (Pattern)` is the check that reads them as a sequence, and the Aimassist is the worst
 case for it of everything in this add-on: an assist holds the crosshair on the same target for
-seconds, and while the player keeps still the steps in the packets are the module's alone — no
-hand mixed in. A slow pull through a mouse-count lattice then emits the same couple of numbers on
-every tick, which is exactly the shape the check is built to find.
+seconds, and with the hand still the steps in the packets would be the module's alone — no hand
+mixed in. A slow pull through a mouse-count lattice then emits the same couple of numbers on every
+tick, which is exactly the shape the check is built to find. `HandOnly` (below) removes that case
+before it exists; what follows is what handles the case that is left, a hand that is moving.
 
 Three rules in `AimassistCore` / `MousePatternGuard` (shared with `AimbotAI`, `FireballDeflect`
 and `FireballJumpAI`) make sure the sequence never settles:

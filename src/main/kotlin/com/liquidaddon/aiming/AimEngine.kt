@@ -285,6 +285,22 @@ internal interface AimSettings {
      */
     val patternGuard: Boolean
 
+    /**
+     * Only correct while the player is moving the mouse (see [HandGate]).
+     *
+     * A hand changes the view when it moves; a module keeps correcting when it does not. That is
+     * the one difference no noise can hide, because with the mouse standing still every step in the
+     * packets is the module's own — so on the assist this is on, and the profiles that aim on their
+     * own (the aimbot, a throw, a flick) leave it off: they have no hand to wait for.
+     */
+    val handOnly: Boolean
+
+    /** How many mouse counts per tick count as "the player moved". 0 switches [handOnly] off. */
+    val handThreshold: Float
+
+    /** Ticks the pull survives after the mouse stops, before the assist lets go (see [HandGate]). */
+    val handFade: Int
+
     // --- how the rotation reaches the server ---
     val silent: Boolean
     val moveFix: MoveFix
@@ -471,6 +487,26 @@ internal class AimValues(
     val patternGuardValue = group.boolean("PatternGuard", true)
     override val patternGuard by patternGuardValue
 
+    /**
+     * The assist is granted only while the mouse is moving.
+     *
+     * With the crosshair sitting on a target and the hand still, every correction is the module's
+     * alone: nothing of the player's is mixed in, and that is the easiest sequence in the world to
+     * read. With the hand moving, every step the server receives is a movement the player is making
+     * anyway, with a nudge on top — which is what an assist is. The cost is real and it is the
+     * point: a target that slides away while the mouse is still is not followed.
+     */
+    val handOnlyValue = group.boolean("HandOnly", true)
+    override val handOnly by handOnlyValue
+
+    /** How much the mouse has to move in one tick to count as a movement, in mouse counts. */
+    val handThresholdValue = group.float("HandThreshold", 1f, 0f..3f, "counts")
+    override val handThreshold by handThresholdValue
+
+    /** Ticks the assist keeps helping after the last mouse movement, so the gate has no edge. */
+    val handFadeValue = group.int("HandFade", 4, 0..10, "ticks")
+    override val handFade by handFadeValue
+
     // --- how the rotation reaches the server ------------------------------------------------
 
     /** Only the server sees the assist; the camera stays exactly where the player points it. */
@@ -553,6 +589,9 @@ internal class AimValues(
         val overshoot: Int = 8,
         val strengthSpread: Int = 15,
         val patternGuard: Boolean = true,
+        val handOnly: Boolean = true,
+        val handThreshold: Float = 1f,
+        val handFade: Int = 4,
         val engine: Engine = Engine.MATH,
         val aiModel: AiModel = AiModel.MODEL_19KC8KP,
         val aiYawMultiplier: Float = 1.5f,
@@ -580,6 +619,7 @@ internal class AimValues(
         throughWalls = false, antiBot = true,
         priority = Priority.FOV, minHealth = 0, lockTarget = true,
         mouseNoise = 2, overshoot = 10, strengthSpread = 20, patternGuard = true,
+        handOnly = true, handThreshold = 1f, handFade = 4,
         engine = Engine.MATH, aiYawMultiplier = 1.2f, aiPitchMultiplier = 1f, aiCorrection = 10f
     )
 
@@ -598,8 +638,9 @@ internal class AimValues(
             jitterYaw = 0.05f, jitterPitch = 0.05f, gcdFix = true, gcdDither = false,
             switchDelay = 100, range = 4.2f, fov = 90f, silent = true, moveFix = MoveFix.SILENT,
             throughWalls = false, antiBot = true,
-            // The reference machine: the lattice is still handled, the hand is not.
-            mouseNoise = 0, overshoot = 0, strengthSpread = 0
+            // The reference machine: the lattice is still handled, the hand is not, and neither is
+            // the gate that waits for one.
+            mouseNoise = 0, overshoot = 0, strengthSpread = 0, handOnly = false
         )
 
         // The default: the camera is helped, the mouse is damped on the hitbox, nothing is taken
@@ -706,6 +747,9 @@ internal class AimValues(
         overshootValue.set(p.overshoot)
         strengthSpreadValue.set(p.strengthSpread)
         patternGuardValue.set(p.patternGuard)
+        handOnlyValue.set(p.handOnly)
+        handThresholdValue.set(p.handThreshold)
+        handFadeValue.set(p.handFade)
         switchDelayValue.set(p.switchDelay)
         silentValue.set(p.silent)
         moveFixValue.set(p.moveFix)
@@ -849,6 +893,9 @@ internal class AimassistCore(
     private val overshoot get() = values.overshoot
     private val strengthSpread get() = values.strengthSpread
     private val patternGuard get() = values.patternGuard
+    private val handOnly get() = values.handOnly
+    private val handThreshold get() = values.handThreshold
+    private val handFade get() = values.handFade
 
     /** Share of the remaining angle a step covers: [strength], spread per target ([strengthSpread]). */
     private val pull get() = (strength / 100f) * strengthScale
@@ -952,6 +999,12 @@ internal class AimassistCore(
     /** The sequence check every step goes through before it leaves (see [MousePatternGuard]). */
     private val patterns = MousePatternGuard()
 
+    /** Whether the player is moving the mouse, which is what [handOnly] gates the assist on. */
+    private val hand = HandGate()
+
+    /** Mouse counts the player moved on this tick, and what the hand gate allowed (debug line). */
+    private var handCounts = 0f
+
     /**
      * The "hand" of the moment (see [refreshHandProfile]).
      *
@@ -1030,6 +1083,8 @@ internal class AimassistCore(
         lastCountsYaw = null
         lastCountsPitch = null
         patterns.reset()
+        hand.reset()
+        handCounts = 0f
         handProfileUntil = 0L
         handNoise = 1f
         handOvershoot = 1f
@@ -1220,6 +1275,12 @@ internal class AimassistCore(
         lastAssistYaw = 0f
         lastAssistPitch = 0f
 
+        // The hand, in the unit a mouse works in. Measured on every tick — including the ones with
+        // no target — so that the tail of [handFade] runs on the tick clock and not on the fight.
+        // See [HandGate]: with this off, [hand] answers 1 and the engine behaves as it always did.
+        handCounts = HandGate.movementCounts(ownYaw, ownPitch, RotationUtil.gcd.toFloat())
+        val handShare = if (handOnly) hand.update(handCounts, handThreshold, handFade) else 1f
+
         val blocked = (pauseOnInventory && mc.gui.screen() != null) ||
                 (pauseOnUse && me.isUsingItem)
 
@@ -1338,6 +1399,19 @@ internal class AimassistCore(
             val deltaYaw = Mth.wrapDegrees(goal.yaw - aim.yaw)
             val deltaPitch = goal.pitch - aim.pitch
 
+            // The hand first: an assist is help for a hand that is moving, so with the mouse still
+            // there is nothing to assist. Nothing is written this tick — not even a drift — because
+            // a view that does not move is exactly what a hand at rest looks like in the packets.
+            if (handOnly && handShare <= 0f) {
+                hold()
+                debugLine(
+                    "hand at rest (own=%.2f° = %.2f counts, needs %.1f)".format(
+                        ownYaw, handCounts, handThreshold
+                    )
+                )
+                return
+            }
+
             // Never help a turn the player did not want. The gate blends instead of cutting: a
             // gentle drift away weakens the pull, a real push silences it, and nowhere along the
             // way is there a hard on/off step for the camera or the packets to stutter on.
@@ -1367,7 +1441,7 @@ internal class AimassistCore(
             speedDrift = (speedDrift + (Random.nextFloat() - 0.5f) * SPEED_DRIFT_STEP * handDrift)
                 .coerceIn(0.85f, 1.15f)
 
-            val allowance = weight * responseJitter * speedDrift * gate * glide * fade
+            val allowance = weight * responseJitter * speedDrift * gate * glide * fade * handShare
             val ai = if (engine == Engine.AI) aiStep(me, aim, goal, target) else null
 
             if (ai != null) {
@@ -2294,7 +2368,7 @@ internal class AimassistCore(
             ) + "§7strength=%.0f%% max=%.1f° own=%.2f° counts=%+d/%+d noise=%.1f (set %d) hand=%.1f under=%d".format(
                 strength, maxSpeed, lastOwnYaw, lastCountsYaw ?: 0, lastCountsPitch ?: 0,
                 mouseNoise * handNoise, mouseNoise, handNoise, handUndershoot
-            ) + " guard=%d".format(patterns.repairs) + (if (engine == Engine.AI) " §7$lastAiNote" else "") + warnings()
+            ) + " guard=%d hand=%.2f (%.1f cnt)".format(patterns.repairs, hand.activity, handCounts) + (if (engine == Engine.AI) " §7$lastAiNote" else "") + warnings()
         )
     }
 

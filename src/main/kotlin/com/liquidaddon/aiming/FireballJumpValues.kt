@@ -117,6 +117,15 @@ internal class FireballJumpValues(group: ValueGroup) : AimSettings {
     /** The sequence check of `MousePatternGuard`, always on: a flick is the one aim a check reads. */
     override val patternGuard get() = true
 
+    /**
+     * Fixed off: the target is a projectile and the aim is a deliberate flick nobody moves a mouse
+     * for. Waiting for the player's hand here would be waiting for the one thing that is not
+     * happening.
+     */
+    override val handOnly get() = false
+    override val handThreshold get() = 0f
+    override val handFade get() = 0
+
     /** A trace of noise in degrees, on top of the counts (see `JitterYaw` in the Aimassist). */
     override val jitterYaw get() = 0.02f
     override val jitterPitch get() = 0.02f
