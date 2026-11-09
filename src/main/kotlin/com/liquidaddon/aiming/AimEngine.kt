@@ -32,6 +32,7 @@ import net.minecraft.world.phys.Vec3
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.exp
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.round
 import kotlin.math.roundToInt
@@ -876,6 +877,19 @@ internal class AimassistCore(
     private val rotationPriority: RotationPriority = RotationPriority.IMPORTANT_FOR_USAGE_1,
 ) : MinecraftShortcuts {
 
+    /** The session telemetry of this engine, for `/liquidaddon ai`: pure counters, see [AiStats]. */
+    val stats = AiStats()
+
+    init {
+        AiCoreRegistry.register(this)
+    }
+
+    /** The module that owns this engine, to label its telemetry line. */
+    val ownerName: String get() = owner.name
+
+    /** [AiSettings.aiStrength] as the telemetry line prints it. */
+    val aiStrengthNow: Float get() = values.aiStrength
+
     // --- the values, read as if they were fields of the engine -------------------------------
 
     private val range get() = values.range
@@ -1139,6 +1153,7 @@ internal class AimassistCore(
         aiUnavailableReason = null
         lastAiNote = "ai idle"
         aiBlend = 1f
+        stats.reset()
         aiNoticeAt = 0L
         debugTick = 0
         lastGate = "start"
@@ -1426,6 +1441,11 @@ internal class AimassistCore(
         val fade = fadeProgress(now)
         var stepYaw = 0f
         var stepPitch = 0f
+        // Telemetry of an AI tick: the step the model drove and the one the curve would have driven
+        // on the same delta, raw, before the caps - the pair `/liquidaddon ai` averages and the
+        // drift guard correlates.
+        var telemetry: AiStats.Step? = null
+        var telemetryCurvePitch = 0f
         var correcting = false
 
         if (mode != Mode.FRICTION) {
@@ -1502,6 +1522,10 @@ internal class AimassistCore(
                 if (deltaPitch != 0f && aiPitch * deltaPitch < 0f) aiPitch = 0f
                 stepYaw = if (abs(aiYaw) > abs(deltaYaw) * past) deltaYaw * past else aiYaw
                 stepPitch = if (abs(aiPitch) > abs(deltaPitch) * past) deltaPitch * past else aiPitch
+
+                val curveShare = pull * shape(deltaYaw) * allowance
+                telemetry = AiStats.Step(aiYaw = stepYaw, curveYaw = deltaYaw * curveShare)
+                telemetryCurvePitch = deltaPitch * curveShare * (pitchAssist / 100f)
             } else {
                 // [Engine.MATH], or the AI falling back to it: the share of the remaining angle.
                 val share = pull * shape(deltaYaw) * allowance
@@ -1540,6 +1564,17 @@ internal class AimassistCore(
             pitchStepMax * (0.85f + Random.nextFloat() * 0.15f)
         )
         applyAim(me, aim, softLimit(stepYaw, maxSpeed), softLimit(stepPitch, pitchLimit), target)
+
+        telemetry?.let { step ->
+            stats.noteUsed(
+                aiMag = hypot(softLimit(step.aiYaw, maxSpeed), softLimit(stepPitch, pitchLimit)),
+                curveMag = hypot(
+                    softLimit(step.curveYaw, maxSpeed),
+                    softLimit(telemetryCurvePitch, pitchLimit)
+                ),
+                step = AiStats.Step(softLimit(step.aiYaw, maxSpeed), softLimit(step.curveYaw, maxSpeed)),
+            )
+        }
     }
 
     /* ---------------------------------------------------------------------------------------
@@ -2099,6 +2134,7 @@ internal class AimassistCore(
         goal: Rotation,
         target: Entity?
     ): Pair<Float, Float>? {
+        stats.noteRequested()
         if (!DeepLearningEngine.isInitialized) {
             return aiUnavailable("deep learning not initialised")
         }
@@ -2116,6 +2152,9 @@ internal class AimassistCore(
         val blocks = sqrt(squared.coerceAtLeast(0f))
         val swing = abs(Mth.wrapDegrees(goal.yaw - aim.yaw)) + abs(goal.pitch - aim.pitch)
         aiBlend = AiReach.blend(blocks, swing)
+        if (aiBlend < 1f) {
+            stats.noteFaded()
+        }
         if (aiBlend <= 0f) {
             // Not a failure, and not something to tell the player about: the curve is exactly what
             // should be answering here.
@@ -2174,6 +2213,7 @@ internal class AimassistCore(
      * because a silently degraded engine is worse than a slow one.
      */
     private fun aiUnavailable(reason: String): Pair<Float, Float>? {
+        stats.noteFallback(AiStats.fallbackKind(reason))
         if (aiUnavailableReason != reason) lastAiNote = "fallback: $reason"
         aiUnavailableReason = reason
 
@@ -2458,4 +2498,21 @@ internal class AimassistCore(
             append(" §cAI fallback (${aiUnavailableReason})")
         }
     }
+}
+
+/**
+ * The engines built in this session, by owner name: `/liquidaddon ai` reads one telemetry line per
+ * engine from here. A registry and nothing more - no engine knows about the others, and a module
+ * that never builds an engine simply never appears.
+ */
+internal object AiCoreRegistry {
+    private val cores = LinkedHashMap<String, AimassistCore>()
+
+    fun register(core: AimassistCore) {
+        synchronized(cores) {
+            cores[core.ownerName] = core
+        }
+    }
+
+    fun registered(): List<AimassistCore> = synchronized(cores) { cores.values.toList() }
 }

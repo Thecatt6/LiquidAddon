@@ -13,6 +13,7 @@ import com.liquidaddon.modules.ModuleFireballDeflect
 import com.liquidaddon.modules.ModuleFireballJumpAI
 import com.liquidaddon.modules.ModuleScaffoldLegit
 import com.liquidaddon.modules.ModuleTriggerBotPlus
+import com.liquidaddon.commands.CommandLiquidAddon
 import net.ccbluex.liquidbounce.features.addon.LiquidBounceAddon
 
 /**
@@ -29,6 +30,9 @@ class Addon : LiquidBounceAddon() {
         registerModules(
             ModuleHitFlick, ModuleHitSelect, ModuleAimbotAI, ModuleAimassist, ModuleScaffoldLegit, ModuleFakeLagV2, ModuleTriggerBotPlus, ModuleJumpReset, ModuleAutoPearlAI, ModuleBlockHit, ModuleFireballDeflect, ModuleDoubleClicks, ModuleFireballJumpAI
         )
+
+        // Telemetria del motore di mira: /liquidaddon ai
+        registerCommand(CommandLiquidAddon)
 
         // Prova a registrare il comando se esiste
         try {
