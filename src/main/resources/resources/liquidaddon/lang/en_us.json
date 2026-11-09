@@ -48,6 +48,7 @@
   "liquidbounce.module.aimassist.value.patternGuard.description": "Never hand out a sequence of steps that closes a cycle. What a 'pattern' check reads is the numbers coming back in the same order, which is what a slow pull on a target does.",
   "liquidbounce.module.aimassist.value.handOnly.description": "Only help while you are moving the mouse. With the mouse still, every correction in the packets is the module's own - the easiest thing to read - so the assist lets go instead, and picks up again the moment you move.",
   "liquidbounce.module.aimassist.value.handThreshold.description": "How far the mouse has to move in one tick to count as a movement, in mouse counts. 0 turns HandOnly off.",
+  "liquidbounce.module.aimassist.value.aiStrength.description": "How much of the model's answer is taken. 100 is the model deciding the step, which is the only setting where its shape is still its own; lower turns the assist back into the curve with a suggestion attached.",
   "liquidbounce.module.aimassist.value.handFade.description": "Ticks the assist keeps helping after the last mouse movement, so the hand gate closes on a ramp instead of an edge.",
   "liquidbounce.module.aimassist.value.smoothing.description": "Linear, Bezier or Sigmoid response.",
   "liquidbounce.module.aimassist.value.pitchAssist.description": "Share of the vertical correction relative to the horizontal one.",
