@@ -126,7 +126,7 @@ cannot drift apart.
 | | Profile A (default) | Profile B |
 |---|---|---|
 | Engine | `Math` — the curve | `AI` — LiquidBounce's trained combat model |
-| `AIYawMultiplier` / `AICorrection` | 1.2 / 10 | 1.2 / 10 |
+| `AIYawMultiplier` / `AICorrection` / `AIStrength` | 1.2 / 10 / 100% | 1.2 / 10 / 100% |
 | everything else | the same | the same |
 
 Both write the whole *behaviour* of the module:
@@ -249,6 +249,28 @@ tick, where you overshoot, where you slow down onto the hitbox. Not the strafe, 
 and nothing about flicks — a 60° step is outside the data the model was fitted on. `hurtTime` and
 `age` are written to the file but are not part of the six inputs, so knockback reactions cannot be
 learned from them either.
+
+### Who decides what
+
+With `Engine = AI` the model owns the step, and nothing else:
+
+| The model decides | The module decides (fixed code) |
+|---|---|
+| how far to move this tick, yaw and pitch — its answer **is** the strength (`AIStrength 100`) | *whether* to move at all: `HandOnly`, `FadeIn`, `ReactionDelay`, `IdleChance`, `TurnCheck`, `OnlyOnCrosshair` |
+| the shape of the move: acceleration, overshoot, slowing onto the hitbox | *who* and *where*: `Range`, `Fov`, `Priority`, `AimPoint`, `Predict` |
+| the yaw/pitch split, in the proportions of the hand it was trained on | what lands in the packet: the GCD lattice, `handOnLattice`, `PatternGuard` |
+
+`AIStrength` is the only knob on the model's magnitude: at `100` — what both daily profiles write — it
+is the model's step; lower values take a fraction of a human move, which is a shape no hand produces,
+and hand the rest of the tick back to `AICorrection`, a plain control loop. `AIPitchMultiplier` and
+`AIYawMultiplier` scale the two axes inside the answer; `PitchAssist` no longer touches it, because
+half the vertical a hand covers is still a vertical a hand covers.
+
+Outside what the model was fitted on, the answer is ramped down instead of trusted: `AiReach` goes
+from full at 6 blocks and 30° of correction to nothing at 8 blocks and 45°, and the curve takes back
+whatever share the model gives up. A regression answers outside its training data too — the ramp is
+what stops a confident wrong answer from becoming the whole step. The debug line says it when it
+happens: `ai 19KC8KP 1.20°/0.35° (60% reach)`.
 
 ### The data stage the client does not have
 

@@ -35,6 +35,7 @@ import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.round
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 import kotlin.math.tanh
 import kotlin.random.Random
 
@@ -219,6 +220,18 @@ internal interface AimSettings {
     val aiYawMultiplier: Float
     val aiPitchMultiplier: Float
     val aiCorrection: Float
+
+    /**
+     * How much of the model's answer is taken, in percent. `100` lets the model decide the step.
+     *
+     * The model was fitted on a person's ticks, so its output *is* a strength: `0.8°/tick` when a
+     * hand would move a degree and `4°` when it would move four. Scaling that again by [strength]
+     * does not make the assist gentler, it makes the answer somebody else's: half a human step is a
+     * shape no hand produces, and the tick ends up leaning on [aiCorrection] — a plain control loop —
+     * for the rest. The daily profiles therefore take the model whole, and the slider is there for a
+     * model that turned out too strong for a server, not as a second throttle.
+     */
+    val aiStrength: Float
     val pitchAssist: Float
     val aimPoint: AimPoint
     val predict: Float
@@ -406,6 +419,14 @@ internal class AimValues(
      */
     val aiCorrectionValue = group.float("AICorrection", 10f, 0f..100f, "%")
     override val aiCorrection by aiCorrectionValue
+
+    /**
+     * How much of the model's answer is taken: `100` (the default, and what both daily profiles
+     * write) is the model deciding the step, which is the only setting at which its shape is still
+     * its shape. Lower values turn the assist back into the curve with a suggestion attached.
+     */
+    val aiStrengthValue = group.float("AIStrength", 100f, 0f..100f, "%")
+    override val aiStrength by aiStrengthValue
 
     /** Share of the vertical correction, relative to the horizontal one (humans track yaw better). */
     val pitchAssistValue = group.float("PitchAssist", 50f, 0f..100f, "%")
@@ -596,7 +617,8 @@ internal class AimValues(
         val aiModel: AiModel = AiModel.MODEL_19KC8KP,
         val aiYawMultiplier: Float = 1.5f,
         val aiPitchMultiplier: Float = 1f,
-        val aiCorrection: Float = 12f
+        val aiCorrection: Float = 12f,
+        val aiStrength: Float = 100f
     )
 
     /**
@@ -620,7 +642,10 @@ internal class AimValues(
         priority = Priority.FOV, minHealth = 0, lockTarget = true,
         mouseNoise = 2, overshoot = 10, strengthSpread = 20, patternGuard = true,
         handOnly = true, handThreshold = 1f, handFade = 4,
-        engine = Engine.MATH, aiYawMultiplier = 1.2f, aiPitchMultiplier = 1f, aiCorrection = 10f
+        // The model decides the step; what is left for the curve is only the small correction that
+        // finishes it. Both daily profiles ask for the same, so A and B differ by the engine alone.
+        engine = Engine.MATH, aiYawMultiplier = 1.2f, aiPitchMultiplier = 1f, aiCorrection = 10f,
+        aiStrength = 100f
     )
 
     /** The values each preset writes. Add or tweak here; the GUI follows automatically. */
@@ -727,6 +752,7 @@ internal class AimValues(
         aiYawMultiplierValue.set(p.aiYawMultiplier)
         aiPitchMultiplierValue.set(p.aiPitchMultiplier)
         aiCorrectionValue.set(p.aiCorrection)
+        aiStrengthValue.set(p.aiStrength)
         pitchAssistValue.set(p.pitchAssist)
         aimPointValue.set(p.aimPoint)
         predictValue.set(p.predict)
@@ -871,6 +897,7 @@ internal class AimassistCore(
     private val aiYawMultiplier get() = values.aiYawMultiplier
     private val aiPitchMultiplier get() = values.aiPitchMultiplier
     private val aiCorrection get() = values.aiCorrection
+    private val aiStrength get() = values.aiStrength
     private val pitchAssist get() = values.pitchAssist
     private val aimPoint get() = values.aimPoint
     private val predict get() = values.predict
@@ -1037,6 +1064,12 @@ internal class AimassistCore(
     /** Last thing the model (or its fallback) did: the "Debug" line shows it as it is. */
     private var lastAiNote = "ai idle"
 
+    /**
+     * Share of the model's answer the last [aiStep] allowed, 0..1 (see [AiReach]). 1 for the maths
+     * engine: there is no model to weigh there.
+     */
+    private var aiBlend = 1f
+
     /** Throttle for the chat notice about a missing model/engine. */
     private var aiNoticeAt = 0L
 
@@ -1105,6 +1138,7 @@ internal class AimassistCore(
         crosshairGraceUntil = 0L
         aiUnavailableReason = null
         lastAiNote = "ai idle"
+        aiBlend = 1f
         aiNoticeAt = 0L
         debugTick = 0
         lastGate = "start"
@@ -1434,9 +1468,10 @@ internal class AimassistCore(
                 return
             }
 
-            // Everything the assist hands out is gated the same way for both engines: [strength]
-            // says how much help is granted, the bubble/turn/fade/idle gates say whether it is
-            // granted at all.
+            // Everything the assist hands out is gated the same way for both engines: the
+            // bubble/turn/fade/idle gates say whether help is granted at all, and the engine says
+            // what the help is — a share of the error ([strength]) or a whole human tick
+            // ([aiStrength]).
             // The speed of the pull walks over the engagement instead of sitting on one value.
             speedDrift = (speedDrift + (Random.nextFloat() - 0.5f) * SPEED_DRIFT_STEP * handDrift)
                 .coerceIn(0.85f, 1.15f)
@@ -1445,24 +1480,28 @@ internal class AimassistCore(
             val ai = if (engine == Engine.AI) aiStep(me, aim, goal, target) else null
 
             if (ai != null) {
-                // The model answers with the movement of a whole human tick, not with a share of a
-                // control error, so here [strength] means "how much of that human move the assist
-                // copies". On top of it a fraction of what is left ([aiCorrection]) keeps the aim
-                // converging even when the model under-shoots, exactly like LiquidBounce's own AI
-                // smooth does with its correction step.
-                val trust = pull * allowance
+                // The model answers with the movement of a whole human tick, so its answer *is* the
+                // strength: [aiStrength] says how much of it is taken (100 in both daily profiles —
+                // anything less is a fraction of a hand, a shape no hand makes), [aiCorrection] only
+                // finishes an answer that landed short. Whatever the model gives up because the
+                // situation is outside its training goes back to the curve for this tick.
+                val trust = (aiStrength / 100f) * strengthScale * allowance * aiBlend
                 val correction = (aiCorrection / 100f) * allowance
-                var aiYaw = ai.first * trust + deltaYaw * correction
-                var aiPitch = ai.second * trust * (pitchAssist / 100f) +
-                        deltaPitch * correction * (pitchAssist / 100f)
+                val curve = (1f - aiBlend) * pull * shape(deltaYaw) * allowance
+                var aiYaw = ai.first * trust + deltaYaw * (correction + curve)
+                // The vertical half of the answer is not scaled by [pitchAssist]: the model already
+                // learned how much of a target's height a hand covers per tick, and halving it here
+                // only hands the tick back to the control loop.
+                var aiPitch = ai.second * trust +
+                        deltaPitch * (correction + curve) * (pitchAssist / 100f)
 
-                // An assist never walks away from the goal and never walks past it: whatever the
-                // model suggested, the step stays inside the correction the maths engine would
-                // have made.
+                // An assist never walks away from the goal, and a hand overshoots a little: the step
+                // may pass the goal by [overshoot], never by more.
+                val past = 1f + overshoot / 100f
                 if (deltaYaw != 0f && aiYaw * deltaYaw < 0f) aiYaw = 0f
                 if (deltaPitch != 0f && aiPitch * deltaPitch < 0f) aiPitch = 0f
-                stepYaw = if (abs(aiYaw) > abs(deltaYaw)) deltaYaw else aiYaw
-                stepPitch = if (abs(aiPitch) > abs(deltaPitch)) deltaPitch else aiPitch
+                stepYaw = if (abs(aiYaw) > abs(deltaYaw) * past) deltaYaw * past else aiYaw
+                stepPitch = if (abs(aiPitch) > abs(deltaPitch) * past) deltaPitch * past else aiPitch
             } else {
                 // [Engine.MATH], or the AI falling back to it: the share of the remaining angle.
                 val share = pull * shape(deltaYaw) * allowance
@@ -2045,9 +2084,14 @@ internal class AimassistCore(
      *  - the speed of both entities, the distance and [LivingEntity.hurtTime] — the context the
      *    model was trained with.
      *
-     * The answer is *not* used as-is: it is a whole human tick, so [tick] scales it by the
-     * assist's own gates ([strength], [bubble], [turnCheck], [fadeIn], idle), adds the
-     * [aiCorrection] of what is left, and never lets it walk away from the goal or past it.
+     * The answer is a whole human tick, so it *is* the strength of the correction: [aiStrength] is
+     * how much of it is taken (the profiles take all of it), the assist's gates decide whether any
+     * of it is granted at all, and [aiCorrection] only adds the little that finishes an answer that
+     * landed short.
+     *
+     * Where the situation is outside what the model was fitted on — far targets, wide swings — the
+     * share of the answer is ramped down by [AiReach] and the curve takes over for the rest, so a
+     * confident wrong answer never becomes the whole step.
      */
     private fun aiStep(
         me: LocalPlayer,
@@ -2061,6 +2105,24 @@ internal class AimassistCore(
         val model = activeModel() ?: return aiUnavailable("no model '${aiModel.tag}' loaded")
         val previous = previousAim ?: aim
 
+        // Where the situation sits against the data the model was fitted on. Read before the
+        // predict: outside the ramp there is nothing to ask, and the forward pass is not free.
+        val squared = if (target != null) {
+            me.squaredBoxedDistanceTo(target).toFloat()
+        } else {
+            val point = forcedPointValue ?: me.eyePosition
+            me.eyePosition.distanceTo(point).toFloat().let { it * it }
+        }
+        val blocks = sqrt(squared.coerceAtLeast(0f))
+        val swing = abs(Mth.wrapDegrees(goal.yaw - aim.yaw)) + abs(goal.pitch - aim.pitch)
+        aiBlend = AiReach.blend(blocks, swing)
+        if (aiBlend <= 0f) {
+            // Not a failure, and not something to tell the player about: the curve is exactly what
+            // should be answering here.
+            lastAiNote = "ai out of reach (%.1f blocks, %.1f°)".format(blocks, swing)
+            return null
+        }
+
         // The predict can throw (closed model, translator failure) and must never reach the tick:
         // the assist keeps the maths engine, and the debug line says which model failed.
         val prediction = runCatching {
@@ -2072,12 +2134,7 @@ internal class AimassistCore(
                     velocityDelta = previous.rotationDeltaTo(aim).toVec2f(),
                     playerDiff = me.position().subtract(me.lastPos),
                     targetDiff = target?.let { it.position().subtract(it.lastPos) } ?: Vec3.ZERO,
-                    distance = if (target != null) {
-                        me.squaredBoxedDistanceTo(target).toFloat()
-                    } else {
-                        val point = forcedPointValue ?: me.eyePosition
-                        me.eyePosition.distanceTo(point).toFloat().let { it * it }
-                    },
+                    distance = squared,
                     // A projectile has no hurtTime, and neither has a block: the model was trained
                     // with the damage the target had taken, and there is none to report here.
                     hurtTime = (target as? LivingEntity)?.hurtTime ?: 0,
@@ -2094,7 +2151,8 @@ internal class AimassistCore(
         if (!yaw.isFinite() || !pitch.isFinite()) return aiUnavailable("model returned NaN")
 
         aiUnavailableReason = null
-        lastAiNote = "ai ${aiModel.tag} %.2f°/%.2f°".format(yaw, pitch)
+        lastAiNote = "ai ${aiModel.tag} %.2f°/%.2f°".format(yaw, pitch) +
+                (if (aiBlend < 1f) " §7(%.0f%% reach)".format(aiBlend * 100f) else "")
         return yaw to pitch
     }
 
