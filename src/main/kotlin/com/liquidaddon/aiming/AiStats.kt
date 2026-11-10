@@ -118,8 +118,14 @@ class AiStats {
         reachPct = percent(faded, requested),
         meanAiStep = mean(aiMagSum, steps),
         meanCurveStep = mean(curveMagSum, steps),
-        corr = pearson(window.map { it.aiYaw }, window.map { it.curveYaw }),
+        corr = windowCorr(),
     )
+
+    /** The correlation of the current window: the number the drift guard acts on (see [AiDrift]). */
+    fun windowCorr(): Float = pearson(window.map { it.aiYaw }, window.map { it.curveYaw })
+
+    /** Whether [WINDOW] pairs have been collected: the guard does not act on partial evidence. */
+    fun windowFull(): Boolean = window.size >= WINDOW
 
     private fun percent(part: Int, whole: Int): Int =
         if (whole <= 0) 0 else ((100.0 * part / whole) + 0.5).toInt()
