@@ -2,6 +2,7 @@ package com.liquidaddon.aiming
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class AiStatsTest {
@@ -82,6 +83,20 @@ class AiStatsTest {
         repeat(5) { stats.noteUsed(1f, 1f, AiStats.Step(-(it + 1f), it + 1f)) }
         repeat(20) { stats.noteUsed(1f, 1f, AiStats.Step(it + 1f, it + 1f)) }
         assertEquals(1f, stats.snapshot().corr)
+    }
+
+    @Test
+    fun `the drift guard reads a window, not a guess`() {
+        val stats = AiStats()
+        repeat(AiStats.WINDOW - 1) { i ->
+            stats.noteUsed(1f, 1f, AiStats.Step(i.toFloat(), i.toFloat() * 2f))
+        }
+        assertFalse(stats.windowFull(), "one pair short is partial evidence")
+        stats.noteUsed(1f, 1f, AiStats.Step(99f, 198f))
+        assertTrue(stats.windowFull(), "WINDOW pairs fill the window")
+        assertEquals(stats.snapshot().corr, stats.windowCorr())
+        assertEquals(1f, AiDrift.modelShare(stats.windowCorr(), stats.windowFull()),
+            "a full, agreeing window leaves the model alone")
     }
 
     @Test

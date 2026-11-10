@@ -1591,6 +1591,17 @@ internal class AimassistCore(
                 val curveShare = pull * shape(deltaYaw) * allowance
                 telemetry = AiStats.Step(aiYaw = stepYaw, curveYaw = deltaYaw * curveShare)
                 telemetryCurvePitch = deltaPitch * curveShare * (pitchAssist / 100f)
+
+                // The drift guard: while the window says the model has stopped tracking the
+                // geometry of the situation, the step is half model and half curve - it still
+                // converges, and it stays human-shaped (see [AiDrift] for why half and not all).
+                // The window keeps the raw pairs - the telemetry above is recorded before this
+                // blend - so `corr` keeps measuring the model, never the blend of itself.
+                val driftShare = AiDrift.modelShare(stats.windowCorr(), stats.windowFull())
+                if (driftShare < 1f) {
+                    stepYaw = stepYaw * driftShare + deltaYaw * curveShare * (1f - driftShare)
+                    stepPitch = stepPitch * driftShare + telemetryCurvePitch * (1f - driftShare)
+                }
             } else {
                 // [Engine.MATH], or the AI falling back to it: the share of the remaining angle.
                 val share = pull * shape(deltaYaw) * allowance
