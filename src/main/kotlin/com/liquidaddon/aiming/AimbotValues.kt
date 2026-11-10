@@ -52,6 +52,7 @@ internal class AimbotValues(group: ValueGroup) : AimSettings {
      */
     override val engine by group.enumChoice("Engine", Engine.MATH)
     override val aiModel by group.enumChoice("AIModel", AiModel.MODEL_19KC8KP)
+    override val aiInputPoint by group.enumChoice("AIInputPoint", AiInputPoint.EYES)
 
     /** Share of the vertical correction (humans track yaw better than pitch). */
     override val pitchAssist by group.float("PitchAssist", 70f, 0f..100f, "%")

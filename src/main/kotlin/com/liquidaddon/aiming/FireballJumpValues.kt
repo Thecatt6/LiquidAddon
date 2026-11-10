@@ -70,6 +70,7 @@ internal class FireballJumpValues(group: ValueGroup) : AimSettings {
      */
     override val engine by group.enumChoice("Engine", Engine.AI)
     override val aiModel by group.enumChoice("AIModel", AiModel.MODEL_19KC8KP)
+    override val aiInputPoint by group.enumChoice("AIInputPoint", AiInputPoint.EYES)
 
     /** The model's own scale. Above one: the error here is always the whole way down. */
     override val aiYawMultiplier get() = 1.5f
