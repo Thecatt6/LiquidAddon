@@ -177,6 +177,15 @@ enum class AiInputPoint(override val tag: String) : Tagged {
     EYES("Eyes"), ASSIST("Assist")
 }
 
+/**
+ * Whether the hand layer steps aside while the model authors the step; see [AiHand] for what
+ * exactly steps aside (noise capped at one count, no invented overshoot, no pull spread) and what
+ * stays (the lattice, the guard, the gate, the carry).
+ */
+enum class AiHandMode(override val tag: String) : Tagged {
+    ON("On"), OFF("Off")
+}
+
 enum class AimPoint(override val tag: String) : Tagged {
     CLOSEST("Closest"), HEAD("Head"), CHEST("Chest")
 }
@@ -233,6 +242,7 @@ internal interface AimSettings {
     val engine: Engine
     val aiModel: AiModel
     val aiInputPoint: AiInputPoint
+    val aiHand: AiHandMode
     val aiYawMultiplier: Float
     val aiPitchMultiplier: Float
     val aiCorrection: Float
@@ -426,6 +436,10 @@ internal class AimValues(
     /** The goal the model sees while [engine] is [Engine.AI]; see [AiInputPoint]. */
     val aiInputPointValue = group.enumChoice("AIInputPoint", AiInputPoint.EYES)
     override val aiInputPoint by aiInputPointValue
+
+    /** Let the model's own hand replace the painted one while [engine] is [Engine.AI]; see [AiHand]. */
+    val aiHandValue = group.enumChoice("AIHand", AiHandMode.ON)
+    override val aiHand by aiHandValue
 
     /** The per-axis gain of the model's answer, the same knob LiquidBounce's AI smooth has. */
     val aiYawMultiplierValue = group.float("AIYawMultiplier", 1.2f, 0.5f..2f)
@@ -636,6 +650,7 @@ internal class AimValues(
         val engine: Engine = Engine.MATH,
         val aiModel: AiModel = AiModel.MODEL_19KC8KP,
         val aiInputPoint: AiInputPoint = AiInputPoint.EYES,
+        val aiHand: AiHandMode = AiHandMode.ON,
         val aiYawMultiplier: Float = 1.5f,
         val aiPitchMultiplier: Float = 1f,
         val aiCorrection: Float = 12f,
@@ -750,7 +765,8 @@ internal class AimValues(
         // is flagged. The gains that were tuned for the model are all here, not in the sliders.
         Preset.PROFILE_B -> dailyProfile.copy(
             engine = Engine.AI, aiModel = AiModel.MODEL_19KC8KP,
-            aiYawMultiplier = 1.2f, aiPitchMultiplier = 1f, aiCorrection = 10f
+            aiYawMultiplier = 1.2f, aiPitchMultiplier = 1f, aiCorrection = 10f,
+            aiHand = AiHandMode.ON
         )
     }
 
@@ -771,6 +787,7 @@ internal class AimValues(
         engineValue.set(p.engine)
         aiModelValue.set(p.aiModel)
         aiInputPointValue.set(p.aiInputPoint)
+        aiHandValue.set(p.aiHand)
         aiYawMultiplierValue.set(p.aiYawMultiplier)
         aiPitchMultiplierValue.set(p.aiPitchMultiplier)
         aiCorrectionValue.set(p.aiCorrection)
@@ -930,6 +947,20 @@ internal class AimassistCore(
     private val engine get() = values.engine
     private val aiModel get() = values.aiModel
     private val aiInputPoint get() = values.aiInputPoint
+    private val aiHand get() = values.aiHand
+
+    /**
+     * The three dials of the hand layer as this tick reads them: with `AIHand = On` under
+     * [Engine.AI] the paint comes off the model's step, and the curve keeps its whole hand
+     * (see [AiHand] for why, and [AiHand.layer] for the rule).
+     */
+    private fun handLayer(): AiHand.Layer = AiHand.layer(
+        aiHand == AiHandMode.ON,
+        engine == Engine.AI,
+        mouseNoise,
+        overshoot,
+        strengthSpread,
+    )
     private val aiYawMultiplier get() = values.aiYawMultiplier
     private val aiPitchMultiplier get() = values.aiPitchMultiplier
     private val aiCorrection get() = values.aiCorrection
@@ -1396,7 +1427,7 @@ internal class AimassistCore(
             reactionUntil = if (target is LivingEntity && target === pendingAttack) now else now + reactionDelay +
                 Random.nextInt(reactionRandom + 1)
             responseJitter = 0.85f + Random.nextFloat() * 0.3f
-            strengthScale = 1f + (Random.nextFloat() - 0.5f) * 2f * (strengthSpread / 100f)
+            strengthScale = 1f + (Random.nextFloat() - 0.5f) * 2f * (handLayer().strengthSpread / 100f)
             speedDrift = 1f
             stillTicks = 0
         }
@@ -2382,7 +2413,7 @@ internal class AimassistCore(
             }
         }
 
-        val noise = (mouseNoise * handNoise).roundToInt()
+        val noise = (handLayer().mouseNoise * handNoise).roundToInt()
         if (noise > 0) {
             yaw += noiseCounts(noise, abs(countsYaw))
             // The hand is busier horizontally: the pitch gets less noise, and only when it is moving
@@ -2404,7 +2435,7 @@ internal class AimassistCore(
 
         // Now and then a count too far, taken back on the next tick: the most human thing in the
         // whole pipeline, and the one that keeps the sum moving instead of settling on a number.
-        val overshootChance = (overshoot * handOvershoot).roundToInt()
+        val overshootChance = (handLayer().overshoot * handOvershoot).roundToInt()
         if (overshootChance > 0 && Random.nextInt(100) < overshootChance) {
             val yawSign = when {
                 deltaYaw > 0.0 -> 1
