@@ -62,6 +62,8 @@ internal class FireballValues(group: ValueGroup) : AimSettings {
      */
     override val engine by group.enumChoice("Engine", Engine.AI)
     override val aiModel by group.enumChoice("AIModel", AiModel.MODEL_19KC8KP)
+    override val aiInputPoint by group.enumChoice("AIInputPoint", AiInputPoint.EYES)
+    override val aiHand by group.enumChoice("AIHand", AiHandMode.ON)
 
     /** The model's own scale. Slightly above one: the error here is always large. */
     override val aiYawMultiplier get() = 1.5f
@@ -104,6 +106,13 @@ internal class FireballValues(group: ValueGroup) : AimSettings {
      * happening.
      */
     override val handOnly get() = false
+
+    /**
+     * The model's answer is taken whole: these modules aim at something the curve cannot reach (a
+     * moving entity, a thrown point), so a fraction of the model would only be a fraction of an
+     * answer that is already the best one available.
+     */
+    override val aiStrength get() = 100f
     override val handThreshold get() = 0f
     override val handFade get() = 0
 

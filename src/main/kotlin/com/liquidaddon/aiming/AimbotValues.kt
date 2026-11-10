@@ -52,6 +52,8 @@ internal class AimbotValues(group: ValueGroup) : AimSettings {
      */
     override val engine by group.enumChoice("Engine", Engine.MATH)
     override val aiModel by group.enumChoice("AIModel", AiModel.MODEL_19KC8KP)
+    override val aiInputPoint by group.enumChoice("AIInputPoint", AiInputPoint.EYES)
+    override val aiHand by group.enumChoice("AIHand", AiHandMode.ON)
 
     /** Share of the vertical correction (humans track yaw better than pitch). */
     override val pitchAssist by group.float("PitchAssist", 70f, 0f..100f, "%")
@@ -102,6 +104,13 @@ internal class AimbotValues(group: ValueGroup) : AimSettings {
      * module whose whole job is to move the view.
      */
     override val handOnly get() = false
+
+    /**
+     * The model's answer is taken whole: these modules aim at something the curve cannot reach (a
+     * moving entity, a thrown point), so a fraction of the model would only be a fraction of an
+     * answer that is already the best one available.
+     */
+    override val aiStrength get() = 100f
     override val handThreshold get() = 0f
     override val handFade get() = 0
 
