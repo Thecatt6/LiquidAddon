@@ -48,6 +48,7 @@ DEFAULT_PROFILE = Path(__file__).resolve().parent / "liquidaddon-pvp189-ghost.js
 # draw (0.85 + U(0,0.15) -> 0.925 in expectation; the per-tick draw cannot be replayed offline).
 PITCH_STEP_MAX = 3.0
 PITCH_LIMIT_DRAW = 0.925
+YAW_LIMIT_DRAW = 0.925  # the yaw cap jitters per tick inside 85%..100% of MaxSpeed; offline, its mean
 RIDGE_LAMBDA = 1e-6
 QUANTUM = 0.05  # degrees: finer than a mouse count, coarse enough to count repetitions
 
@@ -266,7 +267,7 @@ def curve_predictor(profile):
 
     def predict(feat):
         share = strength * shape_of(smoothing, feat[0])
-        yaw = soft_limit(feat[0] * share, max_speed)
+        yaw = soft_limit(feat[0] * share, max_speed * YAW_LIMIT_DRAW)
         pitch = soft_limit(feat[1] * share * pitch_assist, pitch_limit)
         return yaw, pitch
 

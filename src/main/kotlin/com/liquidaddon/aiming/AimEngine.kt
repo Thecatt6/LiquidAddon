@@ -1635,20 +1635,28 @@ internal class AimassistCore(
         // one tall packet, and the limit itself is drawn per tick so a bound step is never the same
         // number twice. A module that has to look down at its own feet raises [pitchStepMax] to the
         // speed of a real flick (see [AimSettings.pitchStepMax]).
+        // The yaw cap jitters per tick the way the pitch cap already does - downward only, so the
+        // configured MaxSpeed stays a hard ceiling (never a floor to bounce over). A fixed cap
+        // saturates: through the opening of a flick the raw step is far above it and `tanh` pins
+        // the answer to the very same number every tick - a plateau of identical deltas on the
+        // wire, the most machine-like stretch of the whole turn. A cap drawn inside its own
+        // 85%..100% breaks the plateau; below the cap `tanh` is near-identity either way, so
+        // small steps are untouched.
+        val yawLimit = maxSpeed * (0.85f + Random.nextFloat() * 0.15f)
         val pitchLimit = minOf(
             maxSpeed * 0.7f,
             pitchStepMax * (0.85f + Random.nextFloat() * 0.15f)
         )
-        applyAim(me, aim, softLimit(stepYaw, maxSpeed), softLimit(stepPitch, pitchLimit), target)
+        applyAim(me, aim, softLimit(stepYaw, yawLimit), softLimit(stepPitch, pitchLimit), target)
 
         telemetry?.let { step ->
             stats.noteUsed(
-                aiMag = hypot(softLimit(step.aiYaw, maxSpeed), softLimit(stepPitch, pitchLimit)),
+                aiMag = hypot(softLimit(step.aiYaw, yawLimit), softLimit(stepPitch, pitchLimit)),
                 curveMag = hypot(
-                    softLimit(step.curveYaw, maxSpeed),
+                    softLimit(step.curveYaw, yawLimit),
                     softLimit(telemetryCurvePitch, pitchLimit)
                 ),
-                step = AiStats.Step(softLimit(step.aiYaw, maxSpeed), softLimit(step.curveYaw, maxSpeed)),
+                step = AiStats.Step(softLimit(step.aiYaw, yawLimit), softLimit(step.curveYaw, yawLimit)),
             )
         }
     }
