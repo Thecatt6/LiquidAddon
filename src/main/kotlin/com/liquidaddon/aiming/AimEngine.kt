@@ -160,7 +160,15 @@ enum class Engine(override val tag: String) : Tagged {
  * human fights (see `DebugCombatRecorder`), so nothing has to be trained here.
  */
 enum class AiModel(override val tag: String) : Tagged {
-    MODEL_19KC8KP("19KC8KP"), MODEL_21KC11KP("21KC11KP")
+    MODEL_19KC8KP("19KC8KP"), MODEL_21KC11KP("21KC11KP"),
+
+    /**
+     * Not a model of its own: whatever the client's AI settings have selected right now
+     * (`ModelManager.models.activeMode`), including a user model from the `deeplearning/models`
+     * folder that this enum cannot know by name. Follows the client, so a player who trains or
+     * downloads a better model uses it here without an add-on update.
+     */
+    CLIENT("Client")
 }
 
 /**
@@ -764,7 +772,7 @@ internal class AimValues(
         // direction changes, at the price of an answer we cannot read from the code when something
         // is flagged. The gains that were tuned for the model are all here, not in the sliders.
         Preset.PROFILE_B -> dailyProfile.copy(
-            engine = Engine.AI, aiModel = AiModel.MODEL_19KC8KP,
+            engine = Engine.AI, aiModel = AiModel.CLIENT,
             aiYawMultiplier = 1.2f, aiPitchMultiplier = 1f, aiCorrection = 10f,
             aiHand = AiHandMode.ON
         )
@@ -2258,20 +2266,27 @@ internal class AimassistCore(
         if (!yaw.isFinite() || !pitch.isFinite()) return aiUnavailable("model returned NaN")
 
         aiUnavailableReason = null
-        lastAiNote = "ai ${aiModel.tag} %.2f°/%.2f°".format(yaw, pitch) +
+        lastAiNote = "ai ${model.tag} %.2f°/%.2f°".format(yaw, pitch) +
                 (if (aiBlend < 1f) " §7(%.0f%% reach)".format(aiBlend * 100f) else "")
         return yaw to pitch
     }
 
     /**
-     * The selected bundled model. LiquidBounce merges the models shipped in its JAR with the ones
-     * in its `deeplearning/models` folder (a user copy overrides the bundled one), so the name is
-     * looked up instead of being instantiated here; the client's active model is the fallback.
+     * The model that answers this tick. [AiModel.CLIENT] is the client's own selection
+     * (`ModelManager.models.activeMode`, bundled or user-trained); a named tag is looked up in the
+     * merged list LiquidBounce keeps (a user copy overrides the bundled model of the same name),
+     * with the client's selection as the fallback. A `null` — the manager not ready, the list
+     * empty — degrades through the same [aiUnavailable] chain as every other failure: the curve
+     * takes the tick, the counter and the throttled chat line say why.
      */
     private fun activeModel(): TwoDimensionalRegressionModel? = runCatching {
         val group = ModelManager.models
-        group.modes.firstOrNull { model -> model.tag.equals(aiModel.tag, ignoreCase = true) }
-            ?: group.activeMode
+        if (aiModel == AiModel.CLIENT) {
+            group.activeMode
+        } else {
+            group.modes.firstOrNull { model -> model.tag.equals(aiModel.tag, ignoreCase = true) }
+                ?: group.activeMode
+        }
     }.getOrNull()
 
     /**
