@@ -37,6 +37,9 @@ import net.ccbluex.liquidbounce.utils.render.TargetRenderer
  *    carried over, and `FrameInterpolation` spreads a tick's step over the frames of that tick;
  *  - `TurnCheck`, `FadeIn`, `OnlyOnCrosshair`, `ReactionDelay`/`ReactionRandom`, `IdleChance`,
  *    `DeadZone` and the `Jitter*` knobs keep it looking like a hand;
+ *  - `HandOnly` (on in the shipped profiles) grants the help **only while the mouse is moving**:
+ *    with the hand still there is nothing to assist, and a correction nobody moved for is the one
+ *    step no amount of noise makes plausible;
  *  - `Mode = Friction` damps the cursor while it glides over a hitbox (`Both` does both);
  *  - `AttackSync` (on by default) holds a click until the rotation the server has is already on the
  *    entity being hit, then sends it: an attack can never leave *before* the aim arrives, which is

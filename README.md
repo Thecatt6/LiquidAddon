@@ -126,7 +126,7 @@ cannot drift apart.
 | | Profile A (default) | Profile B |
 |---|---|---|
 | Engine | `Math` — the curve | `AI` — LiquidBounce's trained combat model |
-| `AIYawMultiplier` / `AICorrection` | 1.2 / 10 | 1.2 / 10 |
+| `AIYawMultiplier` / `AICorrection` / `AIStrength` | 1.2 / 10 / 100% | 1.2 / 10 / 100% |
 | everything else | the same | the same |
 
 Both write the whole *behaviour* of the module:
@@ -143,6 +143,7 @@ Both write the whole *behaviour* of the module:
 | `IdleChance` | 15% | a pull that never stops is a machine |
 | `MouseNoise` / `Overshoot` / `StrengthSpread` | 2 / 10 / 20 | the hand on the mouse lattice |
 | `PatternGuard` | on | no window of two to six steps repeats three times |
+| `HandOnly` / `HandThreshold` / `HandFade` | on / 1 count / 4 ticks | the assist only helps while the mouse is moving |
 | `Silent` | **off** | the server sees what the player sees: nothing to call a post rotation |
 | `AttackSync` | on | a click never leaves before the rotation is on the entity |
 
@@ -195,14 +196,151 @@ applied and do nothing:
 python3 configs/check_config.py     # 21 modules, every value verified against the source
 ```
 
+## Help only while the hand moves
+
+`Killaura (Pattern)` reads a sequence. The worst sequence the assist can produce is the one where
+**nothing of the player's is in it**: crosshair on the target, mouse still, and every step in the
+packets written by the module. That case is not a rare edge, it is what happens for as long as two
+players stand in front of each other.
+
+So the assist is now gated on the hand: `HandOnly` (on in both daily profiles) grants help only
+while the mouse is actually moving.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `HandOnly` | on | grants no help while the hand is still — not even a drift |
+| `HandThreshold` | 1 count | how far the mouse has to move in one tick to count; `0` turns the gate off |
+| `HandFade` | 4 ticks | the pull runs out over a few ticks after the last movement, so the gate has no edge |
+
+Two things make it exact rather than a guess:
+
+- the measurement is the player's own turn, already computed every tick **with the module's
+  contribution subtracted** (`me.yRot - lastCameraYaw - lastAssistYaw`), so the gate can never
+  certify itself;
+- it is compared in **mouse counts** (`÷ RotationUtil.gcd`), the unit a hand works in: half a count
+  is not a movement, it is the camera sitting still. Both axes are added, so a diagonal movement of
+  half a count each is still a movement.
+
+The cost is real and it is the point: **a target that slides away while the mouse is still is not
+followed.** That is what an assist is. What it buys is that no correction the server ever sees is a
+step the player did not take — and the `PatternGuard` no longer has to invent anything to cover the
+resting case, it only has to break the residual cycles in a signal the hand is already varying.
+
+`Mode = Friction` never needed the gate (it damps the cursor's own deltas, so it can only act on
+movement by construction). The aimbot, the fireball throw and the flick leave `HandOnly` fixed
+**off**: they exist to move the view with no hand on it.
+
+## Training the AI on your own aim
+
+`Preset = Profile B` swaps the curve for LiquidBounce's combat model: a `6 → 2` regression that sees
+the remaining Δyaw/Δpitch, the two deltas of the previous tick, the closing speed and the distance,
+and answers with the step a human hand took next. The client can be taught *your* hand, because the
+whole pipeline ships with it:
+
+| Step | In the client |
+|---|---|
+| Record | `DebugRecorder` → `Mode = CombatTrainer` (a client-side slime 2–3 blocks away, one sample per tick until you hit it) or `Mode = Combat` (real fights, only while the target is in the crosshair) |
+| Files | `.liquidbounce/debug-recorder/<Mode>/<date>.json` — one array of `CombatSample` per session |
+| Train | `/models improve 19KC8KP` (fine-tune a bundled model) or `/models create <name>` (from zero): 100 epochs, batch 32, Adam `1e-3`, progress bar at the top of the screen |
+| Use | the result lands in `.liquidbounce/deeplearning/models/<name>/`; a user model with the same name as a bundled one **replaces** it, so `improve 19KC8KP` needs no configuration change |
+
+What it learns is the *velocity profile* of the hand: how much of the remaining angle you cover per
+tick, where you overshoot, where you slow down onto the hitbox. Not the strafe, not the click timing,
+and nothing about flicks — a 60° step is outside the data the model was fitted on. `hurtTime` and
+`age` are written to the file but are not part of the six inputs, so knockback reactions cannot be
+learned from them either.
+
+## The model as the author, the code as the guardrail
+
+`Preset = Profile B` is the whole idea in one click: **the model decides the step, the code decides
+everything around it, and nothing the code decides is negotiable by the model.**
+
+| The model decides (the author) | The code decides (the guardrail, fixed) |
+|---|---|
+| how far to move this tick, yaw and pitch — its answer **is** the strength (`AIStrength 100`) | *whether* to move at all: `HandOnly`, `FadeIn`, `ReactionDelay`, `IdleChance`, `TurnCheck`, `OnlyOnCrosshair` |
+| the shape of the move: acceleration, its own overshoot, slowing onto the hitbox | *who* and *where*: `Range`, `Fov`, `Priority` — and the point the assist steers by (`AimPoint`, `Predict`) |
+| the yaw/pitch split, in the proportions of the hand it was trained on | *what the model is shown*: `AIInputPoint = Eyes` hands it the eye-line its training was recorded on, not the assist's wobbled, led point |
+| its own noise and sloppiness — with `AIHand = On` the painted hand steps off the lattice (noise ≤ 1 count, no invented overshoot, no pull spread) | *what still lands in the packet*: the GCD lattice, `PatternGuard`'s no-cycle rule, the carried residual, and the caps — `MaxSpeed` stays a hard ceiling, the per-tick jitter under it is downward only |
+| — | *when not to trust it*: `AiReach` ramps the answer out between 6→8 blocks and 30°→45°; the drift guard (`AiDrift`) halves the step toward the curve while a full 20-tick window says the model stopped tracking the geometry; every fallback — no engine, no model, NaN, corrupt input — returns the tick to the curve |
+| — | *what it is measured by*: `AiStats` counts asked/used/faded ticks, fallback families and the model-vs-curve step pair of every AI tick; `/liquidaddon ai` prints the session line; `configs/ai_eval.py` judges the whole input space offline against a tuned proportional law and the shipped curve |
+
+`AIStrength` is the only knob on the model's magnitude: at `100` — what both daily profiles write — it
+is the model's step; lower values take a fraction of a human move, which is a shape no hand produces,
+and hand the rest of the tick back to `AICorrection`, a plain control loop. `AIPitchMultiplier` and
+`AIYawMultiplier` scale the two axes inside the answer; `PitchAssist` no longer touches it, because
+half the vertical a hand covers is still a vertical a hand covers.
+
+Outside what the model was fitted on, the answer is ramped down instead of trusted: `AiReach` goes
+from full at 6 blocks and 30° of correction to nothing at 8 blocks and 45°, and the curve takes back
+whatever share the model gives up. A regression answers outside its training data too — the ramp is
+what stops a confident wrong answer from becoming the whole step. The debug line says it when it
+happens: `ai 19KC8KP 1.20°/0.35° (60% reach)`.
+
+**The honest paragraph.** None of this is a measured *bypass*. There is no public measurement —
+ours or anybody's — of flag rates for model-driven aim against current anti-cheats, and this
+repository claims none. What *is* measured: `configs/ai_eval.py` says whether a model on these six
+inputs beats a well-tuned proportional law on recorded data, and how repetitive each predictor's
+steps are (distinct steps, identical runs, entropy) — proxies, declared as such; the in-game
+telemetry says whether the model is really driving (`used%`), how big its steps are against the
+curve's on the same ticks, and whether their correlation window is decaying. Everything past those
+numbers is, at present, an hypothesis — which is exactly why the measuring tools shipped before any
+of the behaviour did.
+
+### The data stage the client does not have
+
+`/models` globs **every** `.json` under `debug-recorder/Combat` and `debug-recorder/CombatTrainer`,
+concatenates the lot and fits it for a fixed 100 epochs with L2 loss and no validation set. Nothing
+is filtered, nothing is ever removed, and there is no metric that would tell you a session was bad.
+Three ways a recording goes bad, all invisible afterwards:
+
+- **a module was on** — the recorder reads the rotation the client *sends*, so a silent rotation is
+  labelled as "the player's hand" and the model learns to copy the module;
+- **another sensitivity** — the labels sit on a different mouse lattice, and the fit averages two;
+- **a lag spike** — one 90° step among thousands of 1° steps dominates an L2 loss.
+
+`configs/model_data.py` is that missing stage:
+
+```
+python3 configs/model_data.py report                    # what is in the recordings
+python3 configs/model_data.py clean  --dry-run          # what would be dropped, why
+python3 configs/model_data.py clean  --install --snap auto
+```
+
+`report` prints one row per session — sample count, the lattice one mouse count comes out as, the
+median/p95 target angle, the same for the step, the share of rows that are a still hand, the longest
+run of identical steps, and how many rows `clean` would drop — then the sessions worth a second look.
+A run of eight identical steps or more is a module or a target that never moved; a lattice that
+differs from the other sessions is a recording made at another sensitivity.
+
+`clean` drops the rows a hand cannot have produced, and says why for each:
+
+| Rule | Dropped |
+|---|---|
+| `not-a-number` / `not-a-direction` | corrupt rows: NaN, or a direction vector that is not unit length |
+| `step-too-big` | more than 30° in one tick (`--max-label`) |
+| `target-behind` | the target was more than 90° away (`--max-target`): a swing, not a track |
+| `out-of-range` | further than 5.5 blocks (`--max-distance`), where no profile fights |
+
+`--install` renames the two live folders to `Combat.bak-<date>` / `CombatTrainer.bak-<date>` and
+puts the clean copies in their place, because `/models` reads the live folders and a filtered copy
+next to them would change nothing. `--snap auto` rounds every label to the mouse lattice the client
+quantizes to at inference anyway, so the model is fitted in whole counts instead of in a resolution
+the client then throws away.
+
+Two things it cannot fix, because they are in the client: `improve` reuses the training learning
+rate of a model being trained from zero, and 100 epochs with no validation set will memorise a few
+hundred samples. Record a few thousand, prefer `improve` over `create`, and if the result is worse
+than the bundled model, `/models delete 19KC8KP` brings the original back — it lives in the JAR.
+
 ## A rotation that never repeats itself
 
 An anti-cheat cannot see *why* a rotation moved; it can only see the numbers, over and over.
 `Killaura (Pattern)` is the check that reads them as a sequence, and the Aimassist is the worst
 case for it of everything in this add-on: an assist holds the crosshair on the same target for
-seconds, and while the player keeps still the steps in the packets are the module's alone — no
-hand mixed in. A slow pull through a mouse-count lattice then emits the same couple of numbers on
-every tick, which is exactly the shape the check is built to find.
+seconds, and with the hand still the steps in the packets would be the module's alone — no hand
+mixed in. A slow pull through a mouse-count lattice then emits the same couple of numbers on every
+tick, which is exactly the shape the check is built to find. `HandOnly` (above) removes that case
+before it exists; what follows is what handles the case that is left, a hand that is moving.
 
 Three rules in `AimassistCore` / `MousePatternGuard` (shared with `AimbotAI`, `FireballDeflect`
 and `FireballJumpAI`) make sure the sequence never settles:
