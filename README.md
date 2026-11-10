@@ -250,15 +250,19 @@ and nothing about flicks — a 60° step is outside the data the model was fitte
 `age` are written to the file but are not part of the six inputs, so knockback reactions cannot be
 learned from them either.
 
-### Who decides what
+## The model as the author, the code as the guardrail
 
-With `Engine = AI` the model owns the step, and nothing else:
+`Preset = Profile B` is the whole idea in one click: **the model decides the step, the code decides
+everything around it, and nothing the code decides is negotiable by the model.**
 
-| The model decides | The module decides (fixed code) |
+| The model decides (the author) | The code decides (the guardrail, fixed) |
 |---|---|
 | how far to move this tick, yaw and pitch — its answer **is** the strength (`AIStrength 100`) | *whether* to move at all: `HandOnly`, `FadeIn`, `ReactionDelay`, `IdleChance`, `TurnCheck`, `OnlyOnCrosshair` |
-| the shape of the move: acceleration, overshoot, slowing onto the hitbox | *who* and *where*: `Range`, `Fov`, `Priority`, `AimPoint`, `Predict` |
-| the yaw/pitch split, in the proportions of the hand it was trained on | what lands in the packet: the GCD lattice, `handOnLattice`, `PatternGuard` |
+| the shape of the move: acceleration, its own overshoot, slowing onto the hitbox | *who* and *where*: `Range`, `Fov`, `Priority` — and the point the assist steers by (`AimPoint`, `Predict`) |
+| the yaw/pitch split, in the proportions of the hand it was trained on | *what the model is shown*: `AIInputPoint = Eyes` hands it the eye-line its training was recorded on, not the assist's wobbled, led point |
+| its own noise and sloppiness — with `AIHand = On` the painted hand steps off the lattice (noise ≤ 1 count, no invented overshoot, no pull spread) | *what still lands in the packet*: the GCD lattice, `PatternGuard`'s no-cycle rule, the carried residual, and the caps — `MaxSpeed` stays a hard ceiling, the per-tick jitter under it is downward only |
+| — | *when not to trust it*: `AiReach` ramps the answer out between 6→8 blocks and 30°→45°; the drift guard (`AiDrift`) halves the step toward the curve while a full 20-tick window says the model stopped tracking the geometry; every fallback — no engine, no model, NaN, corrupt input — returns the tick to the curve |
+| — | *what it is measured by*: `AiStats` counts asked/used/faded ticks, fallback families and the model-vs-curve step pair of every AI tick; `/liquidaddon ai` prints the session line; `configs/ai_eval.py` judges the whole input space offline against a tuned proportional law and the shipped curve |
 
 `AIStrength` is the only knob on the model's magnitude: at `100` — what both daily profiles write — it
 is the model's step; lower values take a fraction of a human move, which is a shape no hand produces,
@@ -271,6 +275,16 @@ from full at 6 blocks and 30° of correction to nothing at 8 blocks and 45°, an
 whatever share the model gives up. A regression answers outside its training data too — the ramp is
 what stops a confident wrong answer from becoming the whole step. The debug line says it when it
 happens: `ai 19KC8KP 1.20°/0.35° (60% reach)`.
+
+**The honest paragraph.** None of this is a measured *bypass*. There is no public measurement —
+ours or anybody's — of flag rates for model-driven aim against current anti-cheats, and this
+repository claims none. What *is* measured: `configs/ai_eval.py` says whether a model on these six
+inputs beats a well-tuned proportional law on recorded data, and how repetitive each predictor's
+steps are (distinct steps, identical runs, entropy) — proxies, declared as such; the in-game
+telemetry says whether the model is really driving (`used%`), how big its steps are against the
+curve's on the same ticks, and whether their correlation window is decaying. Everything past those
+numbers is, at present, an hypothesis — which is exactly why the measuring tools shipped before any
+of the behaviour did.
 
 ### The data stage the client does not have
 
