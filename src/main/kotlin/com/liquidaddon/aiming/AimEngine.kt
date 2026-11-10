@@ -163,20 +163,6 @@ enum class AiModel(override val tag: String) : Tagged {
     MODEL_19KC8KP("19KC8KP"), MODEL_21KC11KP("21KC11KP")
 }
 
-/**
- * The point the model receives as its goal — which is not automatically the point the assist
- * steers by.
- *
- * The training was recorded against the enemy as seen from the player's eyes (`DebugCombatRecorder`
- * used the target's eye position, `DebugCombatTrainerRecorder` the centre of its bounding box),
- * never against the point this module picks on the hitbox with [AimPoint], its in-box wobble and
- * the lead of [AimSettings.predict]. [EYES] hands the model the situation it was fitted on;
- * [ASSIST] keeps the two points coupled, for comparison.
- */
-enum class AiInputPoint(override val tag: String) : Tagged {
-    EYES("Eyes"), ASSIST("Assist")
-}
-
 enum class AimPoint(override val tag: String) : Tagged {
     CLOSEST("Closest"), HEAD("Head"), CHEST("Chest")
 }
@@ -232,7 +218,6 @@ internal interface AimSettings {
     val smoothing: Smoothing
     val engine: Engine
     val aiModel: AiModel
-    val aiInputPoint: AiInputPoint
     val aiYawMultiplier: Float
     val aiPitchMultiplier: Float
     val aiCorrection: Float
@@ -422,10 +407,6 @@ internal class AimValues(
     /** Which bundled LiquidBounce model answers while [engine] is [Engine.AI]. */
     val aiModelValue = group.enumChoice("AIModel", AiModel.MODEL_19KC8KP)
     override val aiModel by aiModelValue
-
-    /** The goal the model sees while [engine] is [Engine.AI]; see [AiInputPoint]. */
-    val aiInputPointValue = group.enumChoice("AIInputPoint", AiInputPoint.EYES)
-    override val aiInputPoint by aiInputPointValue
 
     /** The per-axis gain of the model's answer, the same knob LiquidBounce's AI smooth has. */
     val aiYawMultiplierValue = group.float("AIYawMultiplier", 1.2f, 0.5f..2f)
@@ -635,7 +616,6 @@ internal class AimValues(
         val handFade: Int = 4,
         val engine: Engine = Engine.MATH,
         val aiModel: AiModel = AiModel.MODEL_19KC8KP,
-        val aiInputPoint: AiInputPoint = AiInputPoint.EYES,
         val aiYawMultiplier: Float = 1.5f,
         val aiPitchMultiplier: Float = 1f,
         val aiCorrection: Float = 12f,
@@ -770,7 +750,6 @@ internal class AimValues(
         smoothingValue.set(p.smoothing)
         engineValue.set(p.engine)
         aiModelValue.set(p.aiModel)
-        aiInputPointValue.set(p.aiInputPoint)
         aiYawMultiplierValue.set(p.aiYawMultiplier)
         aiPitchMultiplierValue.set(p.aiPitchMultiplier)
         aiCorrectionValue.set(p.aiCorrection)
@@ -929,7 +908,6 @@ internal class AimassistCore(
     private val smoothing get() = values.smoothing
     private val engine get() = values.engine
     private val aiModel get() = values.aiModel
-    private val aiInputPoint get() = values.aiInputPoint
     private val aiYawMultiplier get() = values.aiYawMultiplier
     private val aiPitchMultiplier get() = values.aiPitchMultiplier
     private val aiCorrection get() = values.aiCorrection
@@ -1519,11 +1497,7 @@ internal class AimassistCore(
                 .coerceIn(0.85f, 1.15f)
 
             val allowance = weight * responseJitter * speedDrift * gate * glide * fade * handShare
-            val ai = if (engine == Engine.AI) {
-                aiStep(me, aim, modelGoal(me, target, goal), target)
-            } else {
-                null
-            }
+            val ai = if (engine == Engine.AI) aiStep(me, aim, goal, target) else null
 
             if (ai != null) {
                 // The model answers with the movement of a whole human tick, so its answer *is* the
@@ -2154,13 +2128,6 @@ internal class AimassistCore(
      * share of the answer is ramped down by [AiReach] and the curve takes over for the rest, so a
      * confident wrong answer never becomes the whole step.
      */
-    private fun modelGoal(me: LocalPlayer, target: Entity?, goal: Rotation): Rotation {
-        if (aiInputPoint != AiInputPoint.EYES || target == null || forcedGoal != null) {
-            return goal
-        }
-        return Rotation.lookingAt(target.eyePosition, me.eyePosition)
-    }
-
     private fun aiStep(
         me: LocalPlayer,
         aim: Rotation,
@@ -2195,29 +2162,25 @@ internal class AimassistCore(
             return null
         }
 
-        val input = CombatSample(
-            currentVector = aim.directionVector,
-            previousVector = previous.directionVector,
-            targetVector = goal.directionVector,
-            velocityDelta = previous.rotationDeltaTo(aim).toVec2f(),
-            playerDiff = me.position().subtract(me.lastPos),
-            targetDiff = target?.let { it.position().subtract(it.lastPos) } ?: Vec3.ZERO,
-            distance = squared,
-            // A projectile has no hurtTime, and neither has a block: the model was trained
-            // with the damage the target had taken, and there is none to report here.
-            hurtTime = (target as? LivingEntity)?.hurtTime ?: 0,
-            age = 0
-        ).asInput
-        // The guard in front of the forward pass: a degenerate rotation or distance can put a
-        // NaN/Inf into the six features (see [AiFeatures]), and a corrupt question deserves no
-        // answer at all - the curve takes the tick, the counter says why.
-        if (!AiFeatures.usable(input)) {
-            return aiUnavailable("model input NaN")
-        }
-
         // The predict can throw (closed model, translator failure) and must never reach the tick:
         // the assist keeps the maths engine, and the debug line says which model failed.
-        val prediction = runCatching { model.predict(input) }
+        val prediction = runCatching {
+            model.predict(
+                CombatSample(
+                    currentVector = aim.directionVector,
+                    previousVector = previous.directionVector,
+                    targetVector = goal.directionVector,
+                    velocityDelta = previous.rotationDeltaTo(aim).toVec2f(),
+                    playerDiff = me.position().subtract(me.lastPos),
+                    targetDiff = target?.let { it.position().subtract(it.lastPos) } ?: Vec3.ZERO,
+                    distance = squared,
+                    // A projectile has no hurtTime, and neither has a block: the model was trained
+                    // with the damage the target had taken, and there is none to report here.
+                    hurtTime = (target as? LivingEntity)?.hurtTime ?: 0,
+                    age = 0
+                ).asInput
+            )
+        }
         val output = prediction.getOrNull()
             ?: return aiUnavailable(prediction.exceptionOrNull()?.javaClass?.simpleName ?: "model error")
 
