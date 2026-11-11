@@ -926,6 +926,12 @@ internal class AimassistCore(
     /** The session telemetry of this engine, for `/liquidaddon ai`: pure counters, see [AiStats]. */
     val stats = AiStats()
 
+    /** Freezes [StallGuard] has seen in this session: the suffix of the `/liquidaddon ai` line. */
+    val stallCount: Int get() = stalls.stalls
+
+    /** How long the last freeze lasted, in milliseconds; 0 before the first one. */
+    val lastStallMs: Long get() = stalls.lastStallMs
+
     init {
         AiCoreRegistry.register(this)
     }
@@ -1104,6 +1110,13 @@ internal class AimassistCore(
     /** Whether the player is moving the mouse, which is what [handOnly] gates the assist on. */
     private val hand = HandGate()
 
+    /**
+     * The stall clock: whether this tick resumes a freeze of the client or the server, and what
+     * the resume tick may hand out while the queued mouse jump is still in the measurement
+     * (see [StallGuard]).
+     */
+    private val stalls = StallGuard()
+
     /** Mouse counts the player moved on this tick, and what the hand gate allowed (debug line). */
     private var handCounts = 0f
 
@@ -1192,6 +1205,7 @@ internal class AimassistCore(
         lastCountsPitch = null
         patterns.reset()
         hand.reset()
+        stalls.reset()
         handCounts = 0f
         handProfileUntil = 0L
         handNoise = 1f
@@ -1385,10 +1399,20 @@ internal class AimassistCore(
         lastAssistYaw = 0f
         lastAssistPitch = 0f
 
+        // The wall clock between ticks. A gap of seconds is a freeze — the client stuck on a
+        // garbage collection or a saturated CPU, the server stuck on a lag spike — and the tick
+        // that resumes carries the whole queued mouse movement in one jump. The guard opens its
+        // window here, before anything reads the own-turn, so the gate, the turn check and the
+        // friction all read the sanitized turn while the jump can still be the whole measurement
+        // (see [StallGuard]).
+        stalls.observe(System.currentTimeMillis())
+        val ownYawRead = stalls.trustedOwn(ownYaw)
+        val ownPitchRead = stalls.trustedOwn(ownPitch)
+
         // The hand, in the unit a mouse works in. Measured on every tick — including the ones with
         // no target — so that the tail of [handFade] runs on the tick clock and not on the fight.
         // See [HandGate]: with this off, [hand] answers 1 and the engine behaves as it always did.
-        handCounts = HandGate.movementCounts(ownYaw, ownPitch, RotationUtil.gcd.toFloat())
+        handCounts = HandGate.movementCounts(ownYawRead, ownPitchRead, RotationUtil.gcd.toFloat())
         val handShare = if (handOnly) hand.update(handCounts, handThreshold, handFade) else 1f
 
         val blocked = (pauseOnInventory && mc.gui.screen() != null) ||
@@ -1531,12 +1555,12 @@ internal class AimassistCore(
             // gentle drift away weakens the pull, a real push silences it, and nowhere along the
             // way is there a hard on/off step for the camera or the packets to stutter on.
             var gate = 1f
-            if (turnCheck && deltaYaw != 0f && abs(ownYaw) >= STILL && ownYaw * deltaYaw < 0f) {
-                gate = (1f - abs(ownYaw) / TURN_AWAY).coerceIn(0f, 1f)
+            if (turnCheck && deltaYaw != 0f && abs(ownYawRead) >= STILL && ownYawRead * deltaYaw < 0f) {
+                gate = (1f - abs(ownYawRead) / TURN_AWAY).coerceIn(0f, 1f)
                 if (gate <= 0f) {
                     hold()
                     debugLine(
-                        "player turning away (own=%.2f°, target=%.2f°)".format(ownYaw, deltaYaw)
+                        "player turning away (own=%.2f°, target=%.2f°)".format(ownYawRead, deltaYaw)
                     )
                     return
                 }
@@ -1557,7 +1581,8 @@ internal class AimassistCore(
             speedDrift = (speedDrift + (Random.nextFloat() - 0.5f) * SPEED_DRIFT_STEP * handDrift)
                 .coerceIn(0.85f, 1.15f)
 
-            val allowance = weight * responseJitter * speedDrift * gate * glide * fade * handShare
+            val allowance = weight * responseJitter * speedDrift * gate * glide * fade * handShare *
+                    stalls.assistShare()
             val ai = if (engine == Engine.AI) {
                 aiStep(me, aim, modelGoal(me, target, goal), target)
             } else {
@@ -1616,8 +1641,8 @@ internal class AimassistCore(
         // becomes sticky while the screen keeps turning at full speed, which is the whole point.
         if (silent && mode != Mode.ASSIST && friction > 0f) {
             val damp = (friction / 100f) * weight * fade
-            stepYaw -= ownYaw * damp
-            stepPitch -= ownPitch * damp * 0.5f
+            stepYaw -= ownYawRead * damp
+            stepPitch -= ownPitchRead * damp * 0.5f
             correcting = true
         }
 
