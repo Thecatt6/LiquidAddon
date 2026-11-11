@@ -84,6 +84,7 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
     private var query = ""
     private var searchFocused = false
     private val expanded = mutableSetOf<String>()
+    private var dragging: Pair<Int, Int>? = null
     private var openDropdown: OpenDropdown? = null
     private var dragging: Pair<Int, Int>? = null
 
@@ -206,7 +207,11 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
                 val value = settingsOf(modules[hit.module])[hit.row]
                 setAny(value, !(value.get() as Boolean))
             }
-            is VapeLayout.Element.Slider -> Unit
+            is VapeLayout.Element.Slider -> {
+                searchFocused = false
+                dragging = Pair(hit.module, hit.row)
+                slideTo(layout, cards, hit.module, hit.row, modules, px)
+            }
             is VapeLayout.Element.ModeButton -> {
                 val group = settingsOf(modules[hit.module])[hit.row] as ModeValueGroup<*>
                 openDropdown = OpenDropdown(hit.module, hit.row, group.modes.map { it.name })
@@ -223,11 +228,46 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
         return true
     }
 
+    override fun mouseDragged(click: MouseButtonEvent, offsetX: Double, offsetY: Double): Boolean {
+        val drag = dragging ?: return super.mouseDragged(click, offsetX, offsetY)
+        if (click.button() != 0) return super.mouseDragged(click, offsetX, offsetY)
+        val layout = VapeLayout(width, height)
+        val cats = categories()
+        val modules = shownModules(cats.getOrElse(selectedCategory) { "" })
+        val specs = modules.map { m ->
+            val settings = if (expanded.contains(m.name)) settingsOf(m) else emptyList()
+            VapeLayout.CardSpec(expanded = expanded.contains(m.name), rows = settings.map(::kindOf))
+        }
+        val cards = layout.placeCards(specs)
+        slideTo(layout, cards, drag.first, drag.second, modules, click.x.toInt())
+        return true
+    }
+
     override fun mouseReleased(click: MouseButtonEvent): Boolean {
         dragging = null
         return super.mouseReleased(click)
     }
 
+
+    private fun slideTo(
+        layout: VapeLayout,
+        cards: List<VapeLayout.Rect>,
+        module: Int,
+        row: Int,
+        modules: List<ClientModule>,
+        px: Int,
+    ) {
+        val value = settingsOf(modules[module]).getOrNull(row) ?: return
+        val info = rangedInfo(value) ?: return
+        val track = layout.controlRect(layout.rowRect(cards[module], row), VapeLayout.RowKind.SLIDER)
+        val frac = ((px - track.x).toFloat() / track.w)
+        val stepped = VapeLayout.sliderValue(info.first, info.second, if (info.first % 1 == 0f && info.second % 1 == 0f) 1f else 0.01f, frac)
+        if (value.valueType == ValueType.INT) {
+            setAny(value, stepped.toInt())
+        } else {
+            setAny(value, stepped)
+        }
+    }
 
     private data class Ranged(val min: Float, val max: Float, val current: Float)
 
