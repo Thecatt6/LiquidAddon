@@ -15,7 +15,7 @@ import net.ccbluex.liquidbounce.features.module.ModuleManager
 import net.ccbluex.liquidbounce.features.module.modules.render.ModuleClickGui
 import net.ccbluex.liquidbounce.utils.client.mc
 import net.ccbluex.liquidbounce.utils.text.asPlainText
-import net.minecraft.client.InputConstants
+import com.mojang.blaze3d.platform.InputConstants
 import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.client.input.KeyEvent
@@ -84,8 +84,8 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
     private var query = ""
     private var searchFocused = false
     private val expanded = mutableSetOf<String>()
-    private var openDropdown: OpenDropdown? = null
     private var dragging: Pair<Int, Int>? = null
+    private var openDropdown: OpenDropdown? = null
 
     private data class OpenDropdown(val module: Int, val row: Int, val names: List<String>)
 
@@ -205,9 +205,29 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
                     val row = layout.rowRect(card, r)
                     context.text(mc.font, value.name, row.x + 4, row.y + 6, ink, false)
                     when (val kind = kindOf(value)) {
-                        VapeLayout.RowKind.SWITCH -> drawSwitch(context, layout, layout.controlRect(row, kind), value.get() as Boolean, on)
-                        VapeLayout.RowKind.SLIDER -> drawSlider(context, layout, layout.controlRect(row, kind), value, on)
-                        VapeLayout.RowKind.MODE -> drawMode(context, layout, layout.controlRect(row, kind), value as ModeValueGroup<*>, on)
+                        VapeLayout.RowKind.SWITCH -> {
+                            val sw = layout.controlRect(row, kind)
+                            val swOn = value.get() as Boolean
+                            fillRounded(context, layout, sw.x, sw.y, sw.w, sw.h, sw.h / 2, if (swOn) VapeLayout.TRACK_FILL else VapeLayout.TRACK_BG)
+                            val knobX = if (swOn) sw.x + sw.w - sw.h + 2 else sw.x + 2
+                            fillRounded(context, layout, knobX, sw.y + 2, sw.h - 4, sw.h - 4, (sw.h - 4) / 2, if (swOn) VapeLayout.TEXT_ON_LIGHT else VapeLayout.CARD_ON)
+                        }
+                        VapeLayout.RowKind.SLIDER -> {
+                            val tr = layout.controlRect(row, kind)
+                            val bounds = rangedInfo(value)
+                            if (bounds != null) {
+                                val frac = VapeLayout.sliderFrac(bounds.current, bounds.min, bounds.max)
+                                fillRounded(context, layout, tr.x, tr.y, tr.w, tr.h, 2, VapeLayout.TRACK_BG)
+                                val done = (tr.w * frac).toInt().coerceAtLeast(2)
+                                fillRounded(context, layout, tr.x, tr.y, done, tr.h, 2, if (on) VapeLayout.TEXT_ON_LIGHT else VapeLayout.TRACK_FILL)
+                            }
+                        }
+                        VapeLayout.RowKind.MODE -> {
+                            val mb = layout.controlRect(row, kind)
+                            val group = value as ModeValueGroup<*>
+                            fillRounded(context, layout, mb.x, mb.y, mb.w, mb.h, 3, if (on) VapeLayout.SEARCH_BG else VapeLayout.TRACK_BG)
+                            context.text(mc.font, group.activeMode.name, mb.x + 5, mb.y + 5, if (on) VapeLayout.TEXT_HEADER else VapeLayout.TEXT_ON_DARK, false)
+                        }
                     }
                 }
             }
@@ -229,25 +249,6 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
 
     private fun caret(): String =
         if (searchFocused && System.currentTimeMillis() / 300 % 2 == 0L) "|" else ""
-
-    private fun drawSwitch(ctx: GuiGraphicsExtractor, layout: VapeLayout, rect: VapeLayout.Rect, on: Boolean, cardOn: Boolean) {
-        fillRounded(ctx, layout, rect.x, rect.y, rect.w, rect.h, rect.h / 2, if (on) VapeLayout.TRACK_FILL else VapeLayout.TRACK_BG)
-        val knobX = if (on) rect.x + rect.w - rect.h + 2 else rect.x + 2
-        fillRounded(ctx, layout, knobX, rect.y + 2, rect.h - 4, rect.h - 4, (rect.h - 4) / 2, if (on) VapeLayout.TEXT_ON_LIGHT else VapeLayout.CARD_ON)
-    }
-
-    private fun drawSlider(ctx: GuiGraphicsExtractor, layout: VapeLayout, rect: VapeLayout.Rect, value: Value<*>, cardOn: Boolean) {
-        val info = rangedInfo(value) ?: return
-        val frac = VapeLayout.sliderFrac(info.third, info.first, info.second)
-        fillRounded(ctx, layout, rect.x, rect.y, rect.w, rect.h, 2, VapeLayout.TRACK_BG)
-        val filled = (rect.w * frac).toInt().coerceAtLeast(2)
-        fillRounded(ctx, layout, rect.x, rect.y, filled, rect.h, 2, if (cardOn) VapeLayout.TEXT_ON_LIGHT else VapeLayout.TRACK_FILL)
-    }
-
-    private fun drawMode(ctx: GuiGraphicsExtractor, layout: VapeLayout, rect: VapeLayout.Rect, group: ModeValueGroup<*>, cardOn: Boolean) {
-        fillRounded(ctx, layout, rect.x, rect.y, rect.w, rect.h, 3, if (cardOn) VapeLayout.SEARCH_BG else VapeLayout.TRACK_BG)
-        ctx.text(mc.font, group.activeMode.name, rect.x + 5, rect.y + 5, if (cardOn) VapeLayout.TEXT_HEADER else VapeLayout.TEXT_ON_DARK, false)
-    }
 
     private fun fillRounded(
         ctx: GuiGraphicsExtractor,
@@ -330,15 +331,15 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
     override fun mouseDragged(click: MouseButtonEvent, offsetX: Double, offsetY: Double): Boolean {
         val drag = dragging ?: return super.mouseDragged(click, offsetX, offsetY)
         if (click.button() != 0) return super.mouseDragged(click, offsetX, offsetY)
-        val layout = VapeLayout(width, height)
+        val lay = VapeLayout(width, height)
         val cats = categories()
-        val modules = shownModules(cats.getOrElse(selectedCategory) { "" })
-        val specs = modules.map { m ->
+        val pool = shownModules(cats.getOrElse(selectedCategory) { "" })
+        val specs = pool.map { m ->
             val settings = if (expanded.contains(m.name)) settingsOf(m) else emptyList()
             VapeLayout.CardSpec(expanded = expanded.contains(m.name), rows = settings.map(::kindOf))
         }
-        val cards = layout.placeCards(specs)
-        slideTo(layout, cards, drag.first, drag.second, modules, click.x.toInt())
+        val cardRects = lay.placeCards(specs)
+        slideTo(lay, cardRects, drag.first, drag.second, pool, click.x.toInt())
         return true
     }
 
@@ -347,27 +348,28 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
         return super.mouseReleased(click)
     }
 
+
     private fun slideTo(
-        layout: VapeLayout,
-        cards: List<VapeLayout.Rect>,
-        module: Int,
-        row: Int,
-        modules: List<ClientModule>,
-        px: Int,
+        lay: VapeLayout,
+        cardRects: List<VapeLayout.Rect>,
+        moduleIndex: Int,
+        rowIndex: Int,
+        pool: List<ClientModule>,
+        pointerX: Int
     ) {
-        val value = settingsOf(modules[module]).getOrNull(row) ?: return
-        val info = rangedInfo(value) ?: return
-        val track = layout.controlRect(layout.rowRect(cards[module], row), VapeLayout.RowKind.SLIDER)
-        val frac = ((px - track.x).toFloat() / track.w)
-        val stepped = VapeLayout.sliderValue(info.first, info.second, if (info.first % 1 == 0f && info.second % 1 == 0f) 1f else 0.01f, frac)
-        if (value.valueType == ValueType.INT) {
-            setAny(value, stepped.toInt())
+        val target = settingsOf(pool[moduleIndex]).getOrNull(rowIndex) ?: return
+        val bounds = rangedInfo(target) ?: return
+        val track = lay.controlRect(lay.rowRect(cardRects[moduleIndex], rowIndex), VapeLayout.RowKind.SLIDER)
+        val fraction = (pointerX - track.x).toFloat() / track.w.toFloat()
+        val whole = bounds.min % 1f == 0f && bounds.max % 1f == 0f
+        val stepSize = if (whole) 1f else 0.01f
+        val picked = VapeLayout.sliderValue(bounds.min, bounds.max, stepSize, fraction)
+        if (target.valueType == ValueType.INT) {
+            setAny(target, picked.toInt())
         } else {
-            setAny(value, stepped)
+            setAny(target, picked)
         }
     }
-
-    // --- value plumbing ---------------------------------------------------------------------------
 
     private data class Ranged(val min: Float, val max: Float, val current: Float)
 
