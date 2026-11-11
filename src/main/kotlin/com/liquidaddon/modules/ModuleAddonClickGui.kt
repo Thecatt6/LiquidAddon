@@ -2,7 +2,6 @@ package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
 import com.liquidaddon.ui.VapeLayout
-import net.ccbluex.liquidbounce.event.events.KeyboardCharEvent
 import net.ccbluex.liquidbounce.event.events.ModuleToggleEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
@@ -10,7 +9,6 @@ import net.ccbluex.liquidbounce.features.module.ModuleManager
 import net.ccbluex.liquidbounce.features.module.modules.render.ModuleClickGui
 import net.ccbluex.liquidbounce.utils.client.mc
 import net.ccbluex.liquidbounce.utils.text.asPlainText
-import net.minecraft.client.InputConstants
 import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.client.input.KeyEvent
@@ -41,9 +39,6 @@ object ModuleAddonClickGui : ClientModule("AddonClickGui", Categories.LIQUIDADDO
         }
     }
 
-    private val typing = handler<KeyboardCharEvent> { event ->
-        screen?.typeChar(event.codePoint)
-    }
 }
 
 internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
@@ -59,25 +54,6 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
     override fun onClose() {
         super.onClose()
         ModuleAddonClickGui.enabled = false
-    }
-
-    fun typeChar(codePoint: Int) {
-        if (!searchFocused) return
-        if (codePoint == 8 || codePoint == 127) {
-            if (query.isNotEmpty()) query = query.dropLast(1)
-            return
-        }
-        if (codePoint >= 32) {
-            query += String(Character.toChars(codePoint))
-        }
-    }
-
-    override fun keyPressed(input: KeyEvent): Boolean {
-        if (searchFocused && input.key == InputConstants.KEY_BACKSPACE) {
-            if (query.isNotEmpty()) query = query.dropLast(1)
-            return true
-        }
-        return super.keyPressed(input)
     }
 
     private fun categories(): List<String> =
