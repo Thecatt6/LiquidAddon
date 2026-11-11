@@ -11,6 +11,7 @@ import net.ccbluex.liquidbounce.utils.client.mc
 import net.ccbluex.liquidbounce.utils.text.asPlainText
 import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.gui.screens.Screen
+import net.minecraft.client.InputConstants
 import net.minecraft.client.input.KeyEvent
 import net.minecraft.client.input.MouseButtonEvent
 
@@ -54,6 +55,14 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
     override fun onClose() {
         super.onClose()
         ModuleAddonClickGui.enabled = false
+    }
+
+    override fun keyPressed(input: KeyEvent): Boolean {
+        if (searchFocused && input.key == InputConstants.KEY_BACKSPACE) {
+            if (query.isNotEmpty()) query = query.dropLast(1)
+            return true
+        }
+        return super.keyPressed(input)
     }
 
     private fun categories(): List<String> =
