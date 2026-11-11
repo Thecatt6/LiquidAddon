@@ -161,7 +161,107 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
     // --- painting ------------------------------------------------------------------------------
 
     override fun extractRenderState(context: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, delta: Float) {
-        context.fill(0, 0, width, height, -1)
+        val layout = VapeLayout(width, height)
+        val cats = categories()
+        if (selectedCategory >= cats.size) selectedCategory = 0
+        val modules = shownModules(cats.getOrElse(selectedCategory) { "" })
+        val specs = modules.map { m ->
+            val settings = if (expanded.contains(m.name)) settingsOf(m) else emptyList()
+            VapeLayout.CardSpec(expanded = expanded.contains(m.name), rows = settings.map(::kindOf))
+        }
+        val cards = layout.placeCards(specs)
+
+        context.fill(0, 0, width, height, VapeLayout.DIM)
+
+        // Sidebar: one dark column, the search field, then the categories, the selected one lit.
+        fillRounded(context, layout, 4, 8, VapeLayout.SIDEBAR_W + 8, height - 16, 6, VapeLayout.SIDEBAR)
+        context.text(mc.font, "LIQUIDADDON", 14, 24, VapeLayout.TEXT_HEADER, false)
+        val search = layout.searchRect()
+        fillRounded(context, layout, search.x, search.y, search.w, search.h, 4, VapeLayout.SEARCH_BG)
+        val shownQuery = if (query.isEmpty() && !searchFocused) "Search" else query
+        val queryColor = if (query.isEmpty() && !searchFocused) VapeLayout.TEXT_ON_DARK else VapeLayout.TEXT_HEADER
+        context.text(mc.font, shownQuery + caret(), search.x + 6, search.y + 6, queryColor, false)
+        cats.forEachIndexed { i, tag ->
+            val rect = layout.categoryRect(i)
+            val on = i == selectedCategory
+            if (on) fillRounded(context, layout, rect.x, rect.y, rect.w, rect.h, 4, VapeLayout.CARD_ON)
+            context.text(mc.font, tag, rect.x + 8, rect.y + 8, if (on) VapeLayout.TEXT_ON_LIGHT else VapeLayout.TEXT_ON_DARK, false)
+        }
+
+        // Cards.
+        modules.forEachIndexed { i, module ->
+            val card = cards[i]
+            val on = module.enabled
+            fillRounded(context, layout, card.x, card.y, card.w, card.h, 4, if (on) VapeLayout.CARD_ON else VapeLayout.CARD_OFF)
+            val ink = if (on) VapeLayout.TEXT_ON_LIGHT else VapeLayout.TEXT_ON_DARK
+            context.text(mc.font, module.name, card.x + 8, card.y + 8, ink, false)
+            val dots = layout.dotsRect(card)
+            for (d in 0..2) {
+                context.fill(dots.x + 4, dots.y + d * 4, dots.x + 6, dots.y + d * 4 + 2, ink)
+            }
+            if (specs[i].expanded) {
+                val settings = settingsOf(module)
+                settings.forEachIndexed { r, value ->
+                    val row = layout.rowRect(card, r)
+                    context.text(mc.font, value.name, row.x + 4, row.y + 6, ink, false)
+                    when (val kind = kindOf(value)) {
+                        VapeLayout.RowKind.SWITCH -> drawSwitch(context, layout, layout.controlRect(row, kind), value.get() as Boolean, on)
+                        VapeLayout.RowKind.SLIDER -> drawSlider(context, layout, layout.controlRect(row, kind), value, on)
+                        VapeLayout.RowKind.MODE -> drawMode(context, layout, layout.controlRect(row, kind), value as ModeValueGroup<*>, on)
+                    }
+                }
+            }
+        }
+
+        // An open dropdown paints over everything else.
+        openDropdown?.let { drop ->
+            val anchor = layout.controlRect(layout.rowRect(cards[drop.module], drop.row), VapeLayout.RowKind.MODE)
+            layout.dropdownRects(anchor, drop.names.size).forEachIndexed { i, rect ->
+                val hover = rect.contains(mouseX, mouseY)
+                fillRounded(context, layout, rect.x, rect.y, rect.w, rect.h, 3, if (hover) VapeLayout.CARD_ON else VapeLayout.PANEL)
+                context.text(
+                    mc.font, drop.names[i], rect.x + 6, rect.y + 5,
+                    if (hover) VapeLayout.TEXT_ON_LIGHT else VapeLayout.TEXT_HEADER, false,
+                )
+            }
+        }
+    }
+
+    private fun caret(): String =
+        if (searchFocused && System.currentTimeMillis() / 300 % 2 == 0L) "|" else ""
+
+    private fun drawSwitch(ctx: GuiGraphicsExtractor, layout: VapeLayout, rect: VapeLayout.Rect, on: Boolean, cardOn: Boolean) {
+        fillRounded(ctx, layout, rect.x, rect.y, rect.w, rect.h, rect.h / 2, if (on) VapeLayout.TRACK_FILL else VapeLayout.TRACK_BG)
+        val knobX = if (on) rect.x + rect.w - rect.h + 2 else rect.x + 2
+        fillRounded(ctx, layout, knobX, rect.y + 2, rect.h - 4, rect.h - 4, (rect.h - 4) / 2, if (on) VapeLayout.TEXT_ON_LIGHT else VapeLayout.CARD_ON)
+    }
+
+    private fun drawSlider(ctx: GuiGraphicsExtractor, layout: VapeLayout, rect: VapeLayout.Rect, value: Value<*>, cardOn: Boolean) {
+        val info = rangedInfo(value) ?: return
+        val frac = VapeLayout.sliderFrac(info.third, info.first, info.second)
+        fillRounded(ctx, layout, rect.x, rect.y, rect.w, rect.h, 2, VapeLayout.TRACK_BG)
+        val filled = (rect.w * frac).toInt().coerceAtLeast(2)
+        fillRounded(ctx, layout, rect.x, rect.y, filled, rect.h, 2, if (cardOn) VapeLayout.TEXT_ON_LIGHT else VapeLayout.TRACK_FILL)
+    }
+
+    private fun drawMode(ctx: GuiGraphicsExtractor, layout: VapeLayout, rect: VapeLayout.Rect, group: ModeValueGroup<*>, cardOn: Boolean) {
+        fillRounded(ctx, layout, rect.x, rect.y, rect.w, rect.h, 3, if (cardOn) VapeLayout.SEARCH_BG else VapeLayout.TRACK_BG)
+        ctx.text(mc.font, group.activeMode.name, rect.x + 5, rect.y + 5, if (cardOn) VapeLayout.TEXT_HEADER else VapeLayout.TEXT_ON_DARK, false)
+    }
+
+    private fun fillRounded(
+        ctx: GuiGraphicsExtractor,
+        layout: VapeLayout,
+        x: Int,
+        y: Int,
+        w: Int,
+        h: Int,
+        r: Int,
+        color: Int,
+    ) {
+        for (span in VapeLayout.roundedSpans(x, y, w, h, r)) {
+            ctx.fill(span.second, span.first, span.third, span.first + 1, color)
+        }
     }
 
     // --- clicks ---------------------------------------------------------------------------------
