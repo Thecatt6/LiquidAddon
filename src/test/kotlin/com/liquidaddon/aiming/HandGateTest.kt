@@ -12,8 +12,10 @@ class HandGateTest {
     @Test
     fun `a moving hand is allowed in full`() {
         val gate = HandGate()
-        assertEquals(1f, gate.update(movementCounts = 2f, threshold = 1f, fadeTicks = 4))
+        // The gate opens over the same fade it closes over: four moving ticks, then full.
+        repeat(4) { gate.update(movementCounts = 2f, threshold = 1f, fadeTicks = 4) }
         assertEquals(1f, gate.activity)
+        assertEquals(1f, gate.update(movementCounts = 2f, threshold = 1f, fadeTicks = 4))
     }
 
     @Test
@@ -25,7 +27,7 @@ class HandGateTest {
     @Test
     fun `the pull survives a few ticks after the hand stops`() {
         val gate = HandGate()
-        gate.update(movementCounts = 3f, threshold = 1f, fadeTicks = 4)
+        repeat(4) { gate.update(movementCounts = 3f, threshold = 1f, fadeTicks = 4) }
 
         // Four ticks of a stopped hand: one quarter of the pull per tick, and zero on the fourth.
         assertEquals(0.75f, gate.update(0f, 1f, 4))
@@ -42,12 +44,28 @@ class HandGateTest {
     }
 
     @Test
-    fun `the hand coming back opens the gate at once`() {
+    fun `the hand coming back ramps the gate over the same fade`() {
         val gate = HandGate()
-        gate.update(movementCounts = 3f, threshold = 1f, fadeTicks = 4)
-        gate.update(movementCounts = 0f, threshold = 1f, fadeTicks = 4)
+        repeat(4) { gate.update(movementCounts = 3f, threshold = 1f, fadeTicks = 4) }
+        repeat(4) { gate.update(movementCounts = 0f, threshold = 1f, fadeTicks = 4) }
+        assertEquals(0f, gate.activity)
 
+        // A single count no longer re-arms the assist in full: the gate walks back up.
+        assertEquals(0.25f, gate.update(movementCounts = 1f, threshold = 1f, fadeTicks = 4))
+        assertEquals(0.50f, gate.update(movementCounts = 1f, threshold = 1f, fadeTicks = 4))
+        assertEquals(0.75f, gate.update(movementCounts = 1f, threshold = 1f, fadeTicks = 4))
         assertEquals(1f, gate.update(movementCounts = 1f, threshold = 1f, fadeTicks = 4))
+    }
+
+    @Test
+    fun `a resting hand decays squared, a moving one unchanged`() {
+        val gate = HandGate()
+        repeat(4) { gate.update(movementCounts = 3f, threshold = 1f, fadeTicks = 4) }
+        assertEquals(1f, gate.restDecay(movementCounts = 3f, threshold = 1f))
+        gate.update(movementCounts = 0f, threshold = 1f, fadeTicks = 4)
+        assertEquals(0.75f, gate.activity)
+        assertEquals(0.75f, gate.restDecay(movementCounts = 0f, threshold = 1f), "the second factor of a hand at rest")
+        assertEquals(1f, gate.restDecay(movementCounts = 0f, threshold = 0f), "a gate switched off never decays")
     }
 
     @Test
