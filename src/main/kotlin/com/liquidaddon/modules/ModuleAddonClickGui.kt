@@ -233,26 +233,6 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
     }
 
 
-    private fun slideTo(
-        layout: VapeLayout,
-        cards: List<VapeLayout.Rect>,
-        module: Int,
-        row: Int,
-        modules: List<ClientModule>,
-        px: Int,
-    ) {
-        val value = settingsOf(modules[module]).getOrNull(row) ?: return
-        val info = rangedInfo(value) ?: return
-        val track = layout.controlRect(layout.rowRect(cards[module], row), VapeLayout.RowKind.SLIDER)
-        val frac = ((px - track.x).toFloat() / track.w)
-        val stepped = VapeLayout.sliderValue(info.first, info.second, if (info.first % 1 == 0f && info.second % 1 == 0f) 1f else 0.01f, frac)
-        if (value.valueType == ValueType.INT) {
-            setAny(value, stepped.toInt())
-        } else {
-            setAny(value, stepped)
-        }
-    }
-
     private data class Ranged(val min: Float, val max: Float, val current: Float)
 
     private fun rangedInfo(value: Value<*>): Ranged? {
