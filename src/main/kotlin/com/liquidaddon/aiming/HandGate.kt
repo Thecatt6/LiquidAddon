@@ -2,6 +2,7 @@ package com.liquidaddon.aiming
 
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * The hand on the mouse, as a gate the assist has to pass.
@@ -24,10 +25,11 @@ import kotlin.math.max
  * becomes **mouse counts**, which is the unit the player's hand actually works in: half a count of
  * movement is not a movement, it is the camera sitting still.
  *
- * The gate does not cut on the last moving tick. A hand that stops still carries the pull for a
- * moment — and a binary on/off edge is itself a shape a check can see — so the activity decays
- * linearly over a few ticks ([fadeTicks]) instead of dropping to zero, and comes straight back to
- * full the moment the mouse moves again.
+ * The gate does not cut on the last moving tick, in either direction. A hand that stops still
+ * carries the pull for a moment, and a hand that starts again does not pull in full on its first
+ * count — both edges are shapes a check can see, and a re-arm that jumps to full is what lets a
+ * one-count jitter hold the assist forever. So the activity walks over [fadeTicks] ticks down
+ * *and* up instead of dropping and jumping.
  *
  * The class is stateful but has no dependencies, so the whole rule is testable without a game
  * running (see `HandGateTest`).
@@ -57,8 +59,12 @@ internal class HandGate {
             return 1f
         }
         if (movementCounts >= threshold) {
-            activity = 1f
-            return 1f
+            // The hand moves again: the gate opens over the same number of ticks it closes over.
+            // Coming straight back to full on the first count was a shape of its own — a mouse
+            // jittered by one count every few ticks held the assist at full forever, a steady
+            // "hand" that never moves enough to be one.
+            activity = if (fadeTicks <= 0) 1f else min(1f, activity + 1f / fadeTicks)
+            return activity
         }
 
         // The hand stopped: the pull runs out over [fadeTicks] ticks, never below zero and never
@@ -66,6 +72,19 @@ internal class HandGate {
         activity = if (fadeTicks <= 0) 0f else max(0f, activity - 1f / fadeTicks)
         return activity
     }
+
+    /**
+     * The second factor of a hand at rest, 0..1: [activity] again, so that while the mouse stands
+     * still the help decays with the *square* of the fade (0.56, 0.25, 0.06 over four ticks)
+     * instead of linearly. A linear fade keeps the view walking towards the target at half
+     * strength for ticks after the hand stopped — a camera that moves with no input behind it,
+     * which is the one thing a hand never does. Squaring it lets the view coast to a standstill
+     * within a tick or two, smoothly: no edge, no drift.
+     *
+     * While the hand moves (or the gate is off) this is 1 and changes nothing.
+     */
+    fun restDecay(movementCounts: Float, threshold: Float): Float =
+        if (threshold <= 0f || movementCounts >= threshold) 1f else activity
 
     companion object {
 

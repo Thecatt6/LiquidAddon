@@ -172,14 +172,15 @@ enum class AiModel(override val tag: String) : Tagged {
 }
 
 /**
- * The point the model receives as its goal — which is not automatically the point the assist
- * steers by.
+ * The base point of the engagement's single goal — the one point the model, the correction, the
+ * caps and the rest check all steer by.
  *
  * The training was recorded against the enemy as seen from the player's eyes (`DebugCombatRecorder`
  * used the target's eye position, `DebugCombatTrainerRecorder` the centre of its bounding box),
- * never against the point this module picks on the hitbox with [AimPoint], its in-box wobble and
- * the lead of [AimSettings.predict]. [EYES] hands the model the situation it was fitted on;
- * [ASSIST] keeps the two points coupled, for comparison.
+ * never against the point this module picks on the hitbox with [AimPoint]. [EYES] puts the goal on
+ * the situation the model was fitted on, [ASSIST] on the point on the hitbox; the in-box wobble and
+ * the lead of [AimSettings.predict] drift whichever base is chosen, so the goal wanders like a
+ * hand's aim without ever splitting into two attractors (see [AimGoal]).
  */
 enum class AiInputPoint(override val tag: String) : Tagged {
     EYES("Eyes"), ASSIST("Assist")
@@ -441,7 +442,7 @@ internal class AimValues(
     val aiModelValue = group.enumChoice("AIModel", AiModel.MODEL_19KC8KP)
     override val aiModel by aiModelValue
 
-    /** The goal the model sees while [engine] is [Engine.AI]; see [AiInputPoint]. */
+    /** The base point of the single goal both engines steer by; see [AiInputPoint]. */
     val aiInputPointValue = group.enumChoice("AIInputPoint", AiInputPoint.EYES)
     override val aiInputPoint by aiInputPointValue
 
@@ -929,6 +930,13 @@ internal class AimassistCore(
     /** Freezes [StallGuard] has seen in this session: the suffix of the `/liquidaddon ai` line. */
     val stallCount: Int get() = stalls.stalls
 
+    /** The hardest turn a target demanded this session, as a percent of [maxSpeed]: where the
+     *  engagement sat against the cap of a single tick (see [ChaseLoad]). */
+    val peakLoadPct: Int get() = (peakLoad * 100f).toInt()
+
+    /** The fade-in duration the current engagement drew, in milliseconds; see [Onset]. */
+    val lastOnsetMs: Int get() = onset.lastDurationMs
+
     /** How long the last freeze lasted, in milliseconds; 0 before the first one. */
     val lastStallMs: Long get() = stalls.lastStallMs
 
@@ -1042,6 +1050,12 @@ internal class AimassistCore(
     private var forcedPointValue: Vec3? = null
     private var lastSwitch = 0L
     private var reactionUntil = 0L
+
+    /** The fade-in of the current engagement, with a duration of its own; see [Onset]. */
+    private val onset = Onset()
+
+    /** The hardest turn a target has demanded this session, as a share of [maxSpeed]. */
+    private var peakLoad = 0f
 
     /** The rotation the module handed out on the previous tick (silent: what the server got). */
     private var lastSent: Rotation? = null
@@ -1193,6 +1207,8 @@ internal class AimassistCore(
         previousAim = null
         lastSwitch = 0L
         reactionUntil = 0L
+        onset.begin(0L, 0, 0f)
+        peakLoad = 0f
         idleLeft = 0
         assisted = 0
         stillTicks = 0
@@ -1458,6 +1474,9 @@ internal class AimassistCore(
             // A click the player already made is not a reaction to wait for.
             reactionUntil = if (target is LivingEntity && target === pendingAttack) now else now + reactionDelay +
                 Random.nextInt(reactionRandom + 1)
+            // Every engagement draws a fade-in of its own: the same 300 ms warm-up on every
+            // target is a clock a check can average out of many fights (see [Onset]).
+            onset.begin(now, fadeIn, Random.nextFloat())
             responseJitter = 0.85f + Random.nextFloat() * 0.3f
             strengthScale = 1f + (Random.nextFloat() - 0.5f) * 2f * (handLayer().strengthSpread / 100f)
             speedDrift = 1f
@@ -1581,10 +1600,16 @@ internal class AimassistCore(
             speedDrift = (speedDrift + (Random.nextFloat() - 0.5f) * SPEED_DRIFT_STEP * handDrift)
                 .coerceIn(0.85f, 1.15f)
 
+            // How hard the target is turning against the cap of one tick. Below the knee of
+            // [ChaseLoad] nothing changes; above it the help eases down so that tracking degrades
+            // like a hand's instead of gluing until the cap and then letting go at once.
+            val load = if (maxSpeed > 0f) hypot(deltaYaw, deltaPitch) / maxSpeed else 0f
+            if (load > peakLoad) peakLoad = load
+            val restDecay = if (handOnly) hand.restDecay(handCounts, handThreshold) else 1f
             val allowance = weight * responseJitter * speedDrift * gate * glide * fade * handShare *
-                    stalls.assistShare()
+                    stalls.assistShare() * ChaseLoad.loadShare(load) * restDecay
             val ai = if (engine == Engine.AI) {
-                aiStep(me, aim, modelGoal(me, target, goal), target)
+                aiStep(me, aim, goal, target)
             } else {
                 null
             }
@@ -1735,11 +1760,7 @@ internal class AimassistCore(
      * A smoothstep: it leaves from a standstill and arrives without a kick, so the first ticks of
      * an engagement do not jump to full strength in a single frame.
      */
-    private fun fadeProgress(now: Long): Float {
-        if (fadeIn <= 0) return 1f
-        val t = ((now - reactionUntil).toFloat() / fadeIn).coerceIn(0f, 1f)
-        return t * t * (3f - 2f * t)
-    }
+    private fun fadeProgress(now: Long): Float = onset.progress(now)
 
     /**
      * The aim is already inside [deadZone]. Not silent nothing is written: the camera simply does
@@ -2045,7 +2066,14 @@ internal class AimassistCore(
             return Rotation.lookingAt(point, me.eyePosition)
         }
 
-        var point = pointOn(me, target, aim)
+        // One attractor per tick. The setting picks the base point the whole engagement is
+        // pulled towards — the eyes, the situation the model was fitted on, or the nearest point
+        // on the box — and the wobble below drifts that same base inside the hitbox. Model,
+        // correction, caps and rest check all read the result: two goals in one tick (the model on
+        // the eyes, the correction on the box) used to leave the aim sitting between them, a pull
+        // towards eye height neither the setting nor the training asked for (see [AimGoal]).
+        val base = if (aiInputPoint == AiInputPoint.EYES) target.eyePosition else pointOn(me, target, aim)
+        var point = base
 
         // The point the aim is pulled to is not a constant of the box. A person keeps the crosshair
         // somewhere *on* the enemy and lets it drift a little; a correction loop returns to the same
@@ -2063,17 +2091,16 @@ internal class AimassistCore(
             )
         }
         // Clamped back inside: an offset that leaves the hitbox would aim at the air next to the
-        // enemy, and a missed hit is a much louder flag than a regular one. The ranges are built
-        // with an explicit `maxOf`, so a hitbox narrower than the margin cannot throw.
+        // enemy, and a missed hit is a much louder flag than a regular one. The clamp lives in
+        // [AimGoal], where a test can look at it.
         val box = target.boundingBox
-        val lowX = box.minX + 0.02
-        val lowY = box.minY + 0.02
-        val lowZ = box.minZ + 0.02
-        point = Vec3(
-            (point.x + aimOffset.x).coerceIn(lowX, maxOf(lowX, box.maxX - 0.02)),
-            (point.y + aimOffset.y).coerceIn(lowY, maxOf(lowY, box.maxY - 0.02)),
-            (point.z + aimOffset.z).coerceIn(lowZ, maxOf(lowZ, box.maxZ - 0.02))
+        val placed = AimGoal.withOffset(
+            point.x, point.y, point.z,
+            aimOffset.x, aimOffset.y, aimOffset.z,
+            AimGoal.Box(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ),
+            0.02,
         )
+        point = Vec3(placed.first, placed.second, placed.third)
 
         if (predict > 0f && predictSize > 0) {
             // The target's velocity of the last tick, not its whole movement: a small lead that
@@ -2237,13 +2264,6 @@ internal class AimassistCore(
      * share of the answer is ramped down by [AiReach] and the curve takes over for the rest, so a
      * confident wrong answer never becomes the whole step.
      */
-    private fun modelGoal(me: LocalPlayer, target: Entity?, goal: Rotation): Rotation {
-        if (aiInputPoint != AiInputPoint.EYES || target == null || forcedGoal != null) {
-            return goal
-        }
-        return Rotation.lookingAt(target.eyePosition, me.eyePosition)
-    }
-
     private fun aiStep(
         me: LocalPlayer,
         aim: Rotation,
