@@ -99,33 +99,7 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
     }
 
     override fun mouseClicked(click: MouseButtonEvent, doubled: Boolean): Boolean {
-        if (click.button() != 0) return super.mouseClicked(click, doubled)
-        val layout = VapeLayout(width, height)
-        val cats = categories()
-        val modules = shownModules(cats.getOrElse(selectedCategory) { "" })
-        val specs = modules.map { VapeLayout.CardSpec(expanded = false, rows = emptyList()) }
-        val cards = layout.placeCards(specs)
-        val px = click.x.toInt()
-        val py = click.y.toInt()
-        when (val hit = layout.hit(px, py, cards, specs, null, cats.size)) {
-            is VapeLayout.Element.Category -> {
-                selectedCategory = hit.index
-                expanded.clear()
-            }
-            is VapeLayout.Element.Search -> searchFocused = true
-            is VapeLayout.Element.Card -> {
-                searchFocused = false
-                val module = modules[hit.module]
-                module.enabled = !module.enabled
-            }
-            is VapeLayout.Element.Dots -> {
-                searchFocused = false
-                val name = modules[hit.module].name
-                if (!expanded.remove(name)) expanded.add(name)
-            }
-            else -> searchFocused = false
-        }
-        return true
+        return super.mouseClicked(click, doubled)
     }
 
     override fun mouseDragged(click: MouseButtonEvent, offsetX: Double, offsetY: Double): Boolean {
