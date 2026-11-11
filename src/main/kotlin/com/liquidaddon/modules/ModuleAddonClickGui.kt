@@ -229,6 +229,21 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
     }
 
 
+    private data class Ranged(val min: Float, val max: Float, val current: Float)
+
+    private fun rangedInfo(value: Value<*>): Ranged? {
+        val ranged = value as? RangedValue<*> ?: return null
+        return when (val range = ranged.range) {
+            is IntRange -> Ranged(range.first.toFloat(), range.last.toFloat(), (value.get() as Int).toFloat())
+            is ClosedFloatingPointRange<*> -> Ranged(
+                (range.start as Number).toFloat(),
+                (range.endInclusive as Number).toFloat(),
+                (value.get() as Number).toFloat(),
+            )
+            else -> null
+        }
+    }
+
     @Suppress("UNCHECKED_CAST")
     private fun setAny(value: Value<*>, newValue: Any) {
         (value as Value<Any>).set(newValue)
