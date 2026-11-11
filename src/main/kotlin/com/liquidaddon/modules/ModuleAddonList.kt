@@ -81,10 +81,11 @@ object ModuleAddonList : ClientModule("AddonList", Categories.LIQUIDADDON) {
             if (background) {
                 context.fill(row.bgLeft, row.bgTop, row.bgRight, row.bgBottom, backgroundColor.argb)
             }
-            context.drawString(font, row.name, row.nameX, row.y + 1, row.color, shadow)
+            // MC 26 renamed the overlay's text entry point: `text`, not `drawString`.
+            context.text(font, row.name, row.nameX, row.y + 1, row.color, shadow)
             val suffixX = row.suffixX
             if (suffixX != null) {
-                context.drawString(font, row.suffix, suffixX, row.y + 1, suffixColor.argb, shadow)
+                context.text(font, row.suffix, suffixX, row.y + 1, suffixColor.argb, shadow)
             }
         }
     }
