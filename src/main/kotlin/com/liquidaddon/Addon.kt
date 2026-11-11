@@ -11,8 +11,6 @@ import com.liquidaddon.modules.ModuleFakeLagV2
 import com.liquidaddon.modules.ModuleDoubleClicks
 import com.liquidaddon.modules.ModuleFireballDeflect
 import com.liquidaddon.modules.ModuleFireballJumpAI
-import com.liquidaddon.modules.ModuleAddonClickGui
-import com.liquidaddon.modules.ModuleAddonList
 import com.liquidaddon.modules.ModuleScaffoldLegit
 import com.liquidaddon.modules.ModuleTriggerBotPlus
 import com.liquidaddon.commands.CommandLiquidAddon
@@ -30,7 +28,7 @@ class Addon : LiquidBounceAddon() {
 
         // Registra i moduli. CommandExample è opzionale — se non c'è il file, commenta la riga sotto
         registerModules(
-            ModuleHitFlick, ModuleHitSelect, ModuleAimbotAI, ModuleAimassist, ModuleScaffoldLegit, ModuleFakeLagV2, ModuleTriggerBotPlus, ModuleJumpReset, ModuleAutoPearlAI, ModuleBlockHit, ModuleFireballDeflect, ModuleDoubleClicks, ModuleFireballJumpAI, ModuleAddonList, ModuleAddonClickGui
+            ModuleHitFlick, ModuleHitSelect, ModuleAimbotAI, ModuleAimassist, ModuleScaffoldLegit, ModuleFakeLagV2, ModuleTriggerBotPlus, ModuleJumpReset, ModuleAutoPearlAI, ModuleBlockHit, ModuleFireballDeflect, ModuleDoubleClicks, ModuleFireballJumpAI
         )
 
         // Telemetria del motore di mira: /liquidaddon ai
