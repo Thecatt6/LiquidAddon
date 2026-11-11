@@ -54,7 +54,8 @@ object ModuleAddonClickGui : ClientModule("AddonClickGui", Categories.LIQUIDADDO
     }
 
     override fun onDisabled() {
-        if (mc.screen === screen) {
+        // MC 26 moved the screen accessor under `mc.gui`, the same place setScreen lives.
+        if (mc.gui.screen() === screen) {
             mc.gui.setScreen(null)
         }
         screen = null
