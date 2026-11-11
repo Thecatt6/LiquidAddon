@@ -209,6 +209,7 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
             is VapeLayout.Element.Slider -> {
                 searchFocused = false
                 dragging = Pair(hit.module, hit.row)
+                slideTo(layout, cards, hit.module, hit.row, modules, px)
             }
             is VapeLayout.Element.ModeButton -> {
                 val group = settingsOf(modules[hit.module])[hit.row] as ModeValueGroup<*>
@@ -231,6 +232,28 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
         return super.mouseReleased(click)
     }
 
+
+    private fun slideTo(
+        lay: VapeLayout,
+        cardRects: List<VapeLayout.Rect>,
+        moduleIndex: Int,
+        rowIndex: Int,
+        pool: List<ClientModule>,
+        pointerX: Int
+    ) {
+        val target = settingsOf(pool[moduleIndex]).getOrNull(rowIndex) ?: return
+        val bounds = rangedInfo(target) ?: return
+        val track = lay.controlRect(lay.rowRect(cardRects[moduleIndex], rowIndex), VapeLayout.RowKind.SLIDER)
+        val fraction = (pointerX - track.x).toFloat() / track.w.toFloat()
+        val whole = bounds.min % 1f == 0f && bounds.max % 1f == 0f
+        val stepSize = if (whole) 1f else 0.01f
+        val picked = VapeLayout.sliderValue(bounds.min, bounds.max, stepSize, fraction)
+        if (target.valueType == ValueType.INT) {
+            setAny(target, picked.toInt())
+        } else {
+            setAny(target, picked)
+        }
+    }
 
     private data class Ranged(val min: Float, val max: Float, val current: Float)
 
