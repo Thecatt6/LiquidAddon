@@ -205,9 +205,29 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
                     val row = layout.rowRect(card, r)
                     context.text(mc.font, value.name, row.x + 4, row.y + 6, ink, false)
                     when (val kind = kindOf(value)) {
-                        VapeLayout.RowKind.SWITCH -> drawSwitch(context, layout, layout.controlRect(row, kind), value.get() as Boolean, on)
-                        VapeLayout.RowKind.SLIDER -> drawSlider(context, layout, layout.controlRect(row, kind), value, on)
-                        VapeLayout.RowKind.MODE -> drawMode(context, layout, layout.controlRect(row, kind), value as ModeValueGroup<*>, on)
+                        VapeLayout.RowKind.SWITCH -> {
+                            val sw = layout.controlRect(row, kind)
+                            val swOn = value.get() as Boolean
+                            fillRounded(context, layout, sw.x, sw.y, sw.w, sw.h, sw.h / 2, if (swOn) VapeLayout.TRACK_FILL else VapeLayout.TRACK_BG)
+                            val knobX = if (swOn) sw.x + sw.w - sw.h + 2 else sw.x + 2
+                            fillRounded(context, layout, knobX, sw.y + 2, sw.h - 4, sw.h - 4, (sw.h - 4) / 2, if (swOn) VapeLayout.TEXT_ON_LIGHT else VapeLayout.CARD_ON)
+                        }
+                        VapeLayout.RowKind.SLIDER -> {
+                            val tr = layout.controlRect(row, kind)
+                            val bounds = rangedInfo(value)
+                            if (bounds != null) {
+                                val frac = VapeLayout.sliderFrac(bounds.current, bounds.min, bounds.max)
+                                fillRounded(context, layout, tr.x, tr.y, tr.w, tr.h, 2, VapeLayout.TRACK_BG)
+                                val done = (tr.w * frac).toInt().coerceAtLeast(2)
+                                fillRounded(context, layout, tr.x, tr.y, done, tr.h, 2, if (on) VapeLayout.TEXT_ON_LIGHT else VapeLayout.TRACK_FILL)
+                            }
+                        }
+                        VapeLayout.RowKind.MODE -> {
+                            val mb = layout.controlRect(row, kind)
+                            val group = value as ModeValueGroup<*>
+                            fillRounded(context, layout, mb.x, mb.y, mb.w, mb.h, 3, if (on) VapeLayout.SEARCH_BG else VapeLayout.TRACK_BG)
+                            context.text(mc.font, group.activeMode.name, mb.x + 5, mb.y + 5, if (on) VapeLayout.TEXT_HEADER else VapeLayout.TEXT_ON_DARK, false)
+                        }
                     }
                 }
             }
@@ -229,25 +249,6 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
 
     private fun caret(): String =
         if (searchFocused && System.currentTimeMillis() / 300 % 2 == 0L) "|" else ""
-
-    private fun drawSwitch(ctx: GuiGraphicsExtractor, layout: VapeLayout, rect: VapeLayout.Rect, on: Boolean, cardOn: Boolean) {
-        fillRounded(ctx, layout, rect.x, rect.y, rect.w, rect.h, rect.h / 2, if (on) VapeLayout.TRACK_FILL else VapeLayout.TRACK_BG)
-        val knobX = if (on) rect.x + rect.w - rect.h + 2 else rect.x + 2
-        fillRounded(ctx, layout, knobX, rect.y + 2, rect.h - 4, rect.h - 4, (rect.h - 4) / 2, if (on) VapeLayout.TEXT_ON_LIGHT else VapeLayout.CARD_ON)
-    }
-
-    private fun drawSlider(ctx: GuiGraphicsExtractor, layout: VapeLayout, rect: VapeLayout.Rect, value: Value<*>, cardOn: Boolean) {
-        val info = rangedInfo(value) ?: return
-        val frac = VapeLayout.sliderFrac(info.third, info.first, info.second)
-        fillRounded(ctx, layout, rect.x, rect.y, rect.w, rect.h, 2, VapeLayout.TRACK_BG)
-        val filled = (rect.w * frac).toInt().coerceAtLeast(2)
-        fillRounded(ctx, layout, rect.x, rect.y, filled, rect.h, 2, if (cardOn) VapeLayout.TEXT_ON_LIGHT else VapeLayout.TRACK_FILL)
-    }
-
-    private fun drawMode(ctx: GuiGraphicsExtractor, layout: VapeLayout, rect: VapeLayout.Rect, group: ModeValueGroup<*>, cardOn: Boolean) {
-        fillRounded(ctx, layout, rect.x, rect.y, rect.w, rect.h, 3, if (cardOn) VapeLayout.SEARCH_BG else VapeLayout.TRACK_BG)
-        ctx.text(mc.font, group.activeMode.name, rect.x + 5, rect.y + 5, if (cardOn) VapeLayout.TEXT_HEADER else VapeLayout.TEXT_ON_DARK, false)
-    }
 
     private fun fillRounded(
         ctx: GuiGraphicsExtractor,
