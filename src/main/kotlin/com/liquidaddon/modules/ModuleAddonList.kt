@@ -8,7 +8,7 @@ import net.ccbluex.liquidbounce.event.events.OverlayRenderEvent
 import net.ccbluex.liquidbounce.event.handler
 import net.ccbluex.liquidbounce.features.module.ClientModule
 import net.ccbluex.liquidbounce.features.module.ModuleManager
-import net.ccbluex.liquidbounce.utils.render.Color4b
+import net.ccbluex.liquidbounce.render.engine.type.Color4b
 
 /**
  * The array-list of the theme: every enabled module, stacked widest-first against the right edge
@@ -46,7 +46,9 @@ object ModuleAddonList : ClientModule("AddonList", Categories.LIQUIDADDON) {
     private fun draw(event: OverlayRenderEvent) {
         val font = mc.font
         val spaceWidth = font.width(" ")
-        val rows = ModuleManager.modules
+        // ModuleManager *is* the collection of modules: the backing set is a private top-level
+        // val, so the object itself is what gets iterated.
+        val rows = ModuleManager
             .filter { it.enabled && !it.hidden && it !== this }
             .map { module ->
                 val suffix = modeSuffix(module)
