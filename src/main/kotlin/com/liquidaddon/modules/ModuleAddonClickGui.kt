@@ -210,7 +210,6 @@ internal class AddonClickGuiScreen : Screen("LiquidAddon".asPlainText()) {
             is VapeLayout.Element.Slider -> {
                 searchFocused = false
                 dragging = Pair(hit.module, hit.row)
-                slideTo(layout, cards, hit.module, hit.row, modules, px)
             }
             is VapeLayout.Element.ModeButton -> {
                 val group = settingsOf(modules[hit.module])[hit.row] as ModeValueGroup<*>
