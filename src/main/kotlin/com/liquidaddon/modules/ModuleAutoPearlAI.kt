@@ -1,6 +1,7 @@
 package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
+import com.liquidaddon.aiming.RotationBridge
 import net.ccbluex.liquidbounce.config.types.list.Tagged
 import net.ccbluex.liquidbounce.event.events.GameTickEvent
 import net.ccbluex.liquidbounce.event.handler
@@ -1435,8 +1436,13 @@ object ModuleAutoPearlAI : ClientModule(
      * rotation is already shaped and quantized here, and an angle smooth on top of it would move the
      * throw off the lattice.
      */
+    /** The "this client has no rotation door for me" line has been said; see [handToManager]. */
+    private var bridgeSaid = false
+
     private fun handToManager(rotation: Rotation) {
-        RotationManager.setRotationTarget(
+        // Through the bridge: the descriptor of this call changed between client builds, and a
+        // jar compiled against one dies with NoSuchMethodError on the other (see RotationBridge).
+        val handed = RotationBridge.setRotationTarget(
             RotationTarget(
                 rotation = rotation,
                 entity = null,
@@ -1453,6 +1459,11 @@ object ModuleAutoPearlAI : ClientModule(
             RotationPriority.IMPORTANT_FOR_USAGE_3,
             this
         )
+        if (!handed && !bridgeSaid) {
+            bridgeSaid = true
+            chat("§c[AutoPearl] silent rotations are not reaching this client build " +
+                "(${RotationBridge.state}) - the throw does nothing until client and add-on are aligned")
+        }
     }
 
     // --- gating / plumbing --------------------------------------------------------------------
