@@ -25,8 +25,9 @@ import net.ccbluex.liquidbounce.utils.client.chat
  * `| stalls 2, last 2410ms` — the count and the last length of the gaps [StallGuard] opened its
  * window on: the resume tick of a freeze carries a queued mouse jump of tens of degrees in one
  * packet, and a rotation flag that lands on such a tick is not a flag on a shaped step. Every line
- * then closes with `| load 84%, onset 341ms`: the hardest turn a target demanded against the cap
- * of a single tick, and the fade-in duration the current engagement drew for itself.
+ * then closes with `| load 84%, onset 341ms, grace 176ms, anchor 62%`: the hardest turn a target
+ * demanded against the cap of a single tick, the fade-in duration and curve the engagement drew,
+ * the exit fade of the crosshair gate, and where the goal's height sat between box centre and eyes.
  */
 object CommandLiquidAddon : CommandRegistrar {
 
@@ -51,7 +52,11 @@ object CommandLiquidAddon : CommandRegistrar {
                             // tick, the onset how long this engagement's warm-up was drawn: the
                             // two numbers the humanizing shapes of the assist report about
                             // themselves (ChaseLoad, Onset).
-                            append(" | load %d%%, onset %dms".format(core.peakLoadPct, core.lastOnsetMs))
+                            append(
+                                " | load %d%%, onset %dms, grace %dms, anchor %d%%".format(
+                                    core.peakLoadPct, core.lastOnsetMs, core.lastGraceMs, core.anchorPct
+                                )
+                            )
                         }
                         val line = AiStats.format(core.stats.snapshot(), core.aiStrengthNow) + stalls
                         chat("§7[${core.ownerName}] §f$line")

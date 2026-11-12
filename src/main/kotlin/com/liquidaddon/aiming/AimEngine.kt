@@ -937,6 +937,12 @@ internal class AimassistCore(
     /** The fade-in duration the current engagement drew, in milliseconds; see [Onset]. */
     val lastOnsetMs: Int get() = onset.lastDurationMs
 
+    /** The exit fade the crosshair gate is running (or last ran), in milliseconds; see [EdgeGrace]. */
+    val lastGraceMs: Long get() = edgeGrace.lastGraceMs
+
+    /** Where this engagement's goal height was drawn: 0 = centre of the box, 100 = eyes. */
+    val anchorPct: Int get() = (anchorDraw * 100f).toInt()
+
     /** How long the last freeze lasted, in milliseconds; 0 before the first one. */
     val lastStallMs: Long get() = stalls.lastStallMs
 
@@ -1057,6 +1063,12 @@ internal class AimassistCore(
     /** The hardest turn a target has demanded this session, as a share of [maxSpeed]. */
     private var peakLoad = 0f
 
+    /** The goodbye fade of the crosshair gate, drawn per exit; see [EdgeGrace]. */
+    private val edgeGrace = EdgeGrace()
+
+    /** Where this engagement's goal height sits between box centre and eyes; see [GoalAnchor]. */
+    private var anchorDraw = 0.5f
+
     /** The rotation the module handed out on the previous tick (silent: what the server got). */
     private var lastSent: Rotation? = null
 
@@ -1089,7 +1101,6 @@ internal class AimassistCore(
     private var drawnPitch = 0f
 
     /** [onlyOnCrosshair] keeps accepting a target until this time after the ray left the box. */
-    private var crosshairGraceUntil = 0L
 
     /** Ticks the aim spent inside [deadZone]; used to keep a silent request alive. */
     private var stillTicks = 0
@@ -1240,7 +1251,7 @@ internal class AimassistCore(
         tickStepPitch = 0f
         drawnYaw = 0f
         drawnPitch = 0f
-        crosshairGraceUntil = 0L
+        edgeGrace.reset()
         aiUnavailableReason = null
         lastAiNote = "ai idle"
         aiBlend = 1f
@@ -1476,7 +1487,8 @@ internal class AimassistCore(
                 Random.nextInt(reactionRandom + 1)
             // Every engagement draws a fade-in of its own: the same 300 ms warm-up on every
             // target is a clock a check can average out of many fights (see [Onset]).
-            onset.begin(now, fadeIn, Random.nextFloat())
+            onset.begin(now, fadeIn, Random.nextFloat(), Random.nextFloat())
+            anchorDraw = Random.nextFloat()
             responseJitter = 0.85f + Random.nextFloat() * 0.3f
             strengthScale = 1f + (Random.nextFloat() - 0.5f) * 2f * (handLayer().strengthSpread / 100f)
             speedDrift = 1f
@@ -1529,15 +1541,25 @@ internal class AimassistCore(
 
         // A short grace on the crosshair gate: without it the gate flips on/off on every pixel of
         // the hitbox edge, and each flip shows on the camera as a start/stop beat.
-        if (target != null && onCrosshair(me, target)) {
-            crosshairGraceUntil = now + CROSSHAIR_GRACE_MS
-        }
-        if (target != null && onlyOnCrosshair && now > crosshairGraceUntil) {
-            hold()
-            debugLine(
-                "crosshair off the hitbox (%.2f° from the centre)".format(crosshairOffset(target))
-            )
-            return
+        // The goodbye of the crosshair gate. Leaving the hitbox starts a fade of its own, drawn
+        // per exit, and the gate closes when the fade reaches zero: the cut lands on nothing
+        // instead of a full-assist cliff at a constant grace, and two exits never share a latency
+        // (see [EdgeGrace]).
+        var graceShare = 1f
+        if (target != null) {
+            if (onCrosshair(me, target)) {
+                edgeGrace.enter()
+            } else {
+                edgeGrace.leave(now, CROSSHAIR_GRACE_MS, Random.nextFloat())
+            }
+            if (onlyOnCrosshair && edgeGrace.expired(now)) {
+                hold()
+                debugLine(
+                    "crosshair off the hitbox (%.2f° from the centre)".format(crosshairOffset(target))
+                )
+                return
+            }
+            graceShare = edgeGrace.share(now)
         }
 
         val aim = currentAim(me)
@@ -1607,7 +1629,8 @@ internal class AimassistCore(
             if (load > peakLoad) peakLoad = load
             val restDecay = if (handOnly) hand.restDecay(handCounts, handThreshold) else 1f
             val allowance = weight * responseJitter * speedDrift * gate * glide * fade * handShare *
-                    stalls.assistShare() * ChaseLoad.loadShare(load) * restDecay
+                    stalls.assistShare() * ChaseLoad.loadShare(load) * restDecay * graceShare *
+                    HandCoherence.factor(ownYawRead, ownPitchRead, deltaYaw, deltaPitch)
             val ai = if (engine == Engine.AI) {
                 aiStep(me, aim, goal, target)
             } else {
@@ -2072,7 +2095,20 @@ internal class AimassistCore(
         // correction, caps and rest check all read the result: two goals in one tick (the model on
         // the eyes, the correction on the box) used to leave the aim sitting between them, a pull
         // towards eye height neither the setting nor the training asked for (see [AimGoal]).
-        val base = if (aiInputPoint == AiInputPoint.EYES) target.eyePosition else pointOn(me, target, aim)
+        val base = if (aiInputPoint == AiInputPoint.EYES) {
+            // The height of the base is drawn once per engagement, between the centre of the box
+            // and the eyes: a head-only band is a signature with no payoff in a game that has no
+            // headshot bonus, while a draw per engagement keeps the goal a single attractor and
+            // spreads the impacts of a session over most of the box (see [GoalAnchor]).
+            val anchorBox = target.boundingBox
+            Vec3(
+                target.eyePosition.x,
+                GoalAnchor.anchorY(anchorBox.minY, anchorBox.maxY, target.eyePosition.y, anchorDraw),
+                target.eyePosition.z,
+            )
+        } else {
+            pointOn(me, target, aim)
+        }
         var point = base
 
         // The point the aim is pulled to is not a constant of the box. A person keeps the crosshair
