@@ -50,6 +50,25 @@ class OnsetTest {
     }
 
     @Test
+    fun `the shape draw picks one of three curves, all from zero to one`() {
+        val easeIn = Onset()
+        easeIn.begin(0L, 400, 0.5f, 0.1f)
+        val smooth = Onset()
+        smooth.begin(0L, 400, 0.5f, 0.5f)
+        val easeOut = Onset()
+        easeOut.begin(0L, 400, 0.5f, 0.9f)
+        // Halfway through each one's own drawn duration the three families sit apart; reading the
+        // half from the class keeps the assert out of float rounding on the draw.
+        assertEquals(0.25f, easeIn.progress(easeIn.lastDurationMs.toLong() / 2), 5.0e-3f)
+        assertEquals(0.50f, smooth.progress(smooth.lastDurationMs.toLong() / 2), 5.0e-3f)
+        assertEquals(0.75f, easeOut.progress(easeOut.lastDurationMs.toLong() / 2), 5.0e-3f)
+        for (o in listOf(easeIn, smooth, easeOut)) {
+            assertEquals(0f, o.progress(0L), 1.0e-6f)
+            assertEquals(1f, o.progress(o.lastDurationMs.toLong()), 1.0e-6f)
+        }
+    }
+
+    @Test
     fun `the walk is monotone`() {
         val onset = Onset()
         onset.begin(0L, 300, 0.5f)
