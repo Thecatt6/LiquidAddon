@@ -1100,6 +1100,9 @@ internal class AimassistCore(
     /** This switch's lock, drawn inside the span of [switchDelay]: no constant floor. */
     private var switchLockMs = 0
 
+    /** The "this client has no rotation door for me" line has been said; see [bridgeUnbound]. */
+    private var bridgeSaid = false
+
     /** The rotation the module handed out on the previous tick (silent: what the server got). */
     private var lastSent: Rotation? = null
 
@@ -1942,12 +1945,16 @@ internal class AimassistCore(
         previousAim = from
 
         if (silent) {
-            RotationManager.setRotationTarget(
+            // Through the bridge, not straight at the manager: the descriptor of this call changed
+            // between client builds (`ClientModule` -> `EventListener`) and a jar compiled against
+            // one dies with NoSuchMethodError on the other (see [RotationBridge]).
+            val handed = RotationBridge.setRotationTarget(
                 plan(next, target),
                 // Below KillAura/Aimbot: an aim assist that overrode a real aura would be a bug.
                 rotationPriority,
                 owner
             )
+            if (!handed) bridgeUnbound()
         } else if (frameInterpolation) {
             // The tick only grants the budget; [onRender] draws it slice by slice over the
             // frames of this tick, and [flushPendingCamera] guarantees the full step has landed
@@ -1996,7 +2003,9 @@ internal class AimassistCore(
         // The aim did not move this tick: the model must see that as a zero velocity, not as the
         // step of the last tick stretched over the pause.
         previousAim = sent
-        RotationManager.setRotationTarget(plan(sent, currentTarget), rotationPriority, owner)
+        if (!RotationBridge.setRotationTarget(plan(sent, currentTarget), rotationPriority, owner)) {
+            bridgeUnbound()
+        }
     }
 
     /**
@@ -2024,7 +2033,9 @@ internal class AimassistCore(
         val stepPitch = ((camera.pitch - sent.pitch) * 0.35f).coerceIn(-maxSpeed, maxSpeed)
         val next = Rotation(sent.yaw + stepYaw, (sent.pitch + stepPitch).coerceIn(-89.5f, 89.5f))
         lastSent = next
-        RotationManager.setRotationTarget(plan(next, null), RotationPriority.NOT_IMPORTANT, owner)
+        if (!RotationBridge.setRotationTarget(plan(next, null), RotationPriority.NOT_IMPORTANT, owner)) {
+            bridgeUnbound()
+        }
     }
 
     /**
@@ -2738,6 +2749,18 @@ internal class AimassistCore(
     }
 
     /**
+     * The client has no `setRotationTarget` this jar can call: silent rotations are going nowhere.
+     * Said once and out loud, not left to the debug line — an assist that cannot reach the client
+     * looks exactly like an assist that is switched off.
+     */
+    private fun bridgeUnbound() {
+        if (bridgeSaid) return
+        bridgeSaid = true
+        chat("§c[" + owner.name + "] silent rotations are not reaching this client build " +
+            "(${RotationBridge.state}) - the aim does nothing until the client or the add-on is aligned")
+    }
+
+    /**
      * Settings that defeat the "assist, not aimbot" behaviour, reported next to the debug line so a
      * wrong configuration is visible instead of being guessed from the anticheat log.
      */
@@ -2746,6 +2769,7 @@ internal class AimassistCore(
         if (maxSpeed > 15f) append(" §cMaxSpeed>15 (packets can carry a snap)")
         if (!onlyOnCrosshair && fov > 45f) append(" §cOnlyOnCrosshair off with Fov>45 (wide magnet)")
         if (!gcdFix) append(" §cGcdFix off (deltas off the mouse lattice)")
+        if (RotationBridge.failed) append(" §csilent rotations unbound (${RotationBridge.state})")
         if (gcdFix && mouseNoise <= 0) {
             append(" §cMouseNoise 0 (every delta repeats: Distinct flag)")
         }
