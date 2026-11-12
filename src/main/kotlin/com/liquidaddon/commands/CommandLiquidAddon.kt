@@ -53,8 +53,9 @@ object CommandLiquidAddon : CommandRegistrar {
                             // two numbers the humanizing shapes of the assist report about
                             // themselves (ChaseLoad, Onset).
                             append(
-                                " | load %d%%, onset %dms, grace %dms, anchor %d%%".format(
-                                    core.peakLoadPct, core.lastOnsetMs, core.lastGraceMs, core.anchorPct
+                                " | load %d%%, onset %dms, grace %dms, anchor %d%%, drop %d".format(
+                                    core.peakLoadPct, core.lastOnsetMs, core.lastGraceMs, core.anchorPct,
+                                    core.frictionDropped
                                 )
                             )
                         }

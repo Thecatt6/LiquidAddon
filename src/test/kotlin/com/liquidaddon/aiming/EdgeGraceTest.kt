@@ -58,4 +58,26 @@ class EdgeGraceTest {
         grace.leave(1_050L, 140L, 1f)
         assertEquals(84L, grace.lastGraceMs, "the first draw stands")
     }
+
+    @Test
+    fun `the crosshair band is full inside the box and fades outside it`() {
+        assertEquals(1f, EdgeBand.share(offsetDeg = 0f, radiusDeg = 3f, bandDeg = 1.5f), 1.0e-6f)
+        assertEquals(1f, EdgeBand.share(offsetDeg = 3f, radiusDeg = 3f, bandDeg = 1.5f), 1.0e-6f, "on the edge")
+        assertEquals(0.5f, EdgeBand.share(offsetDeg = 3.75f, radiusDeg = 3f, bandDeg = 1.5f), 1.0e-6f)
+        assertEquals(0f, EdgeBand.share(offsetDeg = 4.5f, radiusDeg = 3f, bandDeg = 1.5f), 1.0e-6f)
+        assertEquals(0f, EdgeBand.share(offsetDeg = 30f, radiusDeg = 3f, bandDeg = 1.5f), 1.0e-6f)
+    }
+
+    @Test
+    fun `crossing the band never jumps - neighbouring offsets differ by at most one step`() {
+        var previous = EdgeBand.share(2.9f, 3f, 1.5f)
+        var offset = 2.9f
+        while (offset < 4.6f) {
+            offset += 0.01f
+            val now = EdgeBand.share(offset, 3f, 1.5f)
+            assertTrue(kotlin.math.abs(now - previous) < 0.01f, "a step at $offset: $previous -> $now")
+            previous = now
+        }
+        assertEquals(0f, previous, 1.0e-6f)
+    }
 }
