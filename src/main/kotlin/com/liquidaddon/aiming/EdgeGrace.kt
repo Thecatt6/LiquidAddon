@@ -60,3 +60,27 @@ internal class EdgeGrace {
         const val SPAN_MAX = 1.5f
     }
 }
+
+/**
+ * The same edge in space instead of in time: a band, not a wall.
+ *
+ * Anything gated on "the crosshair is on the hitbox" used to switch on a ray/box intersection — a
+ * boolean that flips between two ticks. For the friction path that flip changed the player's own
+ * cursor scale by the full configured share at once, in sync with the ray crossing the box: the
+ * hand slows and speeds up on a geometric event, which is both visible and a shape vanilla cannot
+ * produce (a real hand meets no such threshold).
+ *
+ * [share] reads the angular distance from the crosshair to the box and gives full value inside the
+ * box's own angular radius, fading linearly to 0 across [bandDeg] beyond it. The band is narrow on
+ * purpose: the gate keeps meaning "on the target", it just stops being a step. The width is a
+ * design choice, not a measurement, and the effect on any anticheat is **not measured**.
+ */
+internal object EdgeBand {
+
+    /** 1 inside the box, 0 at [bandDeg] beyond it, linear in between; 1 for a degenerate band. */
+    fun share(offsetDeg: Float, radiusDeg: Float, bandDeg: Float): Float {
+        if (offsetDeg <= radiusDeg) return 1f
+        if (bandDeg <= 0f) return 0f
+        return (1f - (offsetDeg - radiusDeg) / bandDeg).coerceIn(0f, 1f)
+    }
+}

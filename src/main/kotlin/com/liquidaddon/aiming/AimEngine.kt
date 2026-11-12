@@ -110,9 +110,21 @@ private const val REST_COUNTS = 1.15f
  */
 private const val PITCH_STEP_MAX = 3.0f
 
-/** Mean distance between two beats of rest, and how much that distance varies (milliseconds). */
-private const val PAUSE_EVERY_MS = 1400
-private const val PAUSE_JITTER_MS = 1200
+/** How far beyond the hitbox the crosshair gate still counts, in degrees: the band that replaces
+ * the ray/box boolean for the friction path (see [EdgeBand]). Narrow on purpose — the gate keeps
+ * meaning "on the target", it just stops being a step. */
+private const val CROSSHAIR_BAND_DEG = 1.5f
+
+/** The rest beats of a hand, as three bands an irregular clock draws from: ordinary beats, a
+ * long hold, and the rare long absence. A metronome of pauses is a clock a check can sit on. */
+private val PAUSE_BEAT = 700..2200
+private val PAUSE_HOLD = 2200..4800
+private val PAUSE_OUTLIER = 4800..9000
+
+/** The goal wobble's redraw bands: ordinary repicks, a hold on the same point, a quick cluster. */
+private val REDRAW_BEAT = 150..400
+private val REDRAW_HOLD = 800..2000
+private val REDRAW_OUTLIER = 40..120
 
 /**
  * The share of the step an "idle" tick still applies when the camera is ours: a skipped tick would
@@ -296,7 +308,8 @@ internal interface AimSettings {
     val pitchStepMax: Float get() = PITCH_STEP_MAX
 
     /**
-     * Whether the hand takes its regular beats of rest ([PAUSE_EVERY_MS], three to six ticks each).
+     * Whether the hand takes its beats of rest, drawn from three bands of [IrregularClock] (three
+     * to six ticks each).
      *
      * On for anything that tracks a target for as long as it is alive: a pull that never stops is a
      * machine, and the beats are where a person's hand is a person's hand. Off for a flick that has
@@ -943,6 +956,10 @@ internal class AimassistCore(
     /** Where this engagement's goal height was drawn: 0 = centre of the box, 100 = eyes. */
     val anchorPct: Int get() = (anchorDraw * 100f).toInt()
 
+    /** Mouse counts friction has dropped from the hand this session, both paths, both axes. */
+    val frictionDropped: Int get() =
+        (latYaw.dropped + latPitch.dropped + latOwnYaw.dropped + latOwnPitch.dropped).toInt()
+
     /** How long the last freeze lasted, in milliseconds; 0 before the first one. */
     val lastStallMs: Long get() = stalls.lastStallMs
 
@@ -1068,6 +1085,20 @@ internal class AimassistCore(
 
     /** Where this engagement's goal height sits between box centre and eyes; see [GoalAnchor]. */
     private var anchorDraw = 0.5f
+
+    /** Friction that drops whole counts instead of scaling deltas, per axis and per path; see
+     *  [LatticeFriction]. The visible pair damps the cursor, the silent pair the own turn that
+     *  silent mode takes out of the rotation the server gets. */
+    private val latYaw = LatticeFriction()
+    private val latPitch = LatticeFriction()
+    private val latOwnYaw = LatticeFriction()
+    private val latOwnPitch = LatticeFriction()
+
+    /** This engagement's wobble amplitude, drawn: some fights aim wide, some narrow. */
+    private var wobbleAmp = 1f
+
+    /** This switch's lock, drawn inside the span of [switchDelay]: no constant floor. */
+    private var switchLockMs = 0
 
     /** The rotation the module handed out on the previous tick (silent: what the server got). */
     private var lastSent: Rotation? = null
@@ -1242,7 +1273,8 @@ internal class AimassistCore(
         pauseLeft = 0
         // The first beat of rest comes *later*, not now: a module that starts by doing nothing for
         // five ticks is a module that misses the first — and for a rescue that is the only one.
-        nextPauseAt = System.currentTimeMillis() + PAUSE_EVERY_MS + Random.nextInt(PAUSE_JITTER_MS)
+        nextPauseAt = System.currentTimeMillis() +
+            IrregularClock.nextMs(Random.nextFloat(), PAUSE_BEAT, PAUSE_HOLD, PAUSE_OUTLIER)
         aimOffset = Vec3(0.0, 0.0, 0.0)
         aimOffsetUntil = 0L
         yawCarry = 0.0
@@ -1252,6 +1284,10 @@ internal class AimassistCore(
         drawnYaw = 0f
         drawnPitch = 0f
         edgeGrace.reset()
+        latYaw.reset()
+        latPitch.reset()
+        latOwnYaw.reset()
+        latOwnPitch.reset()
         aiUnavailableReason = null
         lastAiNote = "ai idle"
         aiBlend = 1f
@@ -1311,16 +1347,29 @@ internal class AimassistCore(
         if (now < reactionUntil) return
 
         val me = mc.player ?: return
-        if (onlyOnCrosshair && !onCrosshair(me, target)) return
 
+        // No binary gate at the hitbox edge: the old hard `return` off the crosshair made the
+        // hand's own cursor scale jump by the whole friction share on the ray's intersection with
+        // the box, in sync with it, every single time. The gate is now a narrow angular band
+        // (see [EdgeBand]) and the bubble weight fades with distance, so crossing the edge of the
+        // hitbox changes the damping by nothing at all.
         val weight = bubble(me, target)
         if (weight <= 0f) return
+        val cross = if (onlyOnCrosshair && target != null) {
+            EdgeBand.share(crosshairOffset(target), hitboxRadius(me, target), CROSSHAIR_BAND_DEG)
+        } else {
+            1f
+        }
+        if (cross <= 0f) return
 
         // Never below zero: friction may slow the cursor down, not reverse it. The same fade as
         // the assist, so the damping does not slam on at full strength after a reaction pause.
-        val scale = 1.0 - (friction / 100.0) * weight * fadeProgress(now)
-        event.cursorDeltaX *= scale
-        event.cursorDeltaY *= scale
+        val scale = (1.0 - (friction / 100.0) * weight * cross * fadeProgress(now)).toFloat()
+        // Damping by dropping whole cursor counts, never by scaling the delta: a scaled delta
+        // leaves the mouse lattice and puts rotations on the wire no vanilla client can emit
+        // (see [LatticeFriction]). Cursor units are counts, so the kept value is a count.
+        event.cursorDeltaX = latYaw.keep(event.cursorDeltaX.toFloat(), scale).toDouble()
+        event.cursorDeltaY = latPitch.keep(event.cursorDeltaY.toFloat(), scale).toDouble()
     }
 
     /**
@@ -1476,12 +1525,14 @@ internal class AimassistCore(
         } else if (target !== currentTarget) {
             // Still deciding whether to commit to this target: keep the current aim alive instead
             // of dropping the request (which would hand the camera back in a single packet).
-            if (currentTarget != null && now - lastSwitch < switchDelay) {
+            if (currentTarget != null && now - lastSwitch < switchLockMs) {
                 hold()
                 return
             }
             currentTarget = target
             lastSwitch = now
+            switchLockMs = Drawn.span(switchDelay.toFloat(), Random.nextFloat(), 0.5f, 1.3f).toInt()
+            wobbleAmp = Drawn.span(1f, Random.nextFloat(), 0.6f, 1.6f)
             // A click the player already made is not a reaction to wait for.
             reactionUntil = if (target is LivingEntity && target === pendingAttack) now else now + reactionDelay +
                 Random.nextInt(reactionRandom + 1)
@@ -1509,7 +1560,7 @@ internal class AimassistCore(
             pauseLeft = 0
         } else if (now > nextPauseAt) {
             pauseLeft = 3 + Random.nextInt(4)
-            nextPauseAt = now + PAUSE_EVERY_MS + Random.nextInt(PAUSE_JITTER_MS)
+            nextPauseAt = now + IrregularClock.nextMs(Random.nextFloat(), PAUSE_BEAT, PAUSE_HOLD, PAUSE_OUTLIER)
         }
         if (pauseLeft > 0) {
             pauseLeft--
@@ -1567,6 +1618,10 @@ internal class AimassistCore(
         val fade = fadeProgress(now)
         var stepYaw = 0f
         var stepPitch = 0f
+        // The goal this tick's step was chasing, kept outside the block that owns it so the
+        // per-axis coherence below can compare the hand against it.
+        var goalYawDelta = 0f
+        var goalPitchDelta = 0f
         // Telemetry of an AI tick: the step the model drove and the one the curve would have driven
         // on the same delta, raw, before the caps - the pair `/liquidaddon ai` averages and the
         // drift guard correlates.
@@ -1578,6 +1633,8 @@ internal class AimassistCore(
             val goal = goalRotation(me, target, aim)
             val deltaYaw = Mth.wrapDegrees(goal.yaw - aim.yaw)
             val deltaPitch = goal.pitch - aim.pitch
+            goalYawDelta = deltaYaw
+            goalPitchDelta = deltaPitch
 
             // The hand first: an assist is help for a hand that is moving, so with the mouse still
             // there is nothing to assist. Nothing is written this tick — not even a drift — because
@@ -1629,8 +1686,7 @@ internal class AimassistCore(
             if (load > peakLoad) peakLoad = load
             val restDecay = if (handOnly) hand.restDecay(handCounts, handThreshold) else 1f
             val allowance = weight * responseJitter * speedDrift * gate * glide * fade * handShare *
-                    stalls.assistShare() * ChaseLoad.loadShare(load) * restDecay * graceShare *
-                    HandCoherence.factor(ownYawRead, ownPitchRead, deltaYaw, deltaPitch)
+                    stalls.assistShare() * ChaseLoad.loadShare(load) * restDecay * graceShare
             val ai = if (engine == Engine.AI) {
                 aiStep(me, aim, goal, target)
             } else {
@@ -1688,10 +1744,26 @@ internal class AimassistCore(
         // own turn is taken out of the rotation the server receives. On the server the hitbox
         // becomes sticky while the screen keeps turning at full speed, which is the whole point.
         if (silent && mode != Mode.ASSIST && friction > 0f) {
+            // The own turn the server is denied stays on the mouse lattice: whole counts dropped,
+            // not a fraction of a turn subtracted (see [LatticeFriction]).
             val damp = (friction / 100f) * weight * fade
-            stepYaw -= ownYawRead * damp
-            stepPitch -= ownPitchRead * damp * 0.5f
+            val g = RotationUtil.gcd.toFloat()
+            if (g > 1.0e-6f) {
+                val keepYaw = latOwnYaw.keep(ownYawRead / g, 1f - damp) * g
+                val keepPitch = latOwnPitch.keep(ownPitchRead / g, 1f - damp * 0.5f) * g
+                stepYaw -= ownYawRead - keepYaw
+                stepPitch -= ownPitchRead - keepPitch
+            }
             correcting = true
+        }
+
+        // Coherence one axis at a time: the assist helps an axis the hand is already moving and
+        // pays the floor for an axis it would invent (see [HandCoherence]). A module's forced
+        // point is not help for a hand — it is work that must land on the tick it was asked for —
+        // so it is left alone.
+        if (forcedPointValue == null && mode != Mode.FRICTION) {
+            stepYaw *= HandCoherence.factorAxis(ownYawRead, goalYawDelta)
+            stepPitch *= HandCoherence.factorAxis(ownPitchRead, goalPitchDelta)
         }
 
         if (!correcting) {
@@ -2119,11 +2191,14 @@ internal class AimassistCore(
         val now = System.currentTimeMillis()
         if (now > aimOffsetUntil) {
             val size = target.boundingBox
-            aimOffsetUntil = now + 150 + Random.nextInt(250)
+            aimOffsetUntil = now +
+                IrregularClock.nextMs(Random.nextFloat(), REDRAW_BEAT, REDRAW_HOLD, REDRAW_OUTLIER)
+            // The amplitude is this engagement's own: a constant wobble width repeated over every
+            // fight of a session is as readable as a constant point.
             aimOffset = Vec3(
-                (Random.nextDouble() - 0.5) * (size.maxX - size.minX) * 0.24,
-                (Random.nextDouble() - 0.5) * (size.maxY - size.minY) * 0.18,
-                (Random.nextDouble() - 0.5) * (size.maxZ - size.minZ) * 0.24
+                (Random.nextDouble() - 0.5) * (size.maxX - size.minX) * 0.24 * wobbleAmp,
+                (Random.nextDouble() - 0.5) * (size.maxY - size.minY) * 0.18 * wobbleAmp,
+                (Random.nextDouble() - 0.5) * (size.maxZ - size.minZ) * 0.24 * wobbleAmp
             )
         }
         // Clamped back inside: an offset that leaves the hitbox would aim at the air next to the

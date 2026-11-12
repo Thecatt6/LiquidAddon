@@ -1,6 +1,5 @@
 package com.liquidaddon.aiming
 
-import kotlin.math.hypot
 
 /**
  * How much of the assist's direction the hand was already going.
@@ -25,11 +24,19 @@ internal object HandCoherence {
     /** The share of the help when the hand's direction says nothing in its favour. */
     const val FLOOR = 0.35f
 
-    fun factor(ownYaw: Float, ownPitch: Float, goalYaw: Float, goalPitch: Float): Float {
-        val own = hypot(ownYaw, ownPitch)
-        val goal = hypot(goalYaw, goalPitch)
-        if (own < 1.0e-4f || goal < 1.0e-4f) return 1f
-        val cos = ((ownYaw * goalYaw + ownPitch * goalPitch) / (own * goal)).coerceIn(-1f, 1f)
-        return FLOOR + (1f - FLOOR) * maxOf(0f, cos)
+    /**
+     * The same rule one axis at a time: the assist may help an axis the hand is already moving,
+     * and pays the floor for an axis it invents — a hand dragging vertically does not license a
+     * horizontal pull from nowhere. [goal] of zero on an axis means nothing to follow there: the
+     * factor is 1 and the caps own the tick.
+     */
+    fun factorAxis(own: Float, goal: Float): Float {
+        if (kotlin.math.abs(goal) < 1.0e-4f) return 1f
+        if (kotlin.math.abs(own) < 1.0e-4f) return FLOOR
+        // Direction only, not magnitude: covering the whole error is the assist's job, and a
+        // hand that moves towards the goal on this axis is participating in it however far it
+        // goes. What pays the floor is an axis the hand is not on, or is fighting.
+        return if (own * goal > 0f) 1f else FLOOR
     }
+
 }

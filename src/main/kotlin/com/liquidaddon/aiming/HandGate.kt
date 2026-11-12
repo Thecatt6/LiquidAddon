@@ -1,7 +1,6 @@
 package com.liquidaddon.aiming
 
 import kotlin.math.abs
-import kotlin.math.max
 import kotlin.math.min
 
 /**
@@ -25,11 +24,11 @@ import kotlin.math.min
  * becomes **mouse counts**, which is the unit the player's hand actually works in: half a count of
  * movement is not a movement, it is the camera sitting still.
  *
- * The gate does not cut on the last moving tick, in either direction. A hand that stops still
- * carries the pull for a moment, and a hand that starts again does not pull in full on its first
- * count — both edges are shapes a check can see, and a re-arm that jumps to full is what lets a
- * one-count jitter hold the assist forever. So the activity walks over [fadeTicks] ticks down
- * *and* up instead of dropping and jumping.
+ * The two directions are deliberately not symmetric. Stopping cuts at once: a mouse has no
+ * inertia, the vanilla view stops with the hand, and a coast would be motion with no input
+ * behind it. Starting again walks up over [fadeTicks] ticks: a re-arm that jumps to full on the
+ * first count is what lets a one-count jitter hold the assist forever, and that ramp is the only
+ * edge this class still smooths.
  *
  * The class is stateful but has no dependencies, so the whole rule is testable without a game
  * running (see `HandGateTest`).
@@ -67,19 +66,19 @@ internal class HandGate {
             return activity
         }
 
-        // The hand stopped: the pull runs out over [fadeTicks] ticks, never below zero and never
-        // in a single step (that step would be the edge this exists to remove).
-        activity = if (fadeTicks <= 0) 0f else max(0f, activity - 1f / fadeTicks)
-        return activity
+        // The hand stopped: the gate closes on this tick. A mouse has no inertia — a vanilla
+        // client's view stops the very tick the hand stops, and that edge is the most normal
+        // packet shape there is. Coast after a stop would be motion with no input behind it, the
+        // one thing the whole gate exists to refuse. [fadeTicks] rules the way back up, only.
+        activity = 0f
+        return 0f
     }
 
     /**
-     * The second factor of a hand at rest, 0..1: [activity] again, so that while the mouse stands
-     * still the help decays with the *square* of the fade (0.56, 0.25, 0.06 over four ticks)
-     * instead of linearly. A linear fade keeps the view walking towards the target at half
-     * strength for ticks after the hand stopped — a camera that moves with no input behind it,
-     * which is the one thing a hand never does. Squaring it lets the view coast to a standstill
-     * within a tick or two, smoothly: no edge, no drift.
+     * The second factor of a hand at rest: [activity] again, which since the stop cuts at once is
+     * simply 0 on every still tick — the assist contributes nothing to a view whose hand is not
+     * moving, not even a coast. Kept as its own reading (instead of trusting [activity] at the
+     * call site) so the rule "a still hand moves nothing" stays named, and testable, in one place.
      *
      * While the hand moves (or the gate is off) this is 1 and changes nothing.
      */

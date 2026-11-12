@@ -25,14 +25,12 @@ class HandGateTest {
     }
 
     @Test
-    fun `the pull survives a few ticks after the hand stops`() {
+    fun `a stopping hand closes the gate on the first still tick`() {
         val gate = HandGate()
         repeat(4) { gate.update(movementCounts = 3f, threshold = 1f, fadeTicks = 4) }
 
-        // Four ticks of a stopped hand: one quarter of the pull per tick, and zero on the fourth.
-        assertEquals(0.75f, gate.update(0f, 1f, 4))
-        assertEquals(0.50f, gate.update(0f, 1f, 4))
-        assertEquals(0.25f, gate.update(0f, 1f, 4))
+        // A mouse has no inertia: the view stops with the hand, and no coast follows the stop.
+        assertEquals(0f, gate.update(0f, 1f, 4))
         assertEquals(0f, gate.update(0f, 1f, 4))
     }
 
@@ -63,8 +61,8 @@ class HandGateTest {
         repeat(4) { gate.update(movementCounts = 3f, threshold = 1f, fadeTicks = 4) }
         assertEquals(1f, gate.restDecay(movementCounts = 3f, threshold = 1f))
         gate.update(movementCounts = 0f, threshold = 1f, fadeTicks = 4)
-        assertEquals(0.75f, gate.activity)
-        assertEquals(0.75f, gate.restDecay(movementCounts = 0f, threshold = 1f), "the second factor of a hand at rest")
+        assertEquals(0f, gate.activity)
+        assertEquals(0f, gate.restDecay(movementCounts = 0f, threshold = 1f), "no coast: the view stops with the hand")
         assertEquals(1f, gate.restDecay(movementCounts = 0f, threshold = 0f), "a gate switched off never decays")
     }
 
