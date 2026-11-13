@@ -2756,8 +2756,11 @@ internal class AimassistCore(
     private fun bridgeUnbound() {
         if (bridgeSaid) return
         bridgeSaid = true
-        chat("§c[" + owner.name + "] silent rotations are not reaching this client build " +
-            "(${RotationBridge.state}) - the aim does nothing until the client or the add-on is aligned")
+        // With the loaded client's own version in the line: "aligned with what?" has to be
+        // answerable from the message alone, without hunting through a menu.
+        chat("§c[" + owner.name + "] " + ClientBuild.describe(
+            ClientBuildProbe.read(), ClientBuild.Door.SHUT, RotationBridge.state
+        ) + " - the aim does nothing until client and add-on are aligned")
     }
 
     /**
