@@ -956,6 +956,15 @@ internal class AimassistCore(
     /** Where this engagement's goal height was drawn: 0 = centre of the box, 100 = eyes. */
     val anchorPct: Int get() = (anchorDraw * 100f).toInt()
 
+    /** Ticks where a gate asked to come back faster than this engagement allows; see [Slew]. */
+    val slewBites: Int get() = slew.bites
+
+    /** Times the help fell from half or more to under half: the stops a player feels. */
+    val dipCount: Int get() = slew.dips
+
+    /** The biggest single-tick jump the gates asked for, in percent of the full help. */
+    val worstGateJumpPct: Int get() = (slew.worstAsk * 100f).toInt()
+
     /** Mouse counts friction has dropped from the hand this session, both paths, both axes. */
     val frictionDropped: Int get() =
         (latYaw.dropped + latPitch.dropped + latOwnYaw.dropped + latOwnPitch.dropped).toInt()
@@ -1193,8 +1202,13 @@ internal class AimassistCore(
     private var handDrift = 1f
     private var handUndershoot = 10
 
-    /** Beats of complete rest, and when the next one may start. */
-    private var pauseLeft = 0
+    /**
+     * Beats of rest, and when the next one may start. A beat is a window ([pauseIndex] inside
+     * [pauseLen]) whose shape [Beat] draws: the edges ease, and only the middle is nothing at all.
+     */
+    private var pauseIndex = 0
+    private var pauseLen = 0
+    private var pauseRamp = 1
     private var nextPauseAt = 0L
 
     /** Where inside the hitbox the aim is pulled to, and until when that point stays put. */
@@ -1220,7 +1234,22 @@ internal class AimassistCore(
     /** Throttle for the chat notice about a missing model/engine. */
     private var aiNoticeAt = 0L
 
-    private var idleLeft = 0
+    /** The same shape for the idle ticks, whose bottom is a glide and not nothing; see [Beat]. */
+    private var idleIndex = 0
+    private var idleLen = 0
+    private var idleDepth = IDLE_GLIDE
+    private var idleRamp = 1
+
+    /** How fast the help may come back after any gate lets go of it; see [Slew]. */
+    private val slew = Slew()
+    private var slewRise = 0.3f
+
+    /**
+     * Ticks seen by [tick], including the ones that answered with an early return: the gap in this
+     * number is how [Slew] knows the help was nothing for a tick, whatever gate said so.
+     */
+    private var tickCount = 0L
+
     private var assisted = 0
     private var debugTick = 0
     private var scanCount = 0
@@ -1254,7 +1283,10 @@ internal class AimassistCore(
         reactionUntil = 0L
         onset.begin(0L, 0, 0f)
         peakLoad = 0f
-        idleLeft = 0
+        idleIndex = 0
+        idleLen = 0
+        tickCount = 0L
+        slew.reset()
         assisted = 0
         stillTicks = 0
         driftSign = if (Random.nextBoolean()) 1 else -1
@@ -1273,7 +1305,8 @@ internal class AimassistCore(
         handOvershoot = 1f
         handDrift = 1f
         handUndershoot = 10
-        pauseLeft = 0
+        pauseIndex = 0
+        pauseLen = 0
         // The first beat of rest comes *later*, not now: a module that starts by doing nothing for
         // five ticks is a module that misses the first — and for a rescue that is the only one.
         nextPauseAt = System.currentTimeMillis() +
@@ -1445,6 +1478,7 @@ internal class AimassistCore(
      * The whole pipeline of the tick: held attacks, target, gates, step, quantize, hand the rotation out.
      */
     fun tick() {
+        tickCount++
         val me = mc.player
         if (me == null || mc.gameMode == null) {
             currentTarget = null
@@ -1536,6 +1570,8 @@ internal class AimassistCore(
             lastSwitch = now
             switchLockMs = Drawn.span(switchDelay.toFloat(), Random.nextFloat(), 0.5f, 1.3f).toInt()
             wobbleAmp = Drawn.span(1f, Random.nextFloat(), 0.6f, 1.6f)
+            // Two to six ticks from nothing to the full help, this engagement's own rate.
+            slewRise = Drawn.span(0.3f, Random.nextFloat(), 0.6f, 1.5f)
             // A click the player already made is not a reaction to wait for.
             reactionUntil = if (target is LivingEntity && target === pendingAttack) now else now + reactionDelay +
                 Random.nextInt(reactionRandom + 1)
@@ -1560,37 +1596,48 @@ internal class AimassistCore(
         // cannot spare), and a module that asked for no beats at all ([restBeats]) — a flick has an
         // appointment, and the rest is for aim that can wait.
         if (pendingAttack != null || forcedPoint != null || !restBeats) {
-            pauseLeft = 0
+            pauseIndex = 0
+            pauseLen = 0
         } else if (now > nextPauseAt) {
-            pauseLeft = 3 + Random.nextInt(4)
+            pauseLen = 3 + Random.nextInt(4)
+            pauseIndex = 0
+            pauseRamp = 1 + Random.nextInt(2)
             nextPauseAt = now + IrregularClock.nextMs(Random.nextFloat(), PAUSE_BEAT, PAUSE_HOLD, PAUSE_OUTLIER)
         }
-        if (pauseLeft > 0) {
-            pauseLeft--
-            hold()
-            return
+        // The beat has edges now: it eases out over a tick or two and only its middle is nothing at
+        // all, and coming back is [slew]'s job. Neither end of a pause is a step in the help any
+        // more - the two halves of the "it snaps, stops, then snaps again" a player sees on screen.
+        var pauseShare = 1f
+        if (pauseIndex < pauseLen) {
+            pauseShare = Beat.share(pauseIndex, pauseLen, 0f, pauseRamp)
+            pauseIndex++
+            if (pauseShare <= 0f) {
+                hold()
+                return
+            }
         }
 
         // A hand does not move the mouse on every tick. Silent keeps the old behaviour: the update
         // is skipped and the manager just re-sends the same rotation. Not silent a skipped tick
         // would freeze the camera for 50 ms and the next one would catch up with a step grown
         // bigger — a visible two-beat stutter — so the tick keeps gliding at a fraction of the
-        // strength instead of stopping.
+        // strength instead of stopping. The glide is a dip with edges, not a rectangle: the old
+        // 15% for one or two ticks and then 100% again is a pulse a player can see, and a depth and
+        // a ramp of their own per dip keep it from repeating identically (see [Beat]).
         var glide = 1f
-        if (idleLeft > 0) {
-            idleLeft--
+        if (idleIndex >= idleLen && idleChance > 0 && Random.nextInt(100) < idleChance) {
+            idleLen = 1 + Random.nextInt(3)
+            idleIndex = 0
+            idleDepth = Drawn.span(IDLE_GLIDE, Random.nextFloat(), 1f, 2.6f)
+            idleRamp = 1 + Random.nextInt(2)
+        }
+        if (idleIndex < idleLen) {
+            glide = Beat.share(idleIndex, idleLen, idleDepth, idleRamp)
+            idleIndex++
             if (silent) {
                 hold()
                 return
             }
-            glide = IDLE_GLIDE
-        } else if (idleChance > 0 && Random.nextInt(100) < idleChance) {
-            idleLeft = Random.nextInt(1, 3)
-            if (silent) {
-                hold()
-                return
-            }
-            glide = IDLE_GLIDE
         }
 
         // A short grace on the crosshair gate: without it the gate flips on/off on every pixel of
@@ -1688,8 +1735,14 @@ internal class AimassistCore(
             val load = if (maxSpeed > 0f) hypot(deltaYaw, deltaPitch) / maxSpeed else 0f
             if (load > peakLoad) peakLoad = load
             val restDecay = if (handOnly) hand.restDecay(handCounts, handThreshold) else 1f
-            val allowance = weight * responseJitter * speedDrift * gate * glide * fade * handShare *
-                    stalls.assistShare() * ChaseLoad.loadShare(load) * restDecay * graceShare
+            val gated = weight * responseJitter * speedDrift * gate * glide * pauseShare * fade *
+                    handShare * stalls.assistShare() * ChaseLoad.loadShare(load) * restDecay * graceShare
+            // A gate may take the help away in a tick — a hand stops, the crosshair slips off the
+            // box, the target changes — but none of them may hand it back in one. Every resume walks
+            // up at the rate this engagement drew (see [Slew]); without that, the first tick after
+            // a pause, a glide, a re-entry on the box or a freeze is the biggest of the whole beat,
+            // because the target kept moving while the help was off.
+            val allowance = slew.apply(gated, slewRise, tickCount)
             val ai = if (engine == Engine.AI) {
                 aiStep(me, aim, goal, target)
             } else {

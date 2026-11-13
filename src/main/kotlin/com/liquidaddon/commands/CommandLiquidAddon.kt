@@ -72,6 +72,14 @@ object CommandLiquidAddon : CommandRegistrar {
                                     core.frictionDropped
                                 )
                             )
+                            // The stutter half: how many times the help fell away, how often a gate
+                            // asked for a jump back, and the biggest jump it asked for. With the
+                            // limiter in place `jump` stays at the rate the engagement drew.
+                            append(
+                                ", slew %d, dips %d, jump %d%%".format(
+                                    core.slewBites, core.dipCount, core.worstGateJumpPct
+                                )
+                            )
                         }
                         val line = AiStats.format(core.stats.snapshot(), core.aiStrengthNow) + stalls
                         chat("§7[${core.ownerName}] §f$line")
