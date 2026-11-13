@@ -2,6 +2,9 @@ package com.liquidaddon.commands
 
 import com.liquidaddon.aiming.AiCoreRegistry
 import com.liquidaddon.aiming.AiStats
+import com.liquidaddon.aiming.ClientBuild
+import com.liquidaddon.aiming.ClientBuildProbe
+import com.liquidaddon.aiming.RotationBridge
 import com.mojang.brigadier.CommandDispatcher
 import net.ccbluex.liquidbounce.features.command.CommandRegistrar
 import net.ccbluex.liquidbounce.features.command.brigadier.ClientCommandSource
@@ -35,6 +38,17 @@ object CommandLiquidAddon : CommandRegistrar {
         dispatcher.register("liquidaddon") {
             literal("ai") {
                 exec {
+                    // Which client this jar is running inside, and whether silent rotations can
+                    // reach it: the two facts a NoSuchMethodError turns into guesswork otherwise.
+                    chat("§7[LiquidAddon] §f" + ClientBuild.describe(
+                        ClientBuildProbe.read(),
+                        when {
+                            RotationBridge.bound -> ClientBuild.Door.OPEN
+                            RotationBridge.failed -> ClientBuild.Door.SHUT
+                            else -> ClientBuild.Door.UNTRIED
+                        },
+                        RotationBridge.state
+                    ))
                     val cores = AiCoreRegistry.registered()
                     if (cores.isEmpty()) {
                         chat("§7[LiquidAddon] §7nessun motore di mira registrato in questa sessione")

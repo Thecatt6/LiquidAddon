@@ -30,6 +30,9 @@ internal object RotationBridge {
     var failed = false
         private set
 
+    /** A door was found and the next call goes through it. */
+    val bound: Boolean get() = method != null
+
     /** What happened, in one line, for the warning the engine prints. */
     var state = "not attempted"
         private set
