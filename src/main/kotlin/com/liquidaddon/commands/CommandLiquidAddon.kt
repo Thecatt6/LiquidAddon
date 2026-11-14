@@ -29,8 +29,10 @@ import net.ccbluex.liquidbounce.utils.client.chat
  * window on: the resume tick of a freeze carries a queued mouse jump of tens of degrees in one
  * packet, and a rotation flag that lands on such a tick is not a flag on a shaped step. Every line
  * then closes with `| load 84%, onset 341ms, grace 176ms, anchor 62%`: the hardest turn a target
- * demanded against the cap of a single tick, the fade-in duration and curve the engagement drew,
- * the exit fade of the crosshair gate, and where the goal's height sat between box centre and eyes.
+ * demanded against the cap of a single tick (the tick that resumes a freeze does not count: its
+ * demand is the queued jump of the mouse, not the target's), the fade-in duration and curve the
+ * engagement drew, the exit fade of the crosshair gate, and where the goal's height sat between box
+ * centre and eyes.
  */
 object CommandLiquidAddon : CommandRegistrar {
 
@@ -72,9 +74,11 @@ object CommandLiquidAddon : CommandRegistrar {
                                     core.frictionDropped
                                 )
                             )
-                            // The stutter half: how many times the help fell away, how often a gate
-                            // asked for a jump back, and the biggest jump it asked for. With the
-                            // limiter in place `jump` stays at the rate the engagement drew.
+                            // The stutter half: how many times the help fell away, how often the
+                            // limiter had to cut a rise, and the biggest rise the gates asked for.
+                            // `jump` is that ask, measured before the limiter: above a hundred it
+                            // carries the engagement's jitter (see Slew.worstAsk), and what was
+                            // actually given on that tick is at most the drawn rate either way.
                             append(
                                 ", slew %d, dips %d, jump %d%%".format(
                                     core.slewBites, core.dipCount, core.worstGateJumpPct
