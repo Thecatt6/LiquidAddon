@@ -944,9 +944,12 @@ internal class AimassistCore(
     val stallCount: Int get() = stalls.stalls
 
     /** The hardest turn a target demanded this session, as a percent of [maxSpeed]: where the
-     *  engagement sat against the cap of a single tick. The tick that resumes a freeze is not
-     *  counted: its demand is the queued jump of the mouse, not the target's (see [LoadPeak]). */
+     *  engagement sat against the cap of a single tick. The ticks of a freeze's window are counted
+     *  apart, in [stallLoadPct]: their demand is the freeze's, not the fight's (see [LoadPeak]). */
     val peakLoadPct: Int get() = loadPeak.pct
+
+    /** The hardest demand a freeze's window asked for, in percent; 0 in a session without freezes. */
+    val stallLoadPct: Int get() = loadPeak.stallPct
 
     /** The fade-in duration the current engagement drew, in milliseconds; see [Onset]. */
     val lastOnsetMs: Int get() = onset.lastDurationMs
@@ -1734,7 +1737,7 @@ internal class AimassistCore(
             // [ChaseLoad] nothing changes; above it the help eases down so that tracking degrades
             // like a hand's instead of gluing until the cap and then letting go at once.
             val load = if (maxSpeed > 0f) hypot(deltaYaw, deltaPitch) / maxSpeed else 0f
-            loadPeak.see(load, stalls.phase == StallGuard.Phase.RESUME)
+            loadPeak.see(load, stalls.phase != StallGuard.Phase.NORMAL)
             val restDecay = if (handOnly) hand.restDecay(handCounts, handThreshold) else 1f
             val gated = weight * responseJitter * speedDrift * gate * glide * pauseShare * fade *
                     handShare * stalls.assistShare() * ChaseLoad.loadShare(load) * restDecay * graceShare

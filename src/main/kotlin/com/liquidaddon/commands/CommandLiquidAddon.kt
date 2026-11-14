@@ -29,10 +29,11 @@ import net.ccbluex.liquidbounce.utils.client.chat
  * window on: the resume tick of a freeze carries a queued mouse jump of tens of degrees in one
  * packet, and a rotation flag that lands on such a tick is not a flag on a shaped step. Every line
  * then closes with `| load 84%, onset 341ms, grace 176ms, anchor 62%`: the hardest turn a target
- * demanded against the cap of a single tick (the tick that resumes a freeze does not count: its
- * demand is the queued jump of the mouse, not the target's), the fade-in duration and curve the
- * engagement drew, the exit fade of the crosshair gate, and where the goal's height sat between box
- * centre and eyes.
+ * demanded against the cap of a single tick, the fade-in duration and curve the engagement drew,
+ * the exit fade of the crosshair gate, and where the goal's height sat between box centre and eyes.
+ * A session that flew through a freeze carries one field more, `load 84%, freeze 364%`: the ticks of
+ * the freeze's window are counted apart, because their demand is the queued jump of the mouse and a
+ * target that moved while nothing ran - the freeze's tail, not the fight.
  */
 object CommandLiquidAddon : CommandRegistrar {
 
@@ -64,15 +65,23 @@ object CommandLiquidAddon : CommandRegistrar {
                             if (core.stallCount > 0) {
                                 append(" | stalls %d, last %dms".format(core.stallCount, core.lastStallMs))
                             }
-                            // The chase load says where the session sat against the cap of one
-                            // tick, the onset how long this engagement's warm-up was drawn: the
-                            // two numbers the humanizing shapes of the assist report about
-                            // themselves (ChaseLoad, Onset).
+                            // The chase load says where the fight sat against the cap of one tick,
+                            // and `freeze` where the freeze's window sat against it - counted
+                            // apart, because that demand is the freeze's tail and not the fight's
+                            // (LoadPeak). The onset is how long this engagement's warm-up was
+                            // drawn: the numbers the humanizing shapes report about themselves
+                            // (ChaseLoad, Onset).
+                            val freezeField = if (core.stallLoadPct > 0) {
+                                ", freeze %d%%".format(core.stallLoadPct)
+                            } else {
+                                ""
+                            }
                             append(
-                                " | load %d%%, onset %dms, grace %dms, anchor %d%%, drop %d".format(
-                                    core.peakLoadPct, core.lastOnsetMs, core.lastGraceMs, core.anchorPct,
-                                    core.frictionDropped
-                                )
+                                " | load %d%%$freezeField, onset %dms, grace %dms, anchor %d%%, drop %d"
+                                    .format(
+                                        core.peakLoadPct, core.lastOnsetMs, core.lastGraceMs,
+                                        core.anchorPct, core.frictionDropped
+                                    )
                             )
                             // The stutter half: how many times the help fell away, how often the
                             // limiter had to cut a rise, and the biggest rise the gates asked for.

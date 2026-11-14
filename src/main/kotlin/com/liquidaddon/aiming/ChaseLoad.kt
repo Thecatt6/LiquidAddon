@@ -21,41 +21,6 @@ package com.liquidaddon.aiming
  * still helps a strafing target. The effect on any anticheat is **not measured** — the shape is,
  * in `ChaseLoadTest`.
  */
-/**
- * The hardest demand of a session, as a percent of the cap of one tick — the `load` field of the
- * telemetry line.
- *
- * One kind of tick must never become that peak: the tick that resumes a freeze. Its "demand" is the
- * queued jump of the mouse, seconds of movement applied at once, so its error against the cap reads
- * in the thousands of percent and says nothing about the fight. [StallGuard] already names that tick
- * ([StallGuard.Phase.RESUME]), so the peak simply does not listen to it: a session that flew through
- * one 97 second freeze and a session that never left the fight then report the same load for the
- * same fight, which is what the field is for.
- */
-internal class LoadPeak {
-    /** The hardest counted demand since [reset], as a fraction of the cap of one tick. */
-    var peak = 0f
-        private set
-
-    /** [peak] in the percent form the telemetry line prints. */
-    val pct: Int get() = (peak * 100f).toInt()
-
-    /**
-     * One tick's demand. Ignored when [fromStall] (the freeze is speaking, not the target), and when
-     * the demand is not a number or not a demand at all.
-     */
-    fun see(load: Float, fromStall: Boolean) {
-        if (fromStall) return
-        if (load.isNaN() || load <= 0f) return
-        if (load > peak) peak = load
-    }
-
-    /** Forgets the peak; a new session has demanded nothing yet. */
-    fun reset() {
-        peak = 0f
-    }
-}
-
 internal object ChaseLoad {
 
     /** Fraction of the help still granted at (and past) a full load. */
@@ -68,5 +33,55 @@ internal object ChaseLoad {
     fun loadShare(load: Float): Float {
         if (load.isNaN() || load <= 0f) return 1f
         return 1f - (1f - FLOOR) * load.coerceIn(0f, 1f)
+    }
+}
+
+/**
+ * The hardest demand of a session, as a percent of the cap of one tick — the `load` field of the
+ * telemetry line.
+ *
+ * One kind of tick must never become that peak: the ticks of a freeze's window. The resume tick
+ * applies the queued jump of the mouse - seconds of movement at once - and the recovery ticks
+ * behind it chase a target that moved while nothing ran, so their error against the cap reads in
+ * the hundreds or thousands of percent and says nothing about the fight. [StallGuard] already
+ * names that window ([StallGuard.Phase.RESUME] and [StallGuard.Phase.RECOVERY]), so [LoadPeak]
+ * counts it apart: `load` is the fight, `freeze` is what the freeze asked for, and a session that
+ * flew through one 97 second freeze reports the same `load` as a session that never left the
+ * fight.
+ */
+internal class LoadPeak {
+    /** The hardest counted demand since [reset], as a fraction of the cap of one tick. */
+    var peak = 0f
+        private set
+
+    /** The hardest demand a freeze's window asked for, kept apart from [peak]; 0 without freezes. */
+    var stallPeak = 0f
+        private set
+
+    /** [peak] in the percent form the telemetry line prints. */
+    val pct: Int get() = (peak * 100f).toInt()
+
+    /** [stallPeak] in percent, for the `freeze` field of the telemetry line. */
+    val stallPct: Int get() = (stallPeak * 100f).toInt()
+
+    /**
+     * One tick's demand. A tick inside a freeze's window ([fromStall]) is counted, but into
+     * [stallPeak]: its demand is the freeze's tail - the target moved while nothing ran, or the
+     * queued jump moved the view - and mixing it into [peak] would report the freeze as the fight.
+     * Demands that are not a number, or not a demand at all, are ignored on both sides.
+     */
+    fun see(load: Float, fromStall: Boolean) {
+        if (load.isNaN() || load <= 0f) return
+        if (fromStall) {
+            if (load > stallPeak) stallPeak = load
+        } else if (load > peak) {
+            peak = load
+        }
+    }
+
+    /** Forgets both peaks; a new session has demanded nothing yet. */
+    fun reset() {
+        peak = 0f
+        stallPeak = 0f
     }
 }
