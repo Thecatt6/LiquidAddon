@@ -21,6 +21,41 @@ package com.liquidaddon.aiming
  * still helps a strafing target. The effect on any anticheat is **not measured** — the shape is,
  * in `ChaseLoadTest`.
  */
+/**
+ * The hardest demand of a session, as a percent of the cap of one tick — the `load` field of the
+ * telemetry line.
+ *
+ * One kind of tick must never become that peak: the tick that resumes a freeze. Its "demand" is the
+ * queued jump of the mouse, seconds of movement applied at once, so its error against the cap reads
+ * in the thousands of percent and says nothing about the fight. [StallGuard] already names that tick
+ * ([StallGuard.Phase.RESUME]), so the peak simply does not listen to it: a session that flew through
+ * one 97 second freeze and a session that never left the fight then report the same load for the
+ * same fight, which is what the field is for.
+ */
+internal class LoadPeak {
+    /** The hardest counted demand since [reset], as a fraction of the cap of one tick. */
+    var peak = 0f
+        private set
+
+    /** [peak] in the percent form the telemetry line prints. */
+    val pct: Int get() = (peak * 100f).toInt()
+
+    /**
+     * One tick's demand. Ignored when [fromStall] (the freeze is speaking, not the target), and when
+     * the demand is not a number or not a demand at all.
+     */
+    fun see(load: Float, fromStall: Boolean) {
+        if (fromStall) return
+        if (load.isNaN() || load <= 0f) return
+        if (load > peak) peak = load
+    }
+
+    /** Forgets the peak; a new session has demanded nothing yet. */
+    fun reset() {
+        peak = 0f
+    }
+}
+
 internal object ChaseLoad {
 
     /** Fraction of the help still granted at (and past) a full load. */

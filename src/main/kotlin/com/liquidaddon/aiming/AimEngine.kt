@@ -944,8 +944,9 @@ internal class AimassistCore(
     val stallCount: Int get() = stalls.stalls
 
     /** The hardest turn a target demanded this session, as a percent of [maxSpeed]: where the
-     *  engagement sat against the cap of a single tick (see [ChaseLoad]). */
-    val peakLoadPct: Int get() = (peakLoad * 100f).toInt()
+     *  engagement sat against the cap of a single tick. The tick that resumes a freeze is not
+     *  counted: its demand is the queued jump of the mouse, not the target's (see [LoadPeak]). */
+    val peakLoadPct: Int get() = loadPeak.pct
 
     /** The fade-in duration the current engagement drew, in milliseconds; see [Onset]. */
     val lastOnsetMs: Int get() = onset.lastDurationMs
@@ -1087,7 +1088,7 @@ internal class AimassistCore(
     private val onset = Onset()
 
     /** The hardest turn a target has demanded this session, as a share of [maxSpeed]. */
-    private var peakLoad = 0f
+    private val loadPeak = LoadPeak()
 
     /** The goodbye fade of the crosshair gate, drawn per exit; see [EdgeGrace]. */
     private val edgeGrace = EdgeGrace()
@@ -1282,7 +1283,7 @@ internal class AimassistCore(
         lastSwitch = 0L
         reactionUntil = 0L
         onset.begin(0L, 0, 0f)
-        peakLoad = 0f
+        loadPeak.reset()
         idleIndex = 0
         idleLen = 0
         tickCount = 0L
@@ -1733,7 +1734,7 @@ internal class AimassistCore(
             // [ChaseLoad] nothing changes; above it the help eases down so that tracking degrades
             // like a hand's instead of gluing until the cap and then letting go at once.
             val load = if (maxSpeed > 0f) hypot(deltaYaw, deltaPitch) / maxSpeed else 0f
-            if (load > peakLoad) peakLoad = load
+            loadPeak.see(load, stalls.phase == StallGuard.Phase.RESUME)
             val restDecay = if (handOnly) hand.restDecay(handCounts, handThreshold) else 1f
             val gated = weight * responseJitter * speedDrift * gate * glide * pauseShare * fade *
                     handShare * stalls.assistShare() * ChaseLoad.loadShare(load) * restDecay * graceShare

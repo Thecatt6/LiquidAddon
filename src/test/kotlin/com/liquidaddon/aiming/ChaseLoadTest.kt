@@ -32,4 +32,47 @@ class ChaseLoadTest {
             t += 0.05f
         }
     }
+
+    @Test
+    fun `the peak remembers the hardest demand of the session`() {
+        val peak = LoadPeak()
+        peak.see(0.25f, fromStall = false)
+        peak.see(0.75f, fromStall = false)
+        peak.see(0.5f, fromStall = false)
+
+        assertEquals(75, peak.pct)
+    }
+
+    @Test
+    fun `the tick that resumes a freeze never becomes the peak`() {
+        val peak = LoadPeak()
+        // The queued jump of a long freeze: thousands of percent of a demand that is not the
+        // target's, and exactly the tick the guard names RESUME.
+        peak.see(22.27f, fromStall = true)
+        assertEquals(0, peak.pct)
+
+        peak.see(0.5f, fromStall = false)
+        assertEquals(50, peak.pct)
+
+        peak.see(22.27f, fromStall = true)
+        assertEquals(50, peak.pct, "a later freeze must not rewrite the fight's peak either")
+    }
+
+    @Test
+    fun `a demand that is not a number or not a demand is not counted`() {
+        val peak = LoadPeak()
+        peak.see(Float.NaN, fromStall = false)
+        peak.see(-3f, fromStall = false)
+        peak.see(0f, fromStall = false)
+        assertEquals(0, peak.pct)
+    }
+
+    @Test
+    fun `reset forgets the peak`() {
+        val peak = LoadPeak()
+        peak.see(0.75f, fromStall = false)
+        peak.reset()
+        assertEquals(0, peak.pct)
+        assertEquals(0f, peak.peak, 1.0e-6f)
+    }
 }

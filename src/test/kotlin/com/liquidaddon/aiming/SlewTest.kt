@@ -82,4 +82,20 @@ class SlewTest {
         assertEquals(0f, slew.worstAsk, 1.0e-6f)
         assertEquals(0.7f, slew.apply(0.7f, 0.25f, tick = 3), 1.0e-6f, "and the walk starts over")
     }
+
+    @Test
+    fun `an ask above the nominal full is the jitter product, and is still given at the rate`() {
+        val slew = Slew()
+        slew.apply(0f, 0.25f, tick = 1)
+
+        // The gates hand everything back in one tick, and "everything" carries a quarter more of
+        // the engagement's drift: the ask reads 125%, the delivery is still one rate-step.
+        assertEquals(0.25f, slew.apply(1.25f, 0.25f, tick = 2), 1.0e-6f)
+        assertEquals(125, (slew.worstAsk * 100f).toInt())
+        assertEquals(1, slew.bites)
+
+        // And the tick after keeps walking at the rate, not at the ask.
+        assertEquals(0.5f, slew.apply(1.25f, 0.25f, tick = 3), 1.0e-6f)
+        assertEquals(2, slew.bites)
+    }
 }

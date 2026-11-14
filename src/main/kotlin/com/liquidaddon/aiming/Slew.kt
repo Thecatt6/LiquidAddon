@@ -37,7 +37,17 @@ internal class Slew {
     var dips = 0
         private set
 
-    /** The biggest single-tick rise the gates asked for, as a fraction of the full help. */
+    /**
+     * The biggest single-tick rise the gates asked for, as a fraction of the full help — the `jump`
+     * field of the telemetry line, and an **ask**, not a delivery: what the gates wanted before this
+     * limiter answered, which is exactly the snap worth knowing about.
+     *
+     * A value above one is not a gate gone rogue: the product of the gates carries the engagement's
+     * own jitter (the response jitter and the speed drift each walk up to 1.15), so a return from
+     * nothing to everything can ask for a little more than the nominal full help — 104% reads as
+     * "full, plus four percent of drift". What left this class on that tick is still at most
+     * [risePerTick] of rise, which is the whole point; [bites] counts how often the ask was cut.
+     */
     var worstAsk = 0f
         private set
 
