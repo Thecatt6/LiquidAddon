@@ -969,6 +969,9 @@ internal class AimassistCore(
     /** The biggest single-tick jump the gates asked for, in percent of the full help. */
     val worstGateJumpPct: Int get() = (slew.worstAsk * 100f).toInt()
 
+    /** Runs of three identical deltas the silent wire guard had to break; see [RepeatGuard]. */
+    val wireBreaks: Int get() = wireGuard.breaks
+
     /** Mouse counts friction has dropped from the hand this session, both paths, both axes. */
     val frictionDropped: Int get() =
         (latYaw.dropped + latPitch.dropped + latOwnYaw.dropped + latOwnPitch.dropped).toInt()
@@ -1246,6 +1249,9 @@ internal class AimassistCore(
 
     /** How fast the help may come back after any gate lets go of it; see [Slew]. */
     private val slew = Slew()
+
+    /** The silent wire never repeats a delta pair three ticks in a row; see [RepeatGuard]. */
+    private val wireGuard = RepeatGuard()
     private var slewRise = 0.3f
 
     /**
@@ -1291,6 +1297,7 @@ internal class AimassistCore(
         idleLen = 0
         tickCount = 0L
         slew.reset()
+        wireGuard.reset()
         assisted = 0
         stillTicks = 0
         driftSign = if (Random.nextBoolean()) 1 else -1
@@ -1991,9 +1998,18 @@ internal class AimassistCore(
             deltaYaw = Mth.wrapDegrees(desired.yaw - from.yaw)
             deltaPitch = desired.pitch - from.pitch
         }
+        // A silent wire has no hand behind it, so nothing dithers it the way a mouse dithers a
+        // hand: a steady chase quantizes to the same counts every tick, and three identical deltas
+        // in a row are the shape a "constant rotations" heuristic counts. The guard moves the third
+        // by one mouse count; the visible path keeps its own dithering (the frames, the hand).
+        val wired = if (silent) {
+            wireGuard.pass(deltaYaw, deltaPitch, RotationUtil.gcd.toFloat())
+        } else {
+            deltaYaw to deltaPitch
+        }
         val next = Rotation(
-            from.yaw + deltaYaw,
-            (from.pitch + deltaPitch).coerceIn(-89.9f, 89.9f),
+            from.yaw + wired.first,
+            (from.pitch + wired.second).coerceIn(-89.9f, 89.9f),
             isNormalized = gcdFix
         )
 
@@ -2057,10 +2073,26 @@ internal class AimassistCore(
     private fun hold() {
         if (!silent) return
         val sent = lastSent ?: return
-        // The aim did not move this tick: the model must see that as a zero velocity, not as the
-        // step of the last tick stretched over the pause.
-        previousAim = sent
-        if (!RotationBridge.setRotationTarget(plan(sent, currentTarget), rotationPriority, owner)) {
+        // A rest re-sends the rotation it already sent, which is right — until three rests in a row
+        // would put three identical rotations on the wire. The guard turns the third into one mouse
+        // count of drift, so the wire stays on the lattice and the run the heuristic counts cannot
+        // complete (see [RepeatGuard]).
+        val drift = wireGuard.pass(0f, 0f, RotationUtil.gcd.toFloat())
+        val rested = drift.first == 0f && drift.second == 0f
+        val out = if (rested) {
+            sent
+        } else {
+            Rotation(
+                sent.yaw + drift.first,
+                (sent.pitch + drift.second).coerceIn(-89.9f, 89.9f),
+                isNormalized = true,
+            )
+        }
+        // The aim did not move this tick (or moved by one count of drift): the model must see that
+        // as a zero velocity, not as the step of the last tick stretched over the pause.
+        previousAim = out
+        lastSent = out
+        if (!RotationBridge.setRotationTarget(plan(out, currentTarget), rotationPriority, owner)) {
             bridgeUnbound()
         }
     }
