@@ -44,18 +44,38 @@ class ChaseLoadTest {
     }
 
     @Test
-    fun `the tick that resumes a freeze never becomes the peak`() {
+    fun `the ticks of a freeze's window never become the fight's peak`() {
         val peak = LoadPeak()
-        // The queued jump of a long freeze: thousands of percent of a demand that is not the
-        // target's, and exactly the tick the guard names RESUME.
+        // The resume tick: the queued jump of a long freeze, thousands of percent of a demand that
+        // is not the target's.
         peak.see(22.27f, fromStall = true)
+        // And the recovery ticks behind it: the chase after a target that moved while nothing ran.
+        peak.see(3.64f, fromStall = true)
         assertEquals(0, peak.pct)
+        assertEquals(2227, peak.stallPct)
 
         peak.see(0.5f, fromStall = false)
         assertEquals(50, peak.pct)
+        assertEquals(2227, peak.stallPct, "the freeze peak is kept apart, not merged")
 
         peak.see(22.27f, fromStall = true)
         assertEquals(50, peak.pct, "a later freeze must not rewrite the fight's peak either")
+    }
+
+    @Test
+    fun `a session without freezes reports no freeze peak`() {
+        val peak = LoadPeak()
+        peak.see(0.75f, fromStall = false)
+        assertEquals(0, peak.stallPct)
+    }
+
+    @Test
+    fun `a demand out of nowhere is ignored on the freeze side too`() {
+        val peak = LoadPeak()
+        peak.see(Float.NaN, fromStall = true)
+        peak.see(-3f, fromStall = true)
+        assertEquals(0, peak.stallPct)
+        assertEquals(0, peak.pct)
     }
 
     @Test
@@ -68,11 +88,14 @@ class ChaseLoadTest {
     }
 
     @Test
-    fun `reset forgets the peak`() {
+    fun `reset forgets both peaks`() {
         val peak = LoadPeak()
         peak.see(0.75f, fromStall = false)
+        peak.see(3.64f, fromStall = true)
         peak.reset()
         assertEquals(0, peak.pct)
+        assertEquals(0, peak.stallPct)
         assertEquals(0f, peak.peak, 1.0e-6f)
+        assertEquals(0f, peak.stallPeak, 1.0e-6f)
     }
 }
