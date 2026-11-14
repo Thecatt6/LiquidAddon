@@ -116,6 +116,60 @@ cooldown to hide a click. What the rest of the chain does is still out of reach:
 module (LiquidBounce's own AutoClicker or AutoBreak), the server's own view of a held button, and
 latency all shape what arrives at the anti-cheat, so no setting here can promise a clean session.
 
+## What the combat modules look like from the outside
+
+Every module below has a signature an observer can read: a rate, a delay, an order. Those are
+written down here because they are the part that can be checked — the counting behind each of them
+lives in a class with no client dependency and a test next to it, so the numbers are asserted
+instead of trusted.
+
+| Module | The signature | Counted in |
+|---|---|---|
+| `JumpReset` | at `Accuracy 85`: 85% of the attempts land on the perfect tick, 7.5% are 1–4 ticks late, 7.5% never jump | `modules/jumpreset/ResetRoll.kt` |
+| `HitSelect` | one attack goes through, arms a pause, and everything inside that pause is dropped unless you are hurt | `modules/hitselect/DropRule.kt` |
+| `TriggerBotPlus` | the early press is air only; the attack itself never goes past the smallest honest distance | `modules/triggerbot/ReachArithmetic.kt` |
+| `BlockHit` | `Delay 0` and `Delay 1` open the block on the same tick; a block waits at most three ticks for its gates | `modules/blockhit/BlockGate.kt` |
+| `FakeLagV2` | the hold grows four ticks per tick and shrinks one tick per tick, and held ticks leave one whole tick at a time | `modules/fakelag/HoldRamp.kt` |
+| `DoubleClicks` | one follow-up leaves per tick in total, the left queue first | `modules/doubleclicks/DoubleClickScheduler.kt` |
+
+**JumpReset** decides on the tick the damage arrives and fires on the tick the jump key is read, so
+the press is indistinguishable from a hand on the space bar. Only damage the server attributes to
+another player counts, never a jump in the air, and the attempt is dropped — not postponed — if the
+ground, the water or an open screen change their mind before the tick it belongs to.
+
+**HitSelect** sees an attack from two different places, and the two are not equivalent. An attack
+made by a module goes through `attackEntity(...)`, where a cancelled event returns before the attack
+packet *and* before the swing, so nothing at all reaches the server. Your own left click goes through
+the HEAD of `MultiPlayerGameMode.attack`, where the cancel stops the attack packet but the arm swing
+is decided outside that method — whether it survives could not be read from the sources available
+here, so the honest answer is: the attack is dropped, the swing most likely is not, and that is not
+measured. A piercing weapon is handled above the event and is therefore never dropped. The pause is
+spread by a quarter of `PauseTicks` around the slider: the average rate does not move, but the pause
+is no longer a metronome.
+
+**TriggerBotPlus** attacks at `min(base, ServerReach, interaction range) + OverReach − SafetyGap −
+drift`, and `OverReach` is zero by default, so a Reach setting cannot push its attacks farther —
+that invariant is a test, not a comment. The drift pays for **both** stale positions, ours and the
+enemy's, and a target that stopped one tick ago is still paid for a few ticks, because the server is
+looking at older positions than we are. `PrePress = Swing` sends a swing packet while vanilla's miss
+cooldown is running; `PrePress = Key` queues a real click only when the crosshair is on air.
+
+**BlockHit** keeps the two actions apart: `ReleaseCooldown` ticks after a block of ours closes,
+`AttackGap` ticks after your own attack, and one tick more when the aim has not moved since it — a
+swing and a raise carrying identical angles inside one tick is what a script looks like. `Mode = Lag`
+holds packets instead of blocking longer.
+
+**FakeLagV2** releases on client tick boundaries, so a tick's packets always leave together and two
+client ticks never share a server tick. It never answers `FLUSH` to the shared queue, because that
+would empty what other modules are holding; it drains one whole tick per tick and queues new packets
+while it drains, so nothing overtakes an older one.
+
+**DoubleClicks** rechecks the crosshair at the moment a follow-up runs, and repeats the vanilla
+attack only on an entity — see the table above.
+
+None of this is a bypass measurement. What is counted here is the **shape** — bands, gaps, order,
+ramp rates — not how any anti-cheat reacts to it.
+
 ## Two profiles, one click
 
 The two settings this add-on is meant to be run on are presets, not a list of numbers to type:

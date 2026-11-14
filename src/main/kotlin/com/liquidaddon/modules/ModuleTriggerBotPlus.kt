@@ -1,6 +1,7 @@
 package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
+import com.liquidaddon.modules.triggerbot.ReachArithmetic
 import net.ccbluex.liquidbounce.config.autoconfig.AutoConfig
 import net.ccbluex.liquidbounce.config.types.list.Tagged
 import net.ccbluex.liquidbounce.event.events.GameTickEvent
@@ -153,14 +154,9 @@ object ModuleTriggerBotPlus : ClientModule(
     /** Slack added to the acquisition ray, so the hitbox edge is never cut by a rounding error. */
     private const val RAY_SLACK = 0.1
 
-    /** Never trigger closer than this, a cushion larger than the reach would make no sense. */
-    private const val MIN_TRIGGER = 0.4
-
-    /** Upper bound on the latency allowance, in blocks. Beyond this it is a lag spike, not drift. */
-    private const val MAX_DESYNC = 1.0
-
-    /** How fast the remembered closing speed decays per tick (0.8 = mostly the last few ticks). */
-    private const val CLOSING_DECAY = 0.8
+    // The three bounds of the distance arithmetic - how close the module may trigger, how much of
+    // the distance latency may take, how fast a remembered closing speed decays - live in
+    // [ReachArithmetic], together with the invariant that keeps an attack inside the honest reach.
 
     /**
      * How long a lost target keeps its drawn cushion. The crosses of a mouse sitting on the edge of
@@ -764,16 +760,20 @@ object ModuleTriggerBotPlus : ClientModule(
      *  - [serverSafe] off: `base + cushion`, i.e. the attack itself happens out of range — reach hack,
      *    and exactly what Grim flags.
      */
-    private fun attackLimit(me: LocalPlayer, base: Double, target: LivingEntity): Double {
-        if (!serverSafe) {
-            return (base + earlyMargin).coerceAtLeast(MIN_TRIGGER)
-        }
-
+    private fun attackLimit(me: LocalPlayer, base: Double, target: LivingEntity): Double =
         // Never above what the server itself accepts: ServerReach is the honest 3.0, and the
         // interaction range is capped by it so the Reach module cannot push the attack farther.
-        val ceiling = minOf(base, serverReach.toDouble(), me.entityInteractionRange()) + overReach - safetyGap
-        return (ceiling - desyncAllowance(me, target)).coerceAtLeast(MIN_TRIGGER)
-    }
+        // The arithmetic and its invariant live in [ReachArithmetic.attackLimit].
+        ReachArithmetic.attackLimit(
+            serverSafe = serverSafe,
+            base = base,
+            serverReach = serverReach.toDouble(),
+            interactionRange = me.entityInteractionRange(),
+            overReach = overReach.toDouble(),
+            safetyGap = safetyGap.toDouble(),
+            allowance = desyncAllowance(me, target),
+            earlyMargin = earlyMargin,
+        )
 
     /**
      * How many blocks the client is "ahead" of the server when both sides are closing in.
@@ -785,11 +785,13 @@ object ModuleTriggerBotPlus : ClientModule(
      * limit is what produces a flag "every now and then": when nobody is moving there is no error,
      * and the moment both of you walk in it appears.
      */
-    private fun desyncAllowance(me: LocalPlayer, target: LivingEntity): Double {
-        val vehicle = if (me.vehicle != null) vehicleExtra.toDouble() else 0.0
-        val estimate = if (!desync) 0.0 else pingDrift(me, target)
-        return (estimate + vehicle).coerceIn(0.0, MAX_DESYNC)
-    }
+    private fun desyncAllowance(me: LocalPlayer, target: LivingEntity): Double =
+        ReachArithmetic.allowance(
+            desync = desync,
+            drift = pingDrift(me, target),
+            inVehicle = me.vehicle != null,
+            vehicleExtra = vehicleExtra.toDouble(),
+        )
 
     /**
      * The drift caused by latency, in blocks.
@@ -804,14 +806,13 @@ object ModuleTriggerBotPlus : ClientModule(
      * evaluated on positions from *before* the click, so a target that stopped a tick ago still has
      * to be paid for.
      */
-    private fun pingDrift(me: LocalPlayer, target: LivingEntity): Double {
-        val ownDelay = me.ping.coerceIn(0, 500) / 100.0
-        val theirDelay = ((target as? Player)?.ping ?: 0).coerceIn(0, 500) / 100.0
-        if (ownDelay <= 0.0 && theirDelay <= 0.0) return 0.0
-
-        val drift = selfClosing * ownDelay + targetClosing * theirDelay
-        return drift * (desyncPercent / 100.0)
-    }
+    private fun pingDrift(me: LocalPlayer, target: LivingEntity): Double = ReachArithmetic.drift(
+        selfClosing = selfClosing,
+        targetClosing = targetClosing,
+        myPingMs = me.ping,
+        theirPingMs = (target as? Player)?.ping ?: 0,
+        percent = desyncPercent,
+    )
 
     /**
      * Keeps the closing speeds of both sides, as a maximum that decays instead of a snapshot: one
@@ -829,8 +830,8 @@ object ModuleTriggerBotPlus : ClientModule(
         val own = max(ownTowards, if (me.vehicle != null) ownMovement else 0.0)
         val their = (-target.deltaMovement.dot(direction)).coerceAtLeast(0.0)
 
-        selfClosing = max(own, selfClosing * CLOSING_DECAY)
-        targetClosing = max(their, targetClosing * CLOSING_DECAY)
+        selfClosing = ReachArithmetic.closing(own, selfClosing)
+        targetClosing = ReachArithmetic.closing(their, targetClosing)
     }
 
     /**

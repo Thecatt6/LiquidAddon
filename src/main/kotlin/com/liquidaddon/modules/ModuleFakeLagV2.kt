@@ -1,6 +1,8 @@
 package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
+import com.liquidaddon.modules.fakelag.HeldPacket
+import com.liquidaddon.modules.fakelag.HoldRamp
 import net.ccbluex.liquidbounce.config.types.list.Tagged
 import net.ccbluex.liquidbounce.event.events.AttackEntityEvent
 import net.ccbluex.liquidbounce.event.events.BlinkPacketEvent
@@ -47,7 +49,6 @@ import net.minecraft.world.entity.projectile.arrow.AbstractArrow
 import net.minecraft.world.phys.Vec3
 import java.util.function.Predicate
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import kotlin.random.Random
@@ -133,9 +134,6 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
      * teleport. 40 ticks = 2 seconds.
      */
     private const val MAX_HOLD_TICKS = 40
-
-    /** How many ticks of hold the module may gain in one tick. Losing is capped at one, below. */
-    private const val RAMP_UP_TICKS = 4
 
     /** Tick starts remembered, enough for the longest hold plus the longest Repel window. */
     private const val MAX_TICK_HISTORY = 128
@@ -401,11 +399,8 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
 
         // Up fast, down one tick per tick: losing two ticks at once would deliver two of our ticks
         // inside one server tick, which is the pattern every "post packet" check is looking for.
-        heldTicks = when {
-            desired > heldTicks -> min(desired, heldTicks + RAMP_UP_TICKS)
-            desired < heldTicks -> heldTicks - 1
-            else -> heldTicks
-        }.coerceIn(0, MAX_HOLD_TICKS)
+        // The counting lives in [HoldRamp.next], where it can be tested.
+        heldTicks = HoldRamp.next(heldTicks, desired, MAX_HOLD_TICKS)
 
         release()
         debugLine(now, serverPos)
@@ -454,12 +449,27 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
         // to the server out of order - the rubber-banding, "hacks bugging out" kind of wrong, which
         // is exactly what entering water used to do. While the hold drains (water, gui, eating,
         // death) new packets are queued too and leave with the drain, one whole tick per tick.
-        if (!shouldHold()) {
-            if (!holding) {
+        val mayHold = shouldHold()
+
+        if (mayHold && flushOn.matchesAny(packet)) {
+            // Your own interactions make the connection catch up instead of being held with
+            // everything else: the hold drops to zero one tick per tick and stays there for a
+            // moment, so a hit or a place is late by at most the hold in force when it happened,
+            // and never after. A burst would be sooner, and would be flagged: releasing the held
+            // ticks together with a newer interaction puts a dig, place or swing behind the move
+            // packet of an older tick inside one server tick, which every "post packet" check knows.
+            catchUpUntil = System.currentTimeMillis() + CATCH_UP_MS
+        }
+
+        // The order the packets leave in is decided by [HoldRamp.packet], not here: a packet must
+        // never overtake an older one, and the drain must end with one tick of ours, alone.
+        when (HoldRamp.packet(holding, heldTicks, mayHold)) {
+            HeldPacket.PASS -> {
                 event.action = BlinkManager.Action.PASS
                 return@handler
             }
-            if (heldTicks == 0) {
+
+            HeldPacket.FLUSH_ALL -> {
                 // The drain is over: what is left in the queue is only the tick we are inside,
                 // because every older tick left at the last boundary. Letting it go now, alone,
                 // keeps every tick in its own server tick and frees the rest of this one.
@@ -468,15 +478,8 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
                 event.action = BlinkManager.Action.PASS
                 return@handler
             }
-            // Still draining: queue, so nothing overtakes the ticks that are left.
-        } else if (flushOn.matchesAny(packet)) {
-            // Your own interactions make the connection catch up instead of being held with
-            // everything else: the hold drops to zero one tick per tick and stays there for a
-            // moment, so a hit or a place is late by at most the hold in force when it happened,
-            // and never after. A burst would be sooner, and would be flagged: releasing the held
-            // ticks together with a newer interaction puts a dig, place or swing behind the move
-            // packet of an older tick inside one server tick, which every "post packet" check knows.
-            catchUpUntil = System.currentTimeMillis() + CATCH_UP_MS
+
+            HeldPacket.QUEUE -> Unit
         }
 
         holding = true
@@ -725,7 +728,7 @@ object ModuleFakeLagV2 : ClientModule("FakeLagV2", Categories.LIQUIDADDON) {
             return
         }
 
-        val index = tickStarts.size - 1 - heldTicks
+        val index = HoldRamp.cutoffIndex(tickStarts.size, heldTicks)
         if (index >= 0) {
             flushBefore(tickStarts[index])
         }
