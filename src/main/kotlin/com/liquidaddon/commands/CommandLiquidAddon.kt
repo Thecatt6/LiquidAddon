@@ -87,11 +87,18 @@ object CommandLiquidAddon : CommandRegistrar {
                             // limiter had to cut a rise, and the biggest rise the gates asked for.
                             // `jump` is that ask, measured before the limiter: above a hundred it
                             // carries the engagement's jitter (see Slew.worstAsk), and what was
-                            // actually given on that tick is at most the drawn rate either way.
+                            // actually given on that tick is at most the drawn rate either way. A
+                            // silent session carries one field more when the wire guard had work:
+                            // `wire N` counts the runs of three identical deltas it broke
+                            // (RepeatGuard).
                             append(
                                 ", slew %d, dips %d, jump %d%%".format(
                                     core.slewBites, core.dipCount, core.worstGateJumpPct
-                                )
+                                ) +
+                                    // Runs of three identical deltas the silent wire guard broke:
+                                    // zero in a session that never repeated, so the field stays out
+                                    // of the line until the guard has work to show.
+                                    if (core.wireBreaks > 0) ", wire %d".format(core.wireBreaks) else ""
                             )
                         }
                         val line = AiStats.format(core.stats.snapshot(), core.aiStrengthNow) + stalls

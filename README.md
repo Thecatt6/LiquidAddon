@@ -170,6 +170,26 @@ attack only on an entity — see the table above.
 None of this is a bypass measurement. What is counted here is the **shape** — bands, gaps, order,
 ramp rates — not how any anti-cheat reacts to it.
 
+## Three identical deltas never leave in a row
+
+A silent aim has no hand behind it, so nothing dithers its wire the way a mouse dithers a hand's: a
+steady chase quantizes to the same mouse counts every tick, and a rest re-sends the same rotation
+every tick. Both read as a run of identical `(deltaYaw, deltaPitch)` pairs — the shape a "constant
+rotations" heuristic counts, and the shape that arrived from a server as `Aim (Constant)`,
+`Info: Constant rotations (3)`, with an `Aim (Linear)` sibling on the same window.
+
+`aiming/RepeatGuard.kt` sits on the silent wire — every step and every rest — and makes three
+identical pairs in a row impossible: the third leaves moved by **one mouse count** on one axis, so
+the wire stays on the mouse lattice instead of carrying an invented angle. The break alternates
+sign, and alternates axis on rests, so a long rest breathes one count out and one count back
+instead of walking off or stamping a fixed period. The visible path keeps its own dithering (the
+frames, the hand on the mouse) and does not need the guard. `/liquidaddon ai` reports the guard's
+work as `wire N` on silent sessions that repeated; zero means the field stays out of the line.
+
+Whether any anticheat stops flagging after this is **not measured**. What is measured, in
+`RepeatGuardTest`, is that the named shape cannot leave the class: no triple of identical pairs,
+breaks of exactly one count, alternation, and no break at all when there is no lattice to stay on.
+
 ## Two profiles, one click
 
 The two settings this add-on is meant to be run on are presets, not a list of numbers to type:
