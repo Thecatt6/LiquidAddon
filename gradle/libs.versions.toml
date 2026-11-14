@@ -12,9 +12,12 @@ kotlin = "2.4.20"
 fabric-kotlin = "1.14.1+kotlin.2.4.20"
 
 # The add-on compiles against the client itself; there is no separate API artifact.
-# Pinned to the exact release the in-game probe of `/liquidaddon ai` confirmed running
-# (`client 0.42.0`), so a republish of the same line can never change what this builds against.
-liquidbounce = "0.42.0"
+# Pinned to the exact release artifact, so a republish of the same line can never change what this
+# builds against. Two version strings exist for one release, and they are not the same: the mod
+# metadata carries `mod_version` alone - `0.42.0`, which is what the in-game probe of
+# `/liquidaddon ai` reads - while maven publishes `mod_version + "+" + minecraft`, i.e.
+# `0.42.0+26.3` (see `publishVersion` in the client's build script). The pin is the maven one.
+liquidbounce = "0.42.0+26.3"
 
 [libraries]
 minecraft = { group = "com.mojang", name = "minecraft", version.ref = "minecraft" }
