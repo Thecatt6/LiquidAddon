@@ -1,6 +1,7 @@
 package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
+import com.liquidaddon.modules.blockhit.BlockGate
 import net.ccbluex.liquidbounce.config.autoconfig.AutoConfig
 import net.ccbluex.liquidbounce.config.types.list.Tagged
 import net.ccbluex.liquidbounce.event.events.AttackEntityEvent
@@ -407,9 +408,9 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
             return@handler
         }
 
-        // `delay - 1`: the tick of the click is already running, so the first tick that can open a
-        // block is the next one, and that is what both 0 and 1 mean.
-        startIn = (delay - 1).coerceAtLeast(0)
+        // The tick of the click is already running, so the first tick that can open a block is the
+        // next one, and that is what both 0 and 1 mean - see [BlockGate.startIn].
+        startIn = BlockGate.startIn(delay)
         note("block hit planned (in $startIn ticks, $blockTicks ticks long)")
     }
 
@@ -498,25 +499,16 @@ object ModuleBlockHit : ClientModule("BlockHit", Categories.LIQUIDADDON) {
      */
     private fun gateReason(me: LocalPlayer): String? {
         val tick = me.tickCount
+        val sinceRelease = if (lastReleaseTick == IDLE) null else tick - lastReleaseTick
+        val sinceAttack = if (lastAttackTick == IDLE) null else tick - lastAttackTick
 
-        if (lastReleaseTick != IDLE) {
-            val since = tick - lastReleaseTick
-            if (since < releaseCooldown) {
-                return "released $since ticks ago (cooldown $releaseCooldown)"
-            }
-        }
-
-        if (lastAttackTick != IDLE) {
-            val since = tick - lastAttackTick
-            if (since < attackGap) {
-                return "your attack was $since ticks ago (gap $attackGap)"
-            }
-            if (since < attackGap + 1 && sameRotationAsAttack(me)) {
-                return "same rotation as your attack"
-            }
-        }
-
-        return null
+        return BlockGate.reason(
+            sinceRelease = sinceRelease,
+            releaseCooldown = releaseCooldown,
+            sinceAttack = sinceAttack,
+            attackGap = attackGap,
+            sameRotationAsAttack = sinceAttack != null && sameRotationAsAttack(me),
+        )
     }
 
     /** Whether the aim is (still) exactly where it was when the last attack left. */

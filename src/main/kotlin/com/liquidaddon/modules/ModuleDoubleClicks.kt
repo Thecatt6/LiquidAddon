@@ -112,7 +112,8 @@ object ModuleDoubleClicks : ClientModule("DoubleClicks", Categories.LIQUIDADDON)
         // consumes this tick, so the first extra can only run on a later tick. One follow-up per
         // tick in total: the left queue is drained first, so a right click can wait a tick longer
         // when three left follow-ups are still pending.
-        val planned = attackScheduler.takeNext(delay) ?: useScheduler.takeNext(delay) ?: return@handler
+        val planned = DoubleClickScheduler.takeNextFrom(attackScheduler, useScheduler, delay)
+            ?: return@handler
         sendExtra(planned)
     }
 

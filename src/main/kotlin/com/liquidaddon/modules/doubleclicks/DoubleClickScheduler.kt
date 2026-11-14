@@ -16,6 +16,22 @@ internal enum class ExtraClick {
 internal class DoubleClickScheduler {
     companion object {
         const val MAX_EXTRA_CLICKS = 3
+
+        /**
+         * The one follow-up this tick is allowed to send, out of the two buttons: the left queue is
+         * asked first, and the right one is only touched when the left has nothing to give.
+         *
+         * Both halves matter. Minecraft handles every queued click inside one tick, so two
+         * follow-ups leaving together would be a burst at a rate no hand produces; and because
+         * [takeNext] counts the tick down even when it returns nothing, the tick the left button
+         * fires is a tick the right queue keeps — which is what leaves its own follow-ups `delay`
+         * ticks apart from each other instead of bunched up.
+         */
+        fun takeNextFrom(
+            attack: DoubleClickScheduler,
+            use: DoubleClickScheduler,
+            delayTicks: Int,
+        ): ExtraClick? = attack.takeNext(delayTicks) ?: use.takeNext(delayTicks)
     }
 
     private val pending = ArrayDeque<ExtraClick>()

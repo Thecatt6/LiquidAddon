@@ -2,6 +2,8 @@ package com.liquidaddon.modules
 
 import com.liquidaddon.Categories
 import com.liquidaddon.modules.jumpreset.JumpResetHud
+import com.liquidaddon.modules.jumpreset.ResetOutcome
+import com.liquidaddon.modules.jumpreset.ResetRoll
 import net.ccbluex.liquidbounce.event.events.MovementInputEvent
 import net.ccbluex.liquidbounce.event.events.PacketEvent
 import net.ccbluex.liquidbounce.event.events.TransferOrigin
@@ -258,24 +260,40 @@ object ModuleJumpReset : ClientModule("JumpReset", Categories.LIQUIDADDON) {
             return
         }
 
-        if (Random.nextInt(100) < accuracy) {
-            pendingJump = perfectOffset
-            pendingPerfect = true
-            pendingLabel = "perfect"
-            note("perfect jump planned (in $perfectOffset ticks, hurtTime=$HURT_PERFECT)")
-            return
-        }
+        // One roll decides the attempt. The bands behind it are counted in [ResetRoll], so the
+        // split this module is read as from the outside - 85% right, 7.5% late, 7.5% nothing at the
+        // default Accuracy - is a class with tests instead of a chain of Random calls nobody can
+        // see the proportions of.
+        when (
+            val outcome = ResetRoll.outcome(
+                roll = Random.nextInt(ResetRoll.BANDS),
+                accuracy = accuracy,
+                lateRoll = Random.nextInt(ResetRoll.BANDS),
+                lateMin = LATE_MIN,
+                lateMax = LATE_MAX,
+            )
+        ) {
+            ResetOutcome.Perfect -> {
+                pendingJump = perfectOffset
+                pendingPerfect = true
+                pendingLabel = "perfect"
+                note("perfect jump planned (in $perfectOffset ticks, hurtTime=$HURT_PERFECT)")
+            }
 
-        // A miss, and a real one: either the hand is late, or the hand does not move at all.
-        pendingPerfect = false
-        if (Random.nextBoolean()) {
-            pendingJump = perfectOffset + LATE_MIN + Random.nextInt(LATE_MAX - LATE_MIN + 1)
-            pendingLabel = "late"
-            note("mistimed jump: too late (in $pendingJump ticks)")
-        } else {
-            pendingJump = -1
-            pendingLabel = ""
-            note("mistimed jump: no reaction")
+            // A miss, and a real one: either the hand is late, or the hand does not move at all.
+            is ResetOutcome.Late -> {
+                pendingPerfect = false
+                pendingJump = perfectOffset + outcome.ticks
+                pendingLabel = "late"
+                note("mistimed jump: too late (in $pendingJump ticks)")
+            }
+
+            ResetOutcome.NoJump -> {
+                pendingPerfect = false
+                pendingJump = -1
+                pendingLabel = ""
+                note("mistimed jump: no reaction")
+            }
         }
     }
 

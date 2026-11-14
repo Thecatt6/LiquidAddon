@@ -135,4 +135,49 @@ class DoubleClickSchedulerTest {
         assertNull(scheduler.takeNext(1))
         assertNull(scheduler.takeNext(1))
     }
+
+    @Test
+    fun `only one follow-up leaves in a tick, left before right`() {
+        val attack = DoubleClickScheduler()
+        val use = DoubleClickScheduler()
+        attack.recordOriginal(2, ExtraClick.ATTACK)
+        use.recordOriginal(2, ExtraClick.USE)
+
+        val ticks = (0..5).map { DoubleClickScheduler.takeNextFrom(attack, use, 1) }
+
+        // Tick 0 is the original's own input tick: nothing extra may ride along with it.
+        assertEquals(listOf(null, ExtraClick.ATTACK, ExtraClick.ATTACK, ExtraClick.USE, ExtraClick.USE, null), ticks)
+        assertEquals(0, attack.pendingCount)
+        assertEquals(0, use.pendingCount)
+    }
+
+    @Test
+    fun `the right button goes on a tick the left has nothing to give`() {
+        val attack = DoubleClickScheduler()
+        val use = DoubleClickScheduler()
+        use.recordOriginal(1, ExtraClick.USE)
+
+        assertNull(DoubleClickScheduler.takeNextFrom(attack, use, 1))
+        assertEquals(ExtraClick.USE, DoubleClickScheduler.takeNextFrom(attack, use, 1))
+        assertNull(DoubleClickScheduler.takeNextFrom(attack, use, 1))
+    }
+
+    @Test
+    fun `the right queue keeps its own spacing while the left button fires`() {
+        val attack = DoubleClickScheduler()
+        val use = DoubleClickScheduler()
+        attack.recordOriginal(1, ExtraClick.ATTACK)
+        use.recordOriginal(1, ExtraClick.USE)
+
+        val ticks = (0..7).map { DoubleClickScheduler.takeNextFrom(attack, use, 3) }
+
+        // Both queues count down from the same original click, so the right follow-up lands on the
+        // tick after the left one. What it never does is land on the *same* tick: the tick the left
+        // button fires is a tick the right queue keeps, which is also why two right follow-ups stay
+        // `delay` ticks apart from each other instead of coming out in a burst.
+        assertEquals(
+            listOf(null, null, null, ExtraClick.ATTACK, ExtraClick.USE, null, null, null),
+            ticks,
+        )
+    }
 }
