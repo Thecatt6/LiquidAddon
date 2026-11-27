@@ -161,10 +161,22 @@ enum class Smoothing(override val tag: String) : Tagged {
 }
 
 /**
- * Who computes the step: [MATH] is the curve, [AI] is the model LiquidBounce already trained.
+ * Who computes the step.
+ *
+ *  - [MATH] is the curve in this file: a share of the remaining angle per tick, bent by [Smoothing];
+ *  - [AI] is the combat model LiquidBounce already trained on recorded human fights (a 6 → 2
+ *    regression, one step per tick);
+ *  - [ABC] is the **ABCurves** continuous planner — the port of the author's own Fabric port
+ *    (`dev.abcurves.api.ContinuousPlanner`), running as pure Kotlin here (see
+ *    `com.liquidaddon.abcurses`). It is the only one of the three that plans a *movement* instead of
+ *    a step: a 32 ms commitment at a time, with a motor network choosing among sixteen candidate
+ *    ProDMP trajectories, a selector scoring them against the previous plan, and two event heads
+ *    that decide when to brake and when to hold still. Everything else the module does — the cone,
+ *    the gates, the mouse lattice, the hand on top of it — is unchanged, so the three engines are
+ *    interchangeable from one tick to the next.
  */
 enum class Engine(override val tag: String) : Tagged {
-    MATH("Math"), AI("AI")
+    MATH("Math"), AI("AI"), ABC("ABCurves")
 }
 
 /**
@@ -229,7 +241,18 @@ enum class Preset(override val tag: String) : Tagged {
      * instead of the curve — better through direction changes, but a machine's answer rather than
      * a known formula, so it is the one to move to once the log is clean.
      */
-    PROFILE_A("Profile A"), PROFILE_B("Profile B")
+    PROFILE_A("Profile A"), PROFILE_B("Profile B"),
+
+    /**
+     * The daily profile with the **ABCurves** planner instead of the curve: the same gates, the same
+     * lattice, the same hand on top, but the movement under all of it is the continuous planner's —
+     * an approach that accelerates, a brake that ends on the target and a hold that is still.
+     *
+     * It is a preset of its own rather than a line in the engine dropdown because switching engine
+     * is only half of what makes the stream behave: `ABCStrength`, `ABCResync` and the weaker
+     * `PitchAssist` of the daily profile are what keep it an assist.
+     */
+    ABC("ABCurves")
 }
 
 /**
@@ -267,6 +290,38 @@ internal interface AimSettings {
     val aiYawMultiplier: Float
     val aiPitchMultiplier: Float
     val aiCorrection: Float
+
+    /**
+     * How much of the ABCurves plan is taken, in percent (`Engine = ABC`).
+     *
+     * The planner answers with a movement, not a fraction: `100` lets it walk the path it drew,
+     * which is the only setting at which the path keeps its shape (its acceleration, its brake, its
+     * settle). Lower values take a fraction of a human movement, which is a shape no hand makes;
+     * the slider is there for a model that turned out too strong for a server, not as a throttle.
+     */
+    val abcStrength: Float get() = 100f
+
+    /**
+     * How far the camera may be from where the ABCurves stream thinks it is, in mouse counts,
+     * before the stream is restarted on the camera's position.
+     *
+     * The stream plans a movement that the camera is supposed to be following. When the player
+     * takes the aim back by hand, the camera leaves that path, and a stream that kept planning
+     * towards the old goal would pull the view back to it. Sixteen counts is about a third of a
+     * degree at the default sensitivity: a hand's own jitter, not a turn.
+     */
+    val abcResyncCounts: Float get() = 16f
+
+    /**
+     * Whether this module can run the ABCurves engine at all, i.e. whether [abcSettings] answers.
+     *
+     * `false` is for a setting list with no aim of its own to plan: a fireball rotation owner, a
+     * placement helper. Those keep the curve even with `Engine = ABC` selected, and say so.
+     */
+    val supportsAbc: Boolean get() = false
+
+    /** The ABCurves values, as the stream reads them; `null` when [supportsAbc] is false. */
+    fun abcSettings(): AbcSettings? = null
 
     /**
      * How much of the model's answer is taken, in percent. `100` lets the model decide the step.
@@ -484,6 +539,38 @@ internal class AimValues(
     val aiStrengthValue = group.float("AIStrength", 100f, 0f..100f, "%")
     override val aiStrength by aiStrengthValue
 
+    /**
+     * The share of the ABCurves plan taken, in percent (`Engine = ABC`). The plan is a movement a
+     * hand would make over 32 ms; `100` is that movement, and anything under it is a fraction of a
+     * hand, which the model was never fitted to produce.
+     */
+    val abcStrengthValue = group.float("ABCStrength", 100f, 10f..100f, "%")
+    override val abcStrength by abcStrengthValue
+
+    /**
+     * How far the camera may drift from the ABCurves stream before the stream is restarted on it,
+     * in mouse counts. `0` restarts on every tick, which throws away the brake the engine exists
+     * for; `64` at the default sensitivity is over a degree, where the stream starts pulling the
+     * view back.
+     */
+    val abcResyncValue = group.float("ABCResync", 16f, 2f..64f, "counts")
+    override val abcResyncCounts by abcResyncValue
+
+    override val supportsAbc get() = true
+
+    /**
+     * The ABCurves stream reads five values: how fast the aim may travel ([maxSpeed]), how much of
+     * the vertical it may take ([pitchAssist]), how much of the plan it takes ([abcStrength]) and
+     * how far the camera may leave the plan before the stream is restarted on it
+     * ([abcResyncCounts]).
+     */
+    override fun abcSettings(): AbcSettings = object : AbcSettings {
+        override val maxSpeed: Float get() = this@AimValues.maxSpeed
+        override val pitchAssist: Float get() = this@AimValues.pitchAssist
+        override val abcStrength: Float get() = this@AimValues.abcStrength
+        override val abcResyncCounts: Float get() = this@AimValues.abcResyncCounts
+    }
+
     /** Share of the vertical correction, relative to the horizontal one (humans track yaw better). */
     val pitchAssistValue = group.float("PitchAssist", 50f, 0f..100f, "%")
     override val pitchAssist by pitchAssistValue
@@ -676,7 +763,16 @@ internal class AimValues(
         val aiYawMultiplier: Float = 1.5f,
         val aiPitchMultiplier: Float = 1f,
         val aiCorrection: Float = 12f,
-        val aiStrength: Float = 100f
+        val aiStrength: Float = 100f,
+        /**
+         * The ABCurves sliders, `null` when this profile has no opinion on the planner.
+         *
+         * `null` is not the same as the default: a complete profile that does not name them leaves
+         * whatever the player chose alone, which is what every profile written before the engine
+         * existed should do to a slider it knows nothing about.
+         */
+        val abcStrength: Float? = null,
+        val abcResync: Float? = null
     )
 
     /**
@@ -790,11 +886,33 @@ internal class AimValues(
             aiYawMultiplier = 1.2f, aiPitchMultiplier = 1f, aiCorrection = 10f,
             aiHand = AiHandMode.ON
         )
+
+        // The daily profile with the ABCurves planner underneath. `ABCResync` is the one number
+        // that is the engine's own: 16 counts (about a third of a degree at default sensitivity) is
+        // where a hand's own jitter stops and a deliberate turn starts, i.e. where the stream should
+        // stop following its old plan and continue from the camera.
+        //
+        // `Strength` is written this time, and only this time: the planner does not answer "a share
+        // of the angle", it answers "a movement", and the share of it that is taken is `ABCStrength`
+        // (100 — the whole plan, the only value at which its shape survives). Leaving `Strength` in
+        // the player's hands here would mean the curve's share quietly scaling a movement that was
+        // never a share of anything.
+        Preset.ABC -> dailyProfile.copy(
+            engine = Engine.ABC, strength = 100f, abcStrength = 100f, abcResync = 16f,
+            // The planner draws the vertical part of the movement itself, and it draws it as a
+            // hand: the axis still gets the daily profile's 50%, which is the share a hand covers.
+            pitchAssist = 50f
+        )
     }
 
-    /** The two profiles that leave `Range`, `Fov`, `Strength` and `MaxSpeed` to the player. */
+    /**
+     * The profiles that leave `Range`, `Fov`, `Strength` and `MaxSpeed` to the player.
+     *
+     * `ABCurves` is one of them for `Range`/`Fov`/`MaxSpeed`, and writes `Strength` itself: on that
+     * engine the share of the angle is not what the engine answers with (see [Preset.ABC]).
+     */
     private fun isDailyProfile(preset: Preset) =
-        preset == Preset.PROFILE_A || preset == Preset.PROFILE_B
+        preset == Preset.PROFILE_A || preset == Preset.PROFILE_B || preset == Preset.ABC
 
     /**
      * Writes [Preset] into the module's values, so the GUI always shows what is actually being
@@ -814,6 +932,8 @@ internal class AimValues(
         aiPitchMultiplierValue.set(p.aiPitchMultiplier)
         aiCorrectionValue.set(p.aiCorrection)
         aiStrengthValue.set(p.aiStrength)
+        p.abcStrength?.let { abcStrengthValue.set(it) }
+        p.abcResync?.let { abcResyncValue.set(it) }
         pitchAssistValue.set(p.pitchAssist)
         aimPointValue.set(p.aimPoint)
         predictValue.set(p.predict)
@@ -860,8 +980,9 @@ internal class AimValues(
 
         // The daily profiles are designed around a nudge, and they do not touch these two: an "A"
         // running at Strength 90 is no longer the profile that was designed, and saying so here beats
-        // reading it off an anti-cheat log.
-        if (isDailyProfile(preset) && (strength > 50f || maxSpeed > 12f)) {
+        // reading it off an anti-cheat log. `ABCurves` writes its own `Strength` (the planner's answer
+        // is a movement, and a fraction of it is a shape no hand makes), so it is not one of them.
+        if (isDailyProfile(preset) && preset != Preset.ABC && (strength > 50f || maxSpeed > 12f)) {
             // One line, built first: `format` binds to a single literal, so a concatenation has to
             // be put together before the placeholders are filled.
             val note = "§7[" + group.name + "] §e" + preset.tag +
@@ -939,6 +1060,19 @@ internal class AimassistCore(
 
     /** The session telemetry of this engine, for `/liquidaddon ai`: pure counters, see [AiStats]. */
     val stats = AiStats()
+
+    /**
+     * The ABCurves stream of this engine (`Engine = ABC`), or `null` while that engine is not in
+     * use. One per aim engine: the stream's state *is* the movement, so two modules must never
+     * share one.
+     */
+    private val abc: AbcEngine? = if (values.supportsAbc) AbcEngine { values.abcSettings() } else null
+
+    /** The ABCurves engine's own line for the telemetry, `null` when the module has none. */
+    val abcStatus: String? get() = abc?.status
+
+    /** ABCurves telemetry for `/liquidaddon ai`: the stream's own line, or `null` without one. */
+    val abcLine: String? get() = abc?.status
 
     /** Freezes [StallGuard] has seen in this session: the suffix of the `/liquidaddon ai` line. */
     val stallCount: Int get() = stalls.stalls
@@ -1286,6 +1420,9 @@ internal class AimassistCore(
         get() = currentTarget?.name?.string?.take(8) ?: ""
 
     fun onEnable() {
+        // The stream is bound to the camera it started on, so it is restarted on every enable: the
+        // module can be switched off mid-movement and back on with the view somewhere else.
+        abc?.reset()
         currentTarget = null
         lastSent = null
         previousAim = null
@@ -1352,6 +1489,7 @@ internal class AimassistCore(
         // Nothing to put back by hand: not silent the camera already is the aim (the module only
         // ever moves it a fraction of the way), and silent the manager drops every request whose
         // provider is not running anymore.
+        abc?.reset()
         currentTarget = null
         lastSent = null
         previousAim = null
@@ -1759,8 +1897,34 @@ internal class AimassistCore(
             } else {
                 null
             }
+            // The ABCurves stream is a movement, not a share: it is asked for the step the plan
+            // wants *now*, and the gates above say whether any of it is granted at all. It comes
+            // back as a pair of degrees, already in the units the caps below speak.
+            val abc = if (engine == Engine.ABC) {
+                abcStep(me, aim, goal, allowance)
+            } else {
+                null
+            }
 
-            if (ai != null) {
+            if (abc is AbcAnswer.Hold) {
+                // A hold is the engine's answer, not its absence: the plan says the hand is not
+                // moving, and the one thing that must not happen here is the curve taking the tick
+                // instead — that is the difference between a movement that settles and a staircase.
+                hold()
+                debugLine(lastAiNote)
+                return
+            }
+            val abcMove = (abc as? AbcAnswer.Move)?.step
+            if (abcMove != null) {
+                stepYaw = abcMove.first
+                stepPitch = abcMove.second
+                // Telemetry on the same shape the AI engine reports: what the engine drives against
+                // what the curve would have driven on this tick's remaining angle.
+                val curveShare = pull * shape(deltaYaw) * allowance
+                telemetry = AiStats.Step(aiYaw = stepYaw, curveYaw = deltaYaw * curveShare)
+                telemetryCurvePitch = deltaPitch * curveShare * (pitchAssist / 100f)
+                correcting = true
+            } else if (ai != null) {
                 // The model answers with the movement of a whole human tick, so its answer *is* the
                 // strength: [aiStrength] says how much of it is taken (100 in both daily profiles —
                 // anything less is a fraction of a hand, a shape no hand makes), [aiCorrection] only
@@ -2447,6 +2611,96 @@ internal class AimassistCore(
             Rotation(me.yRot, me.xRot)
         }
 
+    // --- ABCurves ---------------------------------------------------------------------------
+
+    /** What the ABCurves engine answered on a tick. */
+    private sealed interface AbcAnswer {
+        /** The plan's own step, in degrees, already scaled by `ABCStrength` and `PitchAssist`. */
+        class Move(val step: Pair<Float, Float>) : AbcAnswer
+
+        /**
+         * The plan asked for nothing: a settle, a brake that has finished, or a gate that granted
+         * no help this tick. The tick is still — the curve must *not* take it.
+         */
+        object Hold : AbcAnswer
+
+        /**
+         * There is no stream to ask: the archive is missing, the engine failed to load, or the
+         * planner refused the goal. The curve takes the tick, and `/liquidaddon ai` says why.
+         */
+        object Missing : AbcAnswer
+    }
+
+    /**
+     * One tick of the ABCurves engine: the camera, the goal, and the share of help the gates above
+     * granted, in; a step in degrees out — or the explicit "hold" / "missing" the caller needs to
+     * tell the engine's silence apart from its failure.
+     *
+     * The stream is one per engine, not one per target (see [AbcEngine]). What restarts it is the
+     * camera leaving the plan by more than `ABCResync` counts, which the engine itself detects.
+     *
+     * The two caps that belong to the module — `MaxSpeed` and the per-tick pitch limit — are applied
+     * *after* the stream, in [tick]; what is scaled here is only what `ABCStrength` and `PitchAssist`
+     * say, because those describe the engine's own strength.
+     */
+    private fun abcStep(
+        me: LocalPlayer,
+        aim: Rotation,
+        goal: Rotation,
+        allowance: Float,
+    ): AbcAnswer {
+        val engine = abc ?: return AbcAnswer.Missing
+        // The gate is the assist's and it has already been applied to every other engine this tick.
+        // A tick the gates closed grants nothing, so the stream is not asked: its clock does not
+        // advance and its plan continues from where it was on the tick the gate opens again.
+        if (allowance <= 0f) {
+            lastAiNote = "abc gated (no help this tick)"
+            return AbcAnswer.Hold
+        }
+        // Where the camera is: the silent rotation if this module owns the packets, the camera
+        // otherwise — the stream must know the rotation the server will see, not the one on screen.
+        val cameraYaw = if (silent) (lastSent ?: aim).yaw.toDouble() else me.yRot.toDouble()
+        val cameraPitch = if (silent) (lastSent ?: aim).pitch.toDouble() else me.xRot.toDouble()
+        val step = runCatching {
+            engine.step(cameraYaw, cameraPitch, goal.yaw.toDouble(), goal.pitch.toDouble())
+        }.getOrElse {
+            stats.noteFallback(AiStats.Fallback.OTHER)
+            lastAiNote = "abc error: ${it.javaClass.simpleName}"
+            return AbcAnswer.Missing
+        }
+        if (step == null) {
+            // Two very different silences: a reason means the engine could not answer and the curve
+            // must take over; no reason means it answered "still", which the caller must honour.
+            val reason = engine.unavailableReason()
+            if (reason != null) {
+                stats.noteFallback(AiStats.fallbackKind(reason))
+                lastAiNote = "abc: $reason"
+                return AbcAnswer.Missing
+            }
+            lastAiNote = engine.note
+            return AbcAnswer.Hold
+        }
+        // `allowance` is the gate the assist already applied to every engine this tick: no help
+        // where the crosshair is off the box, where the hand is resting, or where a beat of rest is
+        // running. The stream's movement is scaled by it rather than cut by it, so the tick the gate
+        // opens there is no step the camera has to catch up on.
+        val gate = allowance.coerceIn(0f, 1f)
+        lastAiNote = "%s gate %.2f".format(engine.note, gate)
+        stats.noteRequested()
+        // The pair the drift guard and `/liquidaddon ai` average: what the stream drove this tick,
+        // against what the curve would have driven on the same remaining angle.
+        val curveShare = pull * shape(Mth.wrapDegrees(goal.yaw - aim.yaw)) * gate
+        stats.noteUsed(
+            aiMag = hypot(step.first, step.second) * gate,
+            curveMag = hypot(
+                Mth.wrapDegrees(goal.yaw - aim.yaw) * curveShare,
+                (goal.pitch - aim.pitch) * curveShare * (pitchAssist / 100f),
+            ),
+            step = AiStats.Step(step.first * gate, Mth.wrapDegrees(goal.yaw - aim.yaw) * curveShare),
+        )
+        return AbcAnswer.Move(step.first * gate to step.second * gate)
+    }
+
     // --- the trained model ------------------------------------------------------------------
 
     /**
@@ -2824,7 +3078,7 @@ internal class AimassistCore(
             ) + "§7strength=%.0f%% max=%.1f° own=%.2f° counts=%+d/%+d noise=%.1f (set %d) hand=%.1f under=%d".format(
                 strength, maxSpeed, lastOwnYaw, lastCountsYaw ?: 0, lastCountsPitch ?: 0,
                 mouseNoise * handNoise, mouseNoise, handNoise, handUndershoot
-            ) + " guard=%d hand=%.2f (%.1f cnt)".format(patterns.repairs, hand.activity, handCounts) + (if (engine == Engine.AI) " §7$lastAiNote" else "") + warnings()
+            ) + " guard=%d hand=%.2f (%.1f cnt)".format(patterns.repairs, hand.activity, handCounts) + (if (engine == Engine.AI || engine == Engine.ABC) " §7$lastAiNote" else "") + warnings()
         )
     }
 
@@ -2870,6 +3124,16 @@ internal class AimassistCore(
         }
         if (engine == Engine.AI && aiUnavailableReason != null) {
             append(" §cAI fallback (${aiUnavailableReason})")
+        }
+        if (engine == Engine.ABC) {
+            val reason = abc?.unavailableReason()
+            if (reason != null) append(" §cABCurves fallback ($reason)")
+        }
+        // The engine is selectable from every module that owns an aim, but only the ones with a
+        // setting list of their own can feed it: a fireball owner keeps the curve, and says so
+        // rather than leaving a selected engine that silently does nothing.
+        if (engine == Engine.ABC && !values.supportsAbc) {
+            append(" §cABCurves needs an aiming module (this one keeps the curve)")
         }
     }
 }

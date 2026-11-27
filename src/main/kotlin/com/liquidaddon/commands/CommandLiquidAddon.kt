@@ -101,7 +101,8 @@ object CommandLiquidAddon : CommandRegistrar {
                                     if (core.wireBreaks > 0) ", wire %d".format(core.wireBreaks) else ""
                             )
                         }
-                        val line = AiStats.format(core.stats.snapshot(), core.aiStrengthNow) + stalls
+                        val abc = core.abcLine?.let { " | " + it } ?: ""
+                        val line = AiStats.format(core.stats.snapshot(), core.aiStrengthNow) + stalls + abc
                         chat("§7[${core.ownerName}] §f$line")
                     }
                     1
