@@ -48,7 +48,14 @@ internal class AimbotValues(group: ValueGroup) : AimSettings {
 
     /**
      * `Math` is the curve above, `AI` is the combat model LiquidBounce already trained on recorded
-     * human fights — the same one the assist can use, and the same trick: nothing is trained here.
+     * human fights, `ABCurves` the continuous planner — the same three the assist offers, and the
+     * same trick: nothing is trained here.
+     *
+     * `ABCurves` is the one that changes the *shape* of the aim rather than its speed: the planner
+     * commits 32 ms of movement at a time, brakes onto the target instead of passing it, and holds
+     * still when it has arrived, so an aimbot on it decelerates into a body instead of arriving at
+     * full speed. Its two sliders are fixed here (`ABCStrength` 100, `ABCResync` 16) because an
+     * aimbot has no hand to be assisted and nothing to be gentle towards.
      */
     override val engine by group.enumChoice("Engine", Engine.MATH)
     override val aiModel by group.enumChoice("AIModel", AiModel.MODEL_19KC8KP)
@@ -145,6 +152,22 @@ internal class AimbotValues(group: ValueGroup) : AimSettings {
 
     override val aiYawMultiplier get() = 1.5f
     override val aiPitchMultiplier get() = 1f
+
+    /** The aimbot runs the ABCurves planner too: the same stream, aimed by itself. */
+    override val supportsAbc get() = true
+
+    /** The plan whole: the aimbot goes where it decided to go, it does not nudge towards it. */
+    override val abcStrength get() = 100f
+
+    /** A stream that keeps chasing a position the aim left behind is a stream pulling backwards. */
+    override val abcResyncCounts get() = 16f
+
+    override fun abcSettings(): AbcSettings = object : AbcSettings {
+        override val maxSpeed: Float get() = this@AimbotValues.maxSpeed
+        override val pitchAssist: Float get() = this@AimbotValues.pitchAssist
+        override val abcStrength: Float get() = this@AimbotValues.abcStrength
+        override val abcResyncCounts: Float get() = this@AimbotValues.abcResyncCounts
+    }
 
     /** How much of the remaining angle the model's answer is completed with, when `Engine = AI`. */
     override val aiCorrection get() = 30f

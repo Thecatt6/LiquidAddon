@@ -33,6 +33,13 @@ import net.ccbluex.liquidbounce.utils.render.TargetRenderer
  *    single tick, `Smoothing` the curve, so a 10° error becomes 3.5° then 2.3° — never a flick;
  *  - `Engine = AI` replaces the curve with the combat model LiquidBounce already trained on
  *    recorded human fights, scaled by the same `Strength` (`AICorrection` finishes the approach);
+ *  - `Engine = ABCurves` replaces it with the ABCurves continuous planner — the same model the
+ *    author's own Fabric port runs (`dev.abcurves.api.ContinuousPlanner`), re-implemented in Kotlin
+ *    in this add-on (`com.liquidaddon.abcurses`, weights bundled, no native runtime). It plans a
+ *    32 ms movement at a time (motor → sixteen candidate trajectories → selector → brake/hold
+ *    events) and is sampled by wall clock, so the approach accelerates, brakes onto the target and
+ *    holds still like the movement it was trained on. `ABCStrength` takes the share of it,
+ *    `ABCResync` is how far the camera may leave the plan before the stream continues from it;
  *  - every step is snapped to whole mouse counts (`GcdFix`, `GcdDither`) with the rounding residual
  *    carried over, and `FrameInterpolation` spreads a tick's step over the frames of that tick;
  *  - `TurnCheck`, `FadeIn`, `OnlyOnCrosshair`, `ReactionDelay`/`ReactionRandom`, `IdleChance`,
@@ -52,8 +59,9 @@ import net.ccbluex.liquidbounce.utils.render.TargetRenderer
  *
  * The module ships on `Preset = Profile A`: the curve, the camera helped, `Silent` off, the
  * crosshair gate on, and the whole humanization of the engine underneath. `Profile B` is the same
- * profile with the trained model instead of the curve (see [AimValues]). Both of them leave `Range`,
- * `Fov`, `Strength` and `MaxSpeed` alone — those four are the player's own aim — while `Blatant`,
+ * profile with the trained model instead of the curve, `ABCurves` the same profile with the
+ * continuous planner (see [AimValues]). All of them leave `Range`, `Fov`, `Strength` and `MaxSpeed`
+ * alone — those four are the player's own aim — while `Blatant`,
  * `Legit`, `Ghost`, `Closet` and `AI` are complete profiles that write every slider, so the ClickGUI
  * always shows what the module is really doing.
  *

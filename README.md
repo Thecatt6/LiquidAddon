@@ -190,18 +190,60 @@ Whether any anticheat stops flagging after this is **not measured**. What is mea
 `RepeatGuardTest`, is that the named shape cannot leave the class: no triple of identical pairs,
 breaks of exactly one count, alternation, and no break at all when there is no lattice to stay on.
 
-## Two profiles, one click
+## Three profiles, one click
 
-The two settings this add-on is meant to be run on are presets, not a list of numbers to type:
-**`Preset = Profile A`** (the default) and **`Preset = Profile B`** in the Aimassist. They are
-declared once in `AimValues.dailyProfile`, so B is literally A with the engine swapped — they
-cannot drift apart.
+The settings this add-on is meant to be run on are presets, not a list of numbers to type:
+**`Preset = Profile A`** (the default), **`Preset = Profile B`** and **`Preset = ABCurves`** in the
+Aimassist. They are declared once in `AimValues.dailyProfile`, so B and ABCurves are literally A with
+the engine (and the engine's own two sliders) swapped — they cannot drift apart.
 
-| | Profile A (default) | Profile B |
-|---|---|---|
-| Engine | `Math` — the curve | `AI` — LiquidBounce's trained combat model |
-| `AIYawMultiplier` / `AICorrection` / `AIStrength` | 1.2 / 10 / 100% | 1.2 / 10 / 100% |
-| everything else | the same | the same |
+| | Profile A (default) | Profile B | ABCurves |
+|---|---|---|---|
+| Engine | `Math` — the curve | `AI` — LiquidBounce's trained combat model | `ABCurves` — the continuous planner |
+| `AIYawMultiplier` / `AICorrection` / `AIStrength` | 1.2 / 10 / 100% | 1.2 / 10 / 100% | — |
+| `ABCStrength` / `ABCResync` | — | — | 100% / 16 counts |
+| everything else | the same | the same | the same |
+
+### The third engine: ABCurves
+
+`Engine = ABCurves` (or `Preset = ABCurves`) swaps the per-tick formula for a **continuous
+planner**, ported to plain Kotlin in `abcurses/` and wrapped for the module in `aiming/AbcEngine.kt`.
+It is not a different way to compute the same number: it plans a *movement*.
+
+- every **32 ms** the policy decides whether the hand is **moving**, **braking** or **holding**.
+  Moving picks one of sixteen candidate trajectories with a motor network and a selector network
+  scores them against the plan in flight; braking is a C2 curve that ends *on* the target instead of
+  past it; holding is genuinely still;
+- the plan is a commitment: no new target and no jitter can change a movement already in flight, so
+  what reaches the packets is a path a hand could have produced, not a control loop answering every
+  packet with a packet of its own;
+- the samples are 1 ms apart and are played back by wall clock, then the module's own hand goes on
+  top (`MouseNoise`, the GCD lattice, `PatternGuard`, `RepeatGuard`) exactly as it does for the other
+  two engines.
+
+Two sliders belong to it. **`ABCStrength`** says how much of the plan is taken — the plan is a
+movement a hand makes, so `100` is the only setting at which it keeps its shape. **`ABCResync`** says
+how far the camera may leave the plan (default 16 counts ≈ ⅓°) before the planner continues from the
+camera instead of from its own path; that is what keeps an assist from pulling the view back to a goal
+the player has already left. `ABCResync` costs the brake when it is too small and costs honesty when
+it is too large.
+
+The engine answers `hold` explicitly, and a hold is *the engine's answer*: the tick writes nothing and
+the curve does **not** take it, which is the difference between a movement that settles and a
+staircase. Only a missing or failed engine falls back to the curve, and `/liquidaddon ai` says why
+(`abc failed: …`) instead of leaving a crosshair that does not move unexplained.
+
+The planner runs from a bundled archive (`resources/liquidaddon/abcurses/weights.npz`, 830 kB) that
+is hashed at load, and its parity is measured, not asserted: `AbcParityTest` replays four recorded
+scenarios (straight, moving, zigzag, far) against a reference dump produced by the original
+Python/ONNX implementation and requires every one of the 1150 samples within 0.01 mouse counts
+(worst measured deviation 1.0e-3). `AbcMathTest` pins the pieces the model cannot be allowed to drift
+on — the MT19937 word stream against numpy, the draw laws, the GRU's gate order, the brake's
+endpoints, and the count↔degree conversion.
+
+It also lives on the Aimbot — `AimbotAI` has `supportsAbc`, so the engine can be selected there too —
+and, like the AI engine, it is *not* available where there is no aim to plan (the fireball rotation
+owners keep the curve).
 
 Both write the whole *behaviour* of the module:
 

@@ -18,6 +18,9 @@ Stato rilevante:
   `Strength`. `AIStrength 100` = il modello decide il passo; `PitchAssist` non dimezza più il
   verticale; il clamp permette l'overshoot (`1 + Overshoot%`); `AiReach` sfuma la risposta fuori dai
   6 blocchi / 30°.
+- **`Engine = ABCurves`** (nuovo, PR successiva): terzo motore accanto a `Math` e `AI`, port in Kotlin
+  puro di `abcurves/_continuous` (planner + runtime + kernel + rng + pesi ONNX convertiti). Non è una
+  formula per tick: pianifica **movimenti** da 32 ms. Vedi A7.
 - `configs/model_data.py` — stadio dati della pipeline AI (**non toccarlo**, è a posto).
 - `configs/check_config.py` — validatore config contro i sorgenti del client.
 - Test: `kotlin.test` + JUnit 5, `src/test/kotlin/com/liquidaddon/...`.
@@ -146,6 +149,31 @@ sistematicamente dalla curva sullo stesso input, è quello il momento di non fid
 - `en_us.json`: descrizione per ogni nuovo valore.
 - `configs/check_config.py` verde, output incollato.
 - `configs/liquidaddon-pvp189-ghost.json`: aggiungere i nuovi valori che servono a Profile B.
+
+### A7 — Il terzo motore: ABCurves  *(fatto)*
+
+L'AI di LiquidBounce risponde "quanto si muove una mano in questo tick". ABCurves risponde a una
+domanda diversa: **quale movimento sta facendo la mano** — e quella differenza è tutta la feature.
+
+- `abcurses/` — port senza dipendenze native: `Tensor.kt` (GRU ordine ONNX `z/r/h`, `linear_before_reset`,
+  MT19937 e le due leggi di estrazione), `PhysicalKernels.kt`, `AbcWeights.kt` (lettore NPZ + SHA-256),
+  `AbcRuntime.kt` (planner + stream di posizioni a 1 ms). Circa 1150 campioni confrontati con il
+  riferimento Python/ONNX in `AbcParityTest`: peggior scarto **1.0e-3** counts su una tolleranza di 1e-2.
+- `aiming/AbcEngine.kt` — il ponte col modulo: obiettivo in gradi, passo in gradi, campionamento a
+  orologio (1 ms, resto sub-millisecondo portato avanti), `ABCStrength` (10..100) e `ABCResync`
+  (2..64 counts). Nessuna dipendenza da Minecraft: è testato da `AbcEngineTest` senza client.
+- **Resync, non restart**: quando la camera si allontana dal piano oltre `ABCResync` counts lo stream
+  viene *rebasato* — la posizione si sposta, i 32 spostamenti già impegnati no. Un restart butterebbe
+  via la frenata, che è la metà del movimento per cui il motore esiste.
+- **Hold ≠ fallback**: un tick in cui il piano dice "fermo" è una risposta, e la curva **non** prende
+  quel tick (sarebbe la scaletta che il motore evita). Solo un motore assente o guasto ricade sulla
+  curva, e `/liquidaddon ai` ne stampa il motivo.
+- Preset `ABCurves` = profilo giornaliero con il planner sotto, `Strength 100`, `ABCStrength 100`,
+  `ABCResync 16`, `PitchAssist 50`. Le due liste (`AimValues`, `AimbotValues`) possono selezionarlo;
+  i moduli che non hanno una mira da pianificare (fireball) restano sulla curva e lo dichiarano.
+- Non misurato: il bypass di questo motore rispetto agli altri due. Non c'è una misura pubblica, e
+  nessuno dei test qui sopra la produce — il test dice che il port è fedele al riferimento, non che
+  sia più o meno rilevabile.
 
 ## Definition of done
 
