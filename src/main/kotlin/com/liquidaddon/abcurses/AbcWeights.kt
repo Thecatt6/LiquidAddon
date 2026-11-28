@@ -234,6 +234,19 @@ internal class AbcWeights private constructor(
          * Absolute resource path of the archive this port was written against, and what it must hash
          * to.
          *
+         * ## Why 818 kB of weights are committed rather than downloaded
+         *
+         * The archive is the model. A download at first use would make the engine fail on exactly the
+         * sessions where a missing file is least visible (a server with no outbound access, a client
+         * behind a proxy), and would make the parity test depend on the network instead of on the
+         * bytes. It is committed for the same reason the reference recording next to the test is:
+         * both are the *measurement* this port is built on, and neither is reproducible from the
+         * source alone.
+         *
+         * It is not a build artefact and it does not grow: the model is frozen, and its digest is
+         * checked on every load (see [SHA256]), so a replaced or truncated copy is refused instead of
+         * driving the aim with different weights.
+         *
          * The path is absolute and starts at `resources/` because that is where an add-on's files
          * land in the jar: `src/main/resources/resources/<id>/…` is the client's own resource folder,
          * read from the jar directly, and never a Minecraft resource pack. The leading slash matters

@@ -26,7 +26,10 @@ class AbcParityTest {
         val cases = AbcReference.load()
         assertTrue(cases.isNotEmpty(), "no reference case next to the test")
         for (case in cases) {
-            val weights = AbcWeights.load(WeightsStream.open(), verify = true)
+            // The cursor lives on the case, not on the assertion: a rerun in the same JVM (a filtered
+            // rerun, a Gradle retry) must start from the first sample again.
+            case.pointsRead = 0
+            val weights = AbcWeights.load(archive(), verify = true)
             val runtime = AbcRuntime(weights, case.seed, case.startX, case.startY)
             var worst = 0.0
             var at = 0L
@@ -60,7 +63,7 @@ class AbcParityTest {
     /** The archive the reference was produced from loads, hashes and shapes up. */
     @Test
     fun `the bundled archive is the frozen one`() {
-        val weights = AbcWeights.load(WeightsStream.open(), verify = true)
+        val weights = AbcWeights.load(archive(), verify = true)
         assertEquals(128 * 21, weights.velocityBasis.size)
         assertEquals(128, weights.carryVelocity.size)
     }
@@ -68,11 +71,20 @@ class AbcParityTest {
     /** A different archive must be refused, not silently used. */
     @Test
     fun `a corrupted archive is refused by its digest`() {
-        val bytes = WeightsStream.read()
+        val bytes = archive().use { it.readBytes() }
         bytes[bytes.size / 2] = (bytes[bytes.size / 2] + 1).toByte()
         val failure = runCatching { AbcWeights.load(bytes.inputStream(), verify = true) }.exceptionOrNull()
         assertTrue(failure is AbcAssetException, "expected AbcAssetException, got $failure")
     }
+
+    /**
+     * The archive as the jar carries it: `/resources/<id>/…` is the client's own resource folder, and
+     * `Class.getResourceAsStream` with an absolute path is how the client reads it too — an add-on's
+     * files must not live under `assets/`, which is a resource pack everything else can see.
+     */
+    private fun archive() = AbcParityTest::class.java
+        .getResourceAsStream("/resources/liquidaddon/abcurses/weights.npz")
+        ?: error("the add-on resources do not contain the archive")
 
     private companion object {
         /**
@@ -83,6 +95,8 @@ class AbcParityTest {
         const val TOLERANCE = 0.01
     }
 }
+
+/** Reads the reference recordings out of the test resources. */
 
 /** Reads the reference recordings out of the test resources. */
 internal object AbcReference {
@@ -228,7 +242,7 @@ internal object AbcReference {
         }
 
         private fun literal(word: String, value: Any?): Any? {
-            assertTrue(text.startsWith(word, at)) { "expected $word at $at" }
+            assertTrue(text.startsWith(word, at), "expected $word at $at")
             at += word.length
             return value
         }
@@ -240,19 +254,11 @@ internal object AbcReference {
         private fun peek(c: Char): Boolean = at < text.length && text[at] == c
 
         private fun expect(c: Char) {
-            assertTrue(peek(c)) { "expected '$c' at $at, found '${if (at < text.length) text[at] else "eof"}'" }
+            assertTrue(
+                peek(c),
+                "expected '$c' at $at, found '${if (at < text.length) text[at] else "eof"}'",
+            )
             at++
         }
     }
-}
-
-/** The bundled archive, as a stream, for the tests. */
-internal object WeightsStream {
-
-    private val path = "/resources/liquidaddon/abcurses/weights.npz"
-
-    fun open() = AbcReference::class.java.getResourceAsStream(path)
-        ?: error("the add-on resources do not contain $path")
-
-    fun read(): ByteArray = open().use { it.readBytes() }
 }
