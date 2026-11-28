@@ -115,6 +115,15 @@ private const val PITCH_STEP_MAX = 3.0f
  * meaning "on the target", it just stops being a step. */
 private const val CROSSHAIR_BAND_DEG = 1.5f
 
+/**
+ * Ticks a still hand must be costing before the module says so once: three seconds.
+ *
+ * Long enough that a hand pausing between genuine movements never triggers it (the rest beats of
+ * the engine are shorter), short enough that a player who expected help and got none sees the
+ * reason before they start reinstalling.
+ */
+private const val STILL_HAND_TICKS = 60
+
 /** The rest beats of a hand, as three bands an irregular clock draws from: ordinary beats, a
  * long hold, and the rare long absence. A metronome of pauses is a clock a check can sit on. */
 private val PAUSE_BEAT = 700..2200
@@ -1062,17 +1071,32 @@ internal class AimassistCore(
     val stats = AiStats()
 
     /**
-     * The ABCurves stream of this engine (`Engine = ABC`), or `null` while that engine is not in
-     * use. One per aim engine: the stream's state *is* the movement, so two modules must never
-     * share one.
+     * The ABCurves stream of this engine, created the first time the engine is actually used.
+     *
+     * Deliberately lazy. A stream owns the parsed weights and the whole planner, and a module that
+     * runs `Engine = Math` must pay neither for the parse at start nor for the 818 kB archive being
+     * on the classpath. It is also the only way a failure inside the engine can stay inside it: an
+     * engine built in a field initialiser that throws takes the whole module down before the first
+     * tick, which is exactly the kind of failure the other two engines must never inherit.
      */
-    private val abc: AbcEngine? = if (values.supportsAbc) AbcEngine { values.abcSettings() } else null
+    private var abcEngine: AbcEngine? = null
 
-    /** The ABCurves engine's own line for the telemetry, `null` when the module has none. */
-    val abcStatus: String? get() = abc?.status
+    /** The stream, if this engine is on it; `null` for every other engine. */
+    private val abc: AbcEngine?
+        get() {
+            if (!values.supportsAbc || values.engine != Engine.ABC) return null
+            return abcEngine ?: AbcEngine { values.abcSettings() }.also { abcEngine = it }
+        }
+
+    /**
+     * The ABCurves engine's own line for the telemetry, `null` when no stream was ever built.
+     *
+     * Reads [abcEngine] and not [abc]: reporting a line must never be what creates the stream.
+     */
+    val abcStatus: String? get() = abcEngine?.status
 
     /** ABCurves telemetry for `/liquidaddon ai`: the stream's own line, or `null` without one. */
-    val abcLine: String? get() = abc?.status
+    val abcLine: String? get() = abcEngine?.let { it.status + " | " + it.note }
 
     /** Freezes [StallGuard] has seen in this session: the suffix of the `/liquidaddon ai` line. */
     val stallCount: Int get() = stalls.stalls
@@ -1395,6 +1419,16 @@ internal class AimassistCore(
     private var tickCount = 0L
 
     private var assisted = 0
+
+    /**
+     * Ticks in a row where the hand gate was the one thing holding the aim back.
+     *
+     * With `HandOnly` on — which is the default and what both daily profiles ask for — a still
+     * mouse means nothing is written at all, by design. That is indistinguishable from a module
+     * that is broken, so it gets said out loud once, with the two ways out named (see [stillHand]).
+     */
+    private var stillHandTicks = 0
+    private var stillHandSaid = false
     private var debugTick = 0
     private var scanCount = 0
     private var validCount = 0
@@ -1421,8 +1455,11 @@ internal class AimassistCore(
 
     fun onEnable() {
         // The stream is bound to the camera it started on, so it is restarted on every enable: the
-        // module can be switched off mid-movement and back on with the view somewhere else.
-        abc?.reset()
+        // module can be switched off mid-movement and back on with the view somewhere else. Only if
+        // one was ever built — this must not create it.
+        abcEngine?.reset()
+        stillHandTicks = 0
+        stillHandSaid = false
         currentTarget = null
         lastSent = null
         previousAim = null
@@ -1489,7 +1526,7 @@ internal class AimassistCore(
         // Nothing to put back by hand: not silent the camera already is the aim (the module only
         // ever moves it a fraction of the way), and silent the manager drops every request whose
         // provider is not running anymore.
-        abc?.reset()
+        abcEngine?.reset()
         currentTarget = null
         lastSent = null
         previousAim = null
@@ -1697,8 +1734,12 @@ internal class AimassistCore(
             // the camera instead of dropping the request (see [release]).
             currentTarget = null
             release(me)
+            // Names the engine and the silent wire on the same line: a report of "no movement at
+            // all" can then be separated into "nothing was ever targeted", "the gates took it" and
+            // "the step was written but the wire was not", without a second run.
             debugLine(
-                "idle (blocked=$blocked scan=$scanCount valid=$validCount, last gate=$lastGate)"
+                "idle (blocked=$blocked scan=$scanCount valid=$validCount, last gate=$lastGate, " +
+                    "engine=" + engine.tag + ", silent=" + (if (silent) "on" else "off") + ")"
             )
             return
         }
@@ -1840,6 +1881,7 @@ internal class AimassistCore(
             // a view that does not move is exactly what a hand at rest looks like in the packets.
             if (handOnly && handShare <= 0f) {
                 hold()
+                stillHand()
                 debugLine(
                     "hand at rest (own=%.2f° = %.2f counts, needs %.1f)".format(
                         ownYaw, handCounts, handThreshold
@@ -1847,6 +1889,8 @@ internal class AimassistCore(
                 )
                 return
             }
+            // The hand moved: the gate is no longer what is holding the aim back.
+            stillHandTicks = 0
 
             // Never help a turn the player did not want. The gate blends instead of cutting: a
             // gentle drift away weakens the pull, a real push silences it, and nowhere along the
@@ -3089,6 +3133,24 @@ internal class AimassistCore(
         if (message == lastDebugMessage) return
         lastDebugMessage = message
         chat("§7[" + owner.name + "] §f$message")
+    }
+
+    /**
+     * Counts the ticks a still hand is costing, and says so once.
+     *
+     * This is the one gate that can hold the aim back forever without anything being wrong: with
+     * `HandOnly` on, a mouse that does not move means the module writes nothing, on every engine
+     * and every preset, and the module looks dead. Three seconds of it is not a hand resting
+     * between movements any more, so the line is printed once per session — with the two settings
+     * that explain it, so the next report is a configuration rather than a bug hunt.
+     */
+    private fun stillHand() {
+        if (++stillHandTicks < STILL_HAND_TICKS || stillHandSaid) return
+        stillHandSaid = true
+        val seconds = "%.1f".format(STILL_HAND_TICKS / 20f)
+        chat("§7[" + owner.name + "] §ethe aim is waiting for the mouse: HandOnly is on and " +
+                "the cursor has not moved for $seconds s, so nothing is written " +
+                "§7(HandOnly=false or HandThreshold=0 to assist a still hand)")
     }
 
     /**
